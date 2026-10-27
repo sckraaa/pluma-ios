@@ -1,0 +1,738 @@
+#!/usr/bin/env python3
+"""Turns a checkout of TelegramMessenger/Telegram-iOS into the Pluma client.
+
+Every change is an exact edit: the text it replaces must occur the expected
+number of times, or the whole run fails. An upstream update that moves any
+of these places stops the build here instead of producing a client that
+talks to Telegram or does not sign in. After the edits the result is checked
+again (no Telegram datacenter address or server key is left in the network
+code).
+
+The app's identity (bundle ID, api_id, api_hash, Team ID) is not an edit: it
+goes to the build configuration that Telegram-iOS's Make.py reads
+(--configurationPath), written here as build-system/pluma-configuration.json.
+
+Standard library only, so the CI and a developer machine run it as is.
+"""
+
+import argparse
+import base64
+import hashlib
+import ipaddress
+import json
+import pathlib
+import re
+import sys
+import textwrap
+
+# The targets of the app, as Make.py names their provisioning profiles
+# (build-system/Make/BuildConfiguration.py): bundle ID suffix, profile name,
+# and the suffix of the secret that holds the profile (README, Signing).
+TARGETS = (
+    ("", "Telegram", "MAIN"),
+    (".Share", "Share", "SHARE"),
+    (".NotificationService", "NotificationService", "NOTIFICATION_SERVICE"),
+    (".NotificationContent", "NotificationContent", "NOTIFICATION_CONTENT"),
+    (".Widget", "Widget", "WIDGET"),
+    (".SiriIntents", "Intents", "SIRI_INTENTS"),
+    (".BroadcastUpload", "BroadcastUpload", "BROADCAST_UPLOAD"),
+)
+
+# Telegram's own server keys (production, test) with the fingerprints the
+# server announces for them, and the key Telegram signs its backup address
+# records with. None of them may survive the patch.
+TELEGRAM_FINGERPRINTS = (0xD09D1D85DE64FD85, 0xB25898DF208D2603)
+TELEGRAM_KEY_LINES = (
+    "MIIBCgKCAQEA6LszBcC1LGzyr992NzE0ieY+BSaOW622Aa9Bd4ZHLl+TuFQ4lo4g",
+    "MIIBCgKCAQEAyMEdY1aR+sCR3ZSJrtztKTKqigvO/vBfqACJLZtS7QMgCGXJ6XIR",
+    "MIIBCgKCAQEAyr+18Rex2ohtVy8sroGPBwXD3DOoKCSpjDqYoXgCqB7ioln4eDCF",
+)
+
+# Telegram's address ranges (core.telegram.org/resources/cidr.txt) and the
+# one seed address outside them.
+TELEGRAM_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
+    "91.108.56.0/22", "91.108.4.0/22", "91.108.8.0/22", "91.108.16.0/22", "91.108.12.0/22",
+    "149.154.160.0/20", "91.105.192.0/23", "91.108.20.0/22", "185.76.151.0/24",
+    "2001:b28:f23d::/48", "2001:b28:f23f::/48", "2001:67c:4e8::/48", "2001:b28:f23c::/48", "2a0a:f280::/32",
+    "95.161.76.100/32",
+))
+
+# Where the network code lives: what verify() scans.
+NETWORK_DIRS = ("submodules/MtProtoKit", "submodules/TelegramCore/Sources", "submodules/TelegramVoip/Sources")
+
+NETWORK = "submodules/TelegramCore/Sources/Network/Network.swift"
+ACCOUNT = "submodules/TelegramCore/Sources/Account/Account.swift"
+SERIALIZATION = "submodules/TelegramCore/Sources/State/Serialization.swift"
+AUTH_KEYS = "submodules/MtProtoKit/Sources/MTDatacenterAuthMessageService.m"
+ENCRYPTION = "submodules/MtProtoKit/Sources/MTEncryption.m"
+BACKUP = "submodules/MtProtoKit/Sources/MTBackupAddressSignals.m"
+DNS = "submodules/MtProtoKit/Sources/MTDNS.m"
+CALLS = "submodules/TelegramVoip/Sources/OngoingCallContext.swift"
+APP_BUILD = "Telegram/BUILD"
+MAKE = "build-system/Make/Make.py"
+BUILD_CONFIGURATION = "build-system/Make/BuildConfiguration.py"
+VERSIONS = "versions.json"
+BAZELRC = ".bazelrc"
+
+# Written by the patch.
+CONFIGURATION = "build-system/pluma-configuration.json"
+PLUMA_BAZELRC = "pluma.bazelrc"
+
+# Everything the patch reads, edits or checks: the check job fetches only
+# these (ci/fetch-upstream.sh sparse).
+UPSTREAM_PATHS = (VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_DIRS
+
+
+class PatchError(Exception):
+    pass
+
+
+def src(indent, text):
+    """A block of source: text dedented, then every line indented by indent
+    (blank lines too, as Xcode leaves them), ending with a newline."""
+    lines = textwrap.dedent(text).strip("\n").split("\n")
+    return "".join(indent + line + "\n" for line in lines)
+
+
+def lines_pattern(text):
+    """A pattern for text whose blank lines may hold any indentation: Xcode
+    indents them to the depth of the code around them."""
+    body, end = (text[:-1], "\n") if text.endswith("\n") else (text, "")
+    return "\n".join("[ \t]*" if not l.strip() else re.escape(l) for l in body.split("\n")) + end
+
+
+# --- RSA key -----------------------------------------------------------------
+
+
+def _der_read(data, pos, tag):
+    if data[pos] != tag:
+        raise PatchError(f"RSA key: DER tag {data[pos]:#x} at {pos}, expected {tag:#x}")
+    pos += 1
+    length = data[pos]
+    pos += 1
+    if length & 0x80:
+        n = length & 0x7F
+        length = int.from_bytes(data[pos:pos + n], "big")
+        pos += n
+    return data[pos:pos + length], pos + length
+
+
+def parse_pkcs1_der(der):
+    """Returns (n, e) as big-endian bytes without leading zeros."""
+    seq, end = _der_read(der, 0, 0x30)
+    if end != len(der):
+        raise PatchError("RSA key: trailing data after the key")
+    n, pos = _der_read(seq, 0, 0x02)
+    e, pos = _der_read(seq, pos, 0x02)
+    if pos != len(seq):
+        raise PatchError("RSA key: unexpected fields in the key")
+    return n.lstrip(b"\0"), e.lstrip(b"\0")
+
+
+def parse_pkcs1_public_key(pem):
+    lines = [l.strip() for l in pem.strip().splitlines()]
+    if not lines or lines[0] != "-----BEGIN RSA PUBLIC KEY-----" or lines[-1] != "-----END RSA PUBLIC KEY-----":
+        raise PatchError("RSA key: expected a PKCS#1 PEM (BEGIN RSA PUBLIC KEY)")
+    try:
+        der = base64.b64decode("".join(lines[1:-1]), validate=True)
+    except ValueError:
+        raise PatchError("RSA key: the PEM body is not base64")
+    return parse_pkcs1_der(der)
+
+
+def _tl_bytes(b):
+    if len(b) < 254:
+        out = bytes([len(b)]) + b
+    else:
+        out = b"\xfe" + len(b).to_bytes(3, "little") + b
+    return out + b"\0" * (-len(out) % 4)
+
+
+def key_fingerprint(n, e):
+    """MTProto fingerprint, as MTRsaFingerprint computes it: the low 64 bits
+    of SHA1 over the TL-serialized modulus and exponent."""
+    digest = hashlib.sha1(_tl_bytes(n) + _tl_bytes(e)).digest()
+    return int.from_bytes(digest[-8:], "little")
+
+
+def canonical_pem(n, e):
+    def der_int(b):
+        if b[0] & 0x80:
+            b = b"\0" + b
+        return b"\x02" + _der_len(len(b)) + b
+
+    body = der_int(n) + der_int(e)
+    der = b"\x30" + _der_len(len(body)) + body
+    b64 = base64.b64encode(der).decode()
+    lines = [b64[i:i + 64] for i in range(0, len(b64), 64)]
+    return ["-----BEGIN RSA PUBLIC KEY-----", *lines, "-----END RSA PUBLIC KEY-----"]
+
+
+def _der_len(n):
+    if n < 0x80:
+        return bytes([n])
+    b = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return bytes([0x80 | len(b)]) + b
+
+
+def objc_key(pem, indent):
+    """The key as an Objective-C string literal in MtProtoKit's layout: the
+    first line after @", the others below it."""
+    lines = [f'"{l}\\n"' for l in pem[:-1]] + [f'"{pem[-1]}"']
+    return "@" + lines[0] + "".join(f"\n{indent}{l}" for l in lines[1:])
+
+
+# --- edits -------------------------------------------------------------------
+
+
+class Tree:
+    def __init__(self, root):
+        self.root = pathlib.Path(root)
+        if not (self.root / VERSIONS).is_file() or not (self.root / APP_BUILD).is_file():
+            raise PatchError(f"{root}: not a TelegramMessenger/Telegram-iOS checkout")
+
+    def read(self, rel):
+        return (self.root / rel).read_text(encoding="utf-8")
+
+    def write(self, rel, text):
+        p = self.root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+
+    def expect(self, rel, s, count=1):
+        found = self.read(rel).count(s)
+        if found != count:
+            raise PatchError(f"{rel}: {found} occurrences of {s!r}, expected {count}; upstream changed it")
+
+    def replace(self, rel, old, new, count=1):
+        text = self.read(rel)
+        found = text.count(old)
+        if found != count:
+            raise PatchError(f"{rel}: {found} occurrences of {old!r}, expected {count}")
+        self.write(rel, text.replace(old, new))
+
+    def replace_lines(self, rel, old, new, count=1):
+        """replace(), but blank lines of old match whatever indentation."""
+        text = self.read(rel)
+        out, found = re.subn(lines_pattern(old), lambda _: new, text)
+        if found != count:
+            raise PatchError(f"{rel}: {found} occurrences of {old.strip()[:80]!r}..., expected {count}")
+        self.write(rel, out)
+
+    def replace_body(self, rel, head, tail, body, must_contain=()):
+        """Replaces what lies between head and the first tail after it."""
+        text = self.read(rel)
+        if text.count(head) != 1:
+            raise PatchError(f"{rel}: {text.count(head)} occurrences of {head!r}, expected 1")
+        start = text.index(head) + len(head)
+        end = text.find(tail, start)
+        if end < 0:
+            raise PatchError(f"{rel}: no {tail!r} after {head!r}")
+        for s in must_contain:
+            if s not in text[start:end]:
+                raise PatchError(f"{rel}: the replaced block has no {s!r}; upstream changed it")
+        self.write(rel, text[:start] + body + text[end:])
+
+    def replace_block(self, rel, head, tail, block, must_contain=()):
+        """Replaces head, the first tail after it and what lies between."""
+        text = self.read(rel)
+        if text.count(head) != 1:
+            raise PatchError(f"{rel}: {text.count(head)} occurrences of {head!r}, expected 1")
+        start = text.index(head)
+        end = text.find(tail, start + len(head))
+        if end < 0:
+            raise PatchError(f"{rel}: no {tail!r} after {head!r}")
+        for s in must_contain:
+            if s not in text[start:end]:
+                raise PatchError(f"{rel}: the replaced block has no {s!r}; upstream changed it")
+        self.write(rel, text[:start] + block + text[end + len(tail):])
+
+    def network_sources(self):
+        for d in NETWORK_DIRS:
+            base = self.root / d
+            if not base.is_dir():
+                raise PatchError(f"{d}: missing; not a full checkout of the network code")
+            for p in sorted(base.rglob("*")):
+                if p.is_file() and p.suffix in (".swift", ".m", ".h", ".mm", ".c", ".cpp"):
+                    yield p.relative_to(self.root).as_posix()
+
+
+# --- configuration -----------------------------------------------------------
+
+
+def load_env(path):
+    out = {}
+    for n, line in enumerate(pathlib.Path(path).read_text().splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            raise PatchError(f"{path}:{n}: expected KEY=VALUE")
+        out[key.strip()] = value.strip()
+    return out
+
+
+class Config:
+    def __init__(self, upstream, app, server_ipv4, server_port, server_ipv6, rsa_pem, team_id):
+        def need(env, key):
+            if not env.get(key):
+                raise PatchError(f"{key} is not set")
+            return env[key]
+
+        self.layer = int(need(upstream, "UPSTREAM_LAYER"))
+        self.version = need(upstream, "UPSTREAM_VERSION")
+        self.xcode = need(upstream, "XCODE_VERSION")
+        self.bazel = need(upstream, "BAZEL_VERSION")
+
+        self.bundle_id = need(app, "PLUMA_BUNDLE_ID")
+        if not re.fullmatch(r"[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)+", self.bundle_id):
+            raise PatchError(f"PLUMA_BUNDLE_ID {self.bundle_id!r} is not a reverse-DNS bundle ID")
+        self.app_name = need(app, "PLUMA_APP_NAME")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 .-]{0,14}", self.app_name):
+            raise PatchError(f"PLUMA_APP_NAME {self.app_name!r}: up to 15 letters, digits, spaces, dots and dashes")
+        self.url_scheme = need(app, "PLUMA_URL_SCHEME")
+        if not re.fullmatch(r"[a-z][a-z0-9+.-]*", self.url_scheme) or self.url_scheme in ("tg", "telegram", "tonsite"):
+            raise PatchError(f"PLUMA_URL_SCHEME {self.url_scheme!r}: a URL scheme of Pluma's own")
+        self.api_id = int(need(app, "PLUMA_API_ID"))
+        if self.api_id <= 0:
+            raise PatchError("PLUMA_API_ID must be positive")
+        self.api_hash = need(app, "PLUMA_API_HASH")
+        if not re.fullmatch(r"[0-9a-f]{32}", self.api_hash):
+            raise PatchError("PLUMA_API_HASH must be 32 lowercase hex digits")
+
+        self.team_id = team_id
+        if not re.fullmatch(r"[A-Z0-9]{10}", team_id or ""):
+            raise PatchError(f"Team ID {team_id!r} is not an Apple Team ID (10 letters and digits)")
+
+        try:
+            self.ipv4 = str(ipaddress.IPv4Address(server_ipv4))
+        except ValueError:
+            raise PatchError(f"server IPv4 {server_ipv4!r} is not an IPv4 address (MtProtoKit needs an address, not a name)")
+        self.ipv6 = None
+        if server_ipv6:
+            try:
+                self.ipv6 = str(ipaddress.IPv6Address(server_ipv6))
+            except ValueError:
+                raise PatchError(f"server IPv6 {server_ipv6!r} is not an IPv6 address")
+        for a in filter(None, (self.ipv4, self.ipv6)):
+            if any(ipaddress.ip_address(a) in net for net in TELEGRAM_NETWORKS):
+                raise PatchError(f"server address {a} is Telegram's")
+        try:
+            self.port = int(server_port)
+        except ValueError:
+            self.port = 0
+        if not 0 < self.port < 65536:
+            raise PatchError(f"server port {server_port!r} is not a port")
+
+        self.n, self.e = parse_pkcs1_public_key(rsa_pem)
+        # MtProtoKit turns the PKCS#1 key into a SubjectPublicKeyInfo by
+        # gluing on the header of a 2048-bit key (MTRsa.m).
+        if len(self.n) * 8 != 2048 or int.from_bytes(self.e, "big") != 65537:
+            raise PatchError(f"RSA key: {len(self.n) * 8} bits, exponent {int.from_bytes(self.e, 'big')}; "
+                             "the clients expect 2048 bits and 65537")
+        self.rsa_pem = canonical_pem(self.n, self.e)
+        self.fingerprint = key_fingerprint(self.n, self.e)
+        if self.fingerprint in TELEGRAM_FINGERPRINTS:
+            raise PatchError("RSA key: this is Telegram's key")
+
+    def build_configuration(self):
+        """The configuration of Make.py (build-system/appstore-configuration.json
+        is upstream's)."""
+        return {
+            "bundle_id": self.bundle_id,
+            "api_id": str(self.api_id),
+            "api_hash": self.api_hash,
+            "team_id": self.team_id,
+            # No App Center crash reports, no App Store or in-app purchases.
+            "app_center_id": "0",
+            # A public build, as the App Store's: no internal debug features,
+            # and among them the reflector benchmark against Telegram's
+            # servers (TelegramUI AppDelegate).
+            "is_internal_build": "false",
+            "is_appstore_build": "true",
+            "appstore_id": "0",
+            "app_specific_url_scheme": self.url_scheme,
+            "premium_iap_product_id": "",
+            # Siri and iCloud need capabilities of their own; iCloud was one
+            # more source of Telegram's backup addresses.
+            "enable_siri": False,
+            "enable_icloud": False,
+        }
+
+
+# --- the patch ---------------------------------------------------------------
+
+
+SEED_OLD = src(" " * 12, """
+    let seedAddressList: [Int: [String]]
+
+    if testingEnvironment {
+        seedAddressList = [
+            1: ["149.154.175.10"],
+            2: ["149.154.167.40"],
+            3: ["149.154.175.117"]
+        ]
+    } else {
+        seedAddressList = [
+            1: ["149.154.175.50", "2001:b28:f23d:f001::a"],
+            2: ["149.154.167.50", "95.161.76.100", "2001:67c:4e8:f002::a"],
+            3: ["149.154.175.100", "2001:b28:f23d:f003::a"],
+            4: ["149.154.167.91", "2001:67c:4e8:f004::a"],
+            5: ["149.154.171.5", "2001:b28:f23f:f005::a"]
+        ]
+    }
+
+    for (id, ips) in seedAddressList {
+        context.setSeedAddressSetForDatacenterWithId(id, seedAddressSet: MTDatacenterAddressSet(addressList: ips.map { MTDatacenterAddress(ip: $0, port: 443, preferForMedia: false, restrictToTcp: false, cdn: false, preferForProxy: false, secret: nil) }))
+    }
+""")
+
+CLOUD_SOURCE_OLD = src(" " * 12, """
+    var wrappedAdditionalSource: MTSignal?
+    #if os(iOS)
+    if #available(iOS 10.0, *), !supplementary, arguments.isICloudEnabled {
+        var cloudDataContextValue: CloudDataContext?
+        if let value = cloudDataContext.with({ $0 }) {
+            cloudDataContextValue = value
+        } else {
+            cloudDataContextValue = makeCloudDataContext(encryptionProvider: arguments.encryptionProvider)
+            let _ = cloudDataContext.swap(cloudDataContextValue)
+        }
+
+        if let cloudDataContext = cloudDataContextValue {
+            wrappedAdditionalSource = MTSignal(generator: { subscriber in
+                let disposable = cloudDataContext.get(phoneNumber: .single(phoneNumber)).start(next: { value in
+                    subscriber?.putNext(value)
+                }, completed: {
+                    subscriber?.putCompletion()
+                })
+                return MTBlockDisposable(block: {
+                    disposable.dispose()
+                })
+            })
+        }
+    }
+    #endif
+""")
+
+DISCOVER_OLD = ("                context.setDiscoverBackupAddressListSignal(MTBackupAddressSignals.fetchBackupIps(testingEnvironment, "
+                "currentContext: context, additionalSource: wrappedAdditionalSource, phoneNumber: phoneNumber, "
+                "mainDatacenterId: datacenterId))\n")
+
+INITIAL_DC_OLD = src(" " * 24, """
+    #if DEBUG
+    let initialDatacenterId: Int = 1
+    #else
+    let initialDatacenterId: Int = 2
+    #endif
+""")
+
+WARMUP_OLD = src(" " * 12, """
+    var datacenterIds: [Int] = [1, 2]
+    if testingEnvironment {
+        datacenterIds = [3]
+    } else {
+        datacenterIds.append(contentsOf: [4])
+    }
+""")
+
+CALL_REFLECTOR_OLD = src(" " * 16, """
+    var unfilteredConnections: [CallSessionConnection]
+    unfilteredConnections = [connections.primary] + connections.alternatives
+
+    if version == "12.0.0" {
+        for connection in unfilteredConnections {
+            if case let .reflector(reflector) = connection {
+                unfilteredConnections.append(.reflector(CallSessionConnection.Reflector(
+                    id: 123456,
+                    ip: "91.108.9.38",
+                    ipv6: "",
+                    isTcp: true,
+                    port: 595,
+                    peerTag: reflector.peerTag
+                )))
+            }
+        }
+    }
+""")
+
+DNS_OLD = ("    return [[self resolveHostname:hostname] timeout:10.0 onQueue:[MTQueue concurrentDefaultQueue] "
+           "orSignal:[self resolveHostnameNative:hostname port:port]];\n")
+
+BACKUP_HEAD = ("+ (MTSignal * _Nonnull)fetchBackupIps:(bool)isTestingEnvironment currentContext:(MTContext * _Nonnull)currentContext "
+               "additionalSource:(MTSignal * _Nullable)additionalSource phoneNumber:(NSString * _Nullable)phoneNumber "
+               "mainDatacenterId:(NSInteger)mainDatacenterId {\n")
+BACKUP_BODY = ("    // pluma: no backup addresses. The DNS and CloudKit records they come\n"
+               "    // from are Telegram's and point at Telegram.\n"
+               "    return [MTSignal complete];")
+
+EXTENSIONS = src(" " * 4, """
+    extensions = select({
+        ":disableExtensionsSetting": [],
+        "//conditions:default": [
+            ":ShareExtension",
+            ":NotificationContentExtension",
+            ":NotificationServiceExtension" + notificationServiceExtensionVersion,
+            ":IntentsExtension",
+            ":WidgetExtension",
+            ":BroadcastUploadExtension",
+        ],
+    }),
+""")
+
+
+def required_configuration_keys(tree):
+    text = tree.read(BUILD_CONFIGURATION)
+    m = re.search(r"required_keys = \[(.*?)\]", text, re.S)
+    if not m:
+        raise PatchError(f"{BUILD_CONFIGURATION}: no required_keys; upstream changed it")
+    return set(re.findall(r"'([a-z_]+)'", m.group(1)))
+
+
+def patch(tree, c):
+    # The upstream is the one upstream.env describes: the schema layer the
+    # server speaks (ADR 0008 of the server repository), the version and the
+    # toolchain the CI installs.
+    tree.expect(SERIALIZATION, f"    public func currentLayer() -> UInt {{\n        return {c.layer}\n    }}\n")
+    versions = json.loads(tree.read(VERSIONS))
+    for key, want in (("app", c.version), ("xcode", c.xcode)):
+        if versions.get(key) != want:
+            raise PatchError(f"{VERSIONS}: {key} is {versions.get(key)!r}, upstream.env says {want!r}")
+    if versions.get("bazel", "").split(":")[0] != c.bazel:
+        raise PatchError(f"{VERSIONS}: bazel is {versions.get('bazel')!r}, upstream.env says {c.bazel!r}")
+
+    # What ci/build.sh relies on in Make.py: the build configurations, the
+    # code signing modes, the caches; and the targets the profiles are for.
+    for s in ("elif configuration == 'debug_sim_arm64':", "elif configuration == 'release_sim_arm64':",
+              "elif configuration == 'release_arm64':",
+              "    codesigning_group.add_argument(\n        '--xcodeManagedCodesigning',",
+              "    codesigning_group.add_argument(\n        '--codesigningInformationPath',",
+              "    cacheTypeGroup.add_argument(\n        '--cacheDir',",
+              "    parser.add_argument(\n        '--bazelUserRoot',",
+              "    buildParser.add_argument(\n        '--continueOnError',"):
+        tree.expect(MAKE, s)
+    for suffix, name, _ in TARGETS:
+        tree.expect(BUILD_CONFIGURATION, f"'{suffix}': '{name}'")
+    tree.expect(APP_BUILD, EXTENSIONS)
+    tree.expect(APP_BUILD, '    name = "disableProvisioningProfiles",\n')
+    tree.expect(APP_BUILD, '        ":disableProvisioningProfilesSetting": None,\n', count=10)
+    tree.expect(APP_BUILD, "        <string>group.{telegram_bundle_id}</string>\n")
+
+    # MtProtoKit: one datacenter, the Pluma server, for the production and
+    # the test backend alike.
+    addresses = ", ".join(f'"{a}"' for a in (c.ipv4, c.ipv6) if a)
+    seed = src(" " * 12, f"""
+        // pluma: a single datacenter, the Pluma server, on both backends.
+        let seedAddressList: [Int: [String]] = [
+            1: [{addresses}]
+        ]
+
+        for (id, ips) in seedAddressList {{
+            context.setSeedAddressSetForDatacenterWithId(id, seedAddressSet: MTDatacenterAddressSet(addressList: ips.map {{ MTDatacenterAddress(ip: $0, port: {c.port}, preferForMedia: false, restrictToTcp: false, cdn: false, preferForProxy: false, secret: nil) }}))
+        }}
+    """)
+    tree.replace_lines(NETWORK, SEED_OLD, seed)
+
+    # A fresh install starts on it, and the only keys it makes ahead are for it.
+    tree.replace_lines(ACCOUNT, INITIAL_DC_OLD,
+                 src(" " * 24, """
+                     // pluma: the server is datacenter 1.
+                     let initialDatacenterId: Int = 1
+                 """))
+    tree.replace_lines(ACCOUNT, WARMUP_OLD,
+                 src(" " * 12, """
+                     // pluma: the server is the only datacenter, on both backends.
+                     let datacenterIds: [Int] = [1]
+                 """))
+
+    # No backup addresses: Telegram publishes them in DNS records (fetched
+    # over Google's DNS-over-HTTPS) and in CloudKit, and they point at
+    # Telegram. The caller, and the library as well.
+    tree.replace_lines(NETWORK, CLOUD_SOURCE_OLD,
+                 "            // pluma: no backup addresses from CloudKit (see below).\n")
+    tree.replace(NETWORK, DISCOVER_OLD,
+                 "                // pluma: no backup addresses; Telegram's DNS and CloudKit records point at Telegram.\n")
+    tree.replace_body(BACKUP, BACKUP_HEAD, "\n}\n\n@end\n", BACKUP_BODY,
+                      must_contain=("fetchBackupIpsResolveGoogle:", "fetchConfigFromAddress:"))
+    # Proxy host names resolve through the system, not Google's DNS-over-HTTPS.
+    tree.replace(DNS, DNS_OLD,
+                 "    // pluma: the system resolver only, no DNS-over-HTTPS at Google.\n"
+                 "    return [self resolveHostnameNative:hostname port:port];\n")
+
+    # MtProtoKit: the server key replaces Telegram's production and test
+    # keys (the key is chosen by the fingerprint the server announces).
+    key = objc_key(c.rsa_pem, " " * 13)
+    keys = ("    dispatch_once(&onceToken, ^{\n"
+            "        // pluma: the key of the Pluma server, for both backends.\n"
+            "        testingPublicKeys = @[\n"
+            f"            [[MTDatacenterAuthPublicKey alloc] initWithPublicKey:{key}]\n"
+            "        ];\n"
+            "\n"
+            "        productionPublicKeys = @[\n"
+            f"            [[MTDatacenterAuthPublicKey alloc] initWithPublicKey:{key}]\n"
+            "        ];\n"
+            "    });\n")
+    tree.replace_block(AUTH_KEYS, "    dispatch_once(&onceToken, ^{\n        testingPublicKeys = @[\n", "    });\n", keys,
+                       must_contain=TELEGRAM_KEY_LINES[:2])
+    # The key of Telegram's backup address records: the records are off, and
+    # none of Telegram's keys stays in the client.
+    tree.replace_block(ENCRYPTION, '    NSString *keyString = @"-----BEGIN RSA PUBLIC KEY-----\\n"\n',
+                       '"-----END RSA PUBLIC KEY-----";\n',
+                       "    // pluma: the server's key; Telegram's backup address records are off.\n"
+                       f"    NSString *keyString = {objc_key(c.rsa_pem, '')};\n",
+                       must_contain=(TELEGRAM_KEY_LINES[2],))
+
+    # Calls: no extra TCP reflector of Telegram's for the 12.0.0 protocol.
+    tree.replace_lines(CALLS, CALL_REFLECTOR_OLD,
+                 src(" " * 16, """
+                     // pluma: the reflectors are the server's; no extra one of Telegram's.
+                     let unfilteredConnections: [CallSessionConnection] = [connections.primary] + connections.alternatives
+                 """))
+
+    # The name under the icon and in the share sheet, and the URL scheme of
+    # the app's own links (the widget opens the app with it). The bundle ID,
+    # the extensions' IDs and the App Group follow from the build
+    # configuration.
+    tree.replace(APP_BUILD, "    <key>CFBundleDisplayName</key>\n    <string>Telegram</string>\n",
+                 f"    <key>CFBundleDisplayName</key>\n    <string>{c.app_name}</string>\n", count=2)
+    tree.replace(APP_BUILD, "    <key>CFBundleName</key>\n    <string>Telegram</string>\n",
+                 f"    <key>CFBundleName</key>\n    <string>{c.app_name}</string>\n", count=7)
+    tree.replace(APP_BUILD, "                <string>telegram</string>\n",
+                 f"                <string>{c.url_scheme}</string>\n")
+
+    # The build configuration of Make.py, with exactly the keys it reads.
+    conf = c.build_configuration()
+    want = required_configuration_keys(tree)
+    if set(conf) != want:
+        raise PatchError(f"{BUILD_CONFIGURATION}: Make.py reads {sorted(want)}, the patch writes {sorted(conf)}")
+    tree.write(CONFIGURATION, json.dumps(conf, indent=2) + "\n")
+
+    # The Bazel flags of ci/build.sh (the caches; simulator builds without
+    # provisioning profiles): Make.py passes no flags of its own choosing.
+    rc = tree.read(BAZELRC)
+    if "try-import" in rc or PLUMA_BAZELRC in rc:
+        raise PatchError(f"{BAZELRC}: already imports a file; upstream changed it")
+    tree.write(BAZELRC, rc + ("" if rc.endswith("\n") else "\n")
+               + "\n# pluma: the flags of ci/build.sh.\n"
+               + f"try-import %workspace%/{PLUMA_BAZELRC}\n")
+
+
+IPV4 = re.compile(r"(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])")
+IPV6 = re.compile(r"(?<![0-9A-Za-z:])[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?![0-9A-Za-z:])")
+PEM_BLOCK = re.compile(r"-----BEGIN RSA PUBLIC KEY-----(.*?)-----END RSA PUBLIC KEY-----", re.S)
+
+
+def telegram_addresses(text):
+    found = []
+    for m in IPV4.finditer(text):
+        try:
+            a = ipaddress.IPv4Address(m.group(0))
+        except ValueError:
+            continue
+        if any(a in net for net in TELEGRAM_NETWORKS):
+            found.append(str(a))
+    for m in IPV6.finditer(text):
+        try:
+            a = ipaddress.IPv6Address(m.group(0))
+        except ValueError:
+            continue
+        if any(a in net for net in TELEGRAM_NETWORKS):
+            found.append(str(a))
+    return found
+
+
+def embedded_keys(text):
+    """The RSA keys in a source file: every PEM block whose body is base64
+    once the string literal syntax (quotes, \\n, line breaks) is gone."""
+    keys = []
+    for m in PEM_BLOCK.finditer(text):
+        body = re.sub(r'\\n|["\s]', "", m.group(1))
+        if len(body) < 300 or not re.fullmatch(r"[A-Za-z0-9+/]+=*", body):
+            continue  # code around the markers, not a key (MTRsa.m)
+        try:
+            keys.append(parse_pkcs1_der(base64.b64decode(body, validate=True)))
+        except (ValueError, IndexError, PatchError):
+            raise PatchError(f"an RSA key that does not parse: {body[:40]}...")
+    return keys
+
+
+def verify(tree, c):
+    """Checks the result independently of how the edits were made."""
+    keys = 0
+    for rel in tree.network_sources():
+        text = tree.read(rel)
+        addresses = telegram_addresses(text)
+        if addresses:
+            raise PatchError(f"{rel}: Telegram's address {addresses[0]} is still there")
+        for line in TELEGRAM_KEY_LINES:
+            if line in text:
+                raise PatchError(f"{rel}: Telegram's key {line[:24]}... is still there")
+        try:
+            found = embedded_keys(text)
+        except PatchError as e:
+            raise PatchError(f"{rel}: {e}")
+        for n, e in found:
+            if (n, e) != (c.n, c.e):
+                raise PatchError(f"{rel}: an RSA key other than the server's ({key_fingerprint(n, e):#018x})")
+        keys += len(found)
+    if keys != 3:
+        raise PatchError(f"the network code holds {keys} RSA keys, expected 3 (production, test, backup records)")
+
+    net = tree.read(NETWORK)
+    addresses = ", ".join(f'"{a}"' for a in (c.ipv4, c.ipv6) if a)
+    if (net.count("setSeedAddressSetForDatacenterWithId(") != 1 or net.count("seedAddressList = ") != 0
+            or f"                1: [{addresses}]\n            ]\n" not in net
+            or net.count(f"MTDatacenterAddress(ip: $0, port: {c.port}, ") != 1):
+        raise PatchError(f"{NETWORK}: the seed addresses are not the server's alone")
+    if "fetchBackupIps(" in net or "setDiscoverBackupAddressListSignal(" in net:
+        raise PatchError(f"{NETWORK}: still asks for backup addresses")
+    for rel in tree.network_sources():
+        if rel.endswith(".swift") and "fetchBackupIps(" in tree.read(rel):
+            raise PatchError(f"{rel}: still asks for backup addresses")
+    account = tree.read(ACCOUNT)
+    if "let initialDatacenterId: Int = 1\n" not in account or "initialDatacenterId: Int = 2" in account:
+        raise PatchError(f"{ACCOUNT}: a fresh install does not start on datacenter 1")
+    if "[MTSignal complete];\n}\n\n@end\n" not in tree.read(BACKUP):
+        raise PatchError(f"{BACKUP}: backup addresses are not off")
+
+    build = tree.read(APP_BUILD)
+    if "<string>Telegram</string>" in build or "<string>telegram</string>" in build:
+        raise PatchError(f"{APP_BUILD}: Telegram's name or URL scheme is still there")
+    conf = json.loads(tree.read(CONFIGURATION))
+    if (conf["bundle_id"], conf["api_id"], conf["team_id"]) != (c.bundle_id, str(c.api_id), c.team_id):
+        raise PatchError(f"{CONFIGURATION}: not the Pluma app")
+
+
+def main(argv=None):
+    if (argv if argv is not None else sys.argv[1:]) == ["--paths"]:
+        print("\n".join(UPSTREAM_PATHS))
+        return 0
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
+                                 epilog="patch.py --paths prints the upstream paths the patch reads.")
+    ap.add_argument("--source", required=True, help="the Telegram-iOS checkout")
+    ap.add_argument("--upstream", required=True, help="upstream.env")
+    ap.add_argument("--app", required=True, help="config/app.env")
+    ap.add_argument("--server-ipv4", required=True)
+    ap.add_argument("--server-port", required=True)
+    ap.add_argument("--server-ipv6", default="")
+    ap.add_argument("--rsa-public-key", required=True, help="PKCS#1 PEM of the server key")
+    ap.add_argument("--team-id", required=True, help="the Apple Team ID that signs the app")
+    a = ap.parse_args(argv)
+    try:
+        c = Config(load_env(a.upstream), load_env(a.app), a.server_ipv4, a.server_port, a.server_ipv6,
+                   pathlib.Path(a.rsa_public_key).read_text(), a.team_id)
+        tree = Tree(a.source)
+        patch(tree, c)
+        verify(tree, c)
+    except PatchError as e:
+        print(f"patch: {e}", file=sys.stderr)
+        return 1
+    address = c.ipv4 + (f", {c.ipv6}" if c.ipv6 else "")
+    print(f"patch: {c.bundle_id} \"{c.app_name}\", api_id {c.api_id}, team {c.team_id}, layer {c.layer}, "
+          f"server {address} port {c.port}, server key {c.fingerprint:#018x} ({c.fingerprint})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,6 @@
+/upstream/
+/out/
+__pycache__/
+*.p12
+*.mobileprovision
+*.agekey
