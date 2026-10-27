@@ -1,0 +1,258 @@
+# Builds the Pluma iOS client from the Telegram-iOS release upstream.env pins.
+#
+#   check           the scripts' tests, the patch on a sparse checkout of the
+#                   pinned upstream (layer 228, the server key, no Telegram
+#                   address; for the development server, and for the server
+#                   of the repository variables once signed builds are on),
+#                   and lint: seconds, on Linux;
+#   build-sim       the simulator app for the development server, without
+#                   code signing, the Bazel disk cache in the GitHub Actions
+#                   cache;
+#   preflight-sign  the distribution certificate and the ad hoc profile of
+#                   every target, in the protected "release" environment: bad
+#                   signing material fails here within a minute, not after an
+#                   hour of compilation;
+#   build-ipa       the ad hoc IPA for the server, signed inside the build;
+#   prune-caches    keeps the newest Bazel cache of each kind.
+#
+# Signed builds are on once the repository variable PLUMA_TEAM_ID is set
+# (README, Signing). The simulator app carries only the development server's
+# address and public key and stays plain. An IPA for a real server leaves its
+# job only encrypted for the owner (age): artifacts of a public repository are
+# readable by anyone (ADR 0010 of the server repository).
+#
+# The weekly run is a canary: it builds the simulator app of the pinned
+# upstream on a fresh runner image, so a removed Xcode or a broken download
+# shows up before an update is needed, and it keeps the cache from expiring.
+name: ios
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      ipa:
+        description: "Also build the signed ad hoc IPA (when PLUMA_TEAM_ID is set)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch upstream (the files the patch reads)
+        run: ci/fetch-upstream.sh sparse
+      - name: Tests
+        run: python3 -I -m unittest discover -s ci -p '*_test.py' -v
+      - name: Patch for the development server
+        run: ci/configure.sh dev
+      - name: Patch for the server of the repository variables
+        if: vars.PLUMA_TEAM_ID != ''
+        env:
+          SERVER_IPV4: ${{ vars.PLUMA_SERVER_IPV4 }}
+          SERVER_PORT: ${{ vars.PLUMA_SERVER_PORT }}
+          SERVER_IPV6: ${{ vars.PLUMA_SERVER_IPV6 }}
+          RSA_PUBLIC_KEY: ${{ vars.PLUMA_RSA_PUBLIC_KEY }}
+          TEAM_ID: ${{ vars.PLUMA_TEAM_ID }}
+        run: |
+          ci/fetch-upstream.sh sparse
+          ci/configure.sh server
+      - name: Lint
+        run: ci/lint.sh
+
+  build-sim:
+    needs: check
+    runs-on: macos-26
+    timeout-minutes: 180
+    env:
+      UPSTREAM_DIR: /Users/Shared/telegram-ios
+      BUILD_NUMBER: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Xcode, disk space, Metal toolchain
+        run: ci/setup.sh build
+      - name: Fetch upstream
+        run: ci/fetch-upstream.sh full
+      - name: Patch for the development server
+        run: ci/configure.sh dev
+      - name: Restore the Bazel cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/pluma-bazel
+          key: bazel-sim-${{ hashFiles('upstream.env', 'config/**', 'ci/patch.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            bazel-sim-${{ hashFiles('upstream.env', 'config/**', 'ci/patch.py') }}-
+            bazel-sim-
+      - name: Build
+        id: build
+        run: ci/build.sh sim
+      # Saved even when the build fails: a re-run picks up where it stopped.
+      - name: Trim the Bazel cache
+        if: always() && steps.build.outcome != 'skipped'
+        env:
+          MAX_GB: ${{ vars.PLUMA_BAZEL_CACHE_GB || '6' }}
+        run: python3 -I ci/cache_gc.py ~/pluma-bazel/disk --max-gb "$MAX_GB"
+      - name: Save the Bazel cache
+        if: always() && steps.build.outcome != 'skipped' && github.event_name != 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/pluma-bazel
+          key: bazel-sim-${{ hashFiles('upstream.env', 'config/**', 'ci/patch.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Upload the simulator app
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: simulator
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
+
+  preflight-sign:
+    needs: check
+    if: vars.PLUMA_TEAM_ID != '' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.ipa))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Certificate and profiles
+        env:
+          PLUMA_DIST_P12_B64: ${{ secrets.PLUMA_DIST_P12_B64 }}
+          PLUMA_DIST_P12_PASSWORD: ${{ secrets.PLUMA_DIST_P12_PASSWORD }}
+          PLUMA_PROFILE_MAIN: ${{ secrets.PLUMA_PROFILE_MAIN }}
+          PLUMA_PROFILE_SHARE: ${{ secrets.PLUMA_PROFILE_SHARE }}
+          PLUMA_PROFILE_NOTIFICATION_SERVICE: ${{ secrets.PLUMA_PROFILE_NOTIFICATION_SERVICE }}
+          PLUMA_PROFILE_NOTIFICATION_CONTENT: ${{ secrets.PLUMA_PROFILE_NOTIFICATION_CONTENT }}
+          PLUMA_PROFILE_WIDGET: ${{ secrets.PLUMA_PROFILE_WIDGET }}
+          PLUMA_PROFILE_SIRI_INTENTS: ${{ secrets.PLUMA_PROFILE_SIRI_INTENTS }}
+          PLUMA_PROFILE_BROADCAST_UPLOAD: ${{ secrets.PLUMA_PROFILE_BROADCAST_UPLOAD }}
+          TEAM_ID: ${{ vars.PLUMA_TEAM_ID }}
+        run: python3 -I ci/preflight_sign.py --app config/app.env --team-id "$TEAM_ID"
+      - name: The owner's age key
+        env:
+          PLUMA_AGE_RECIPIENT: ${{ vars.PLUMA_AGE_RECIPIENT }}
+        run: |
+          if [[ ! "$PLUMA_AGE_RECIPIENT" =~ ^age1[0-9a-z]+$ ]]; then
+            echo "::error::PLUMA_AGE_RECIPIENT is not an age public key; the IPA would have nowhere to go (README, Signing)."
+            exit 1
+          fi
+
+  build-ipa:
+    needs: preflight-sign
+    runs-on: macos-26
+    timeout-minutes: 180
+    environment: release
+    env:
+      UPSTREAM_DIR: /Users/Shared/telegram-ios
+      BUILD_NUMBER: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Xcode, disk space, Metal toolchain
+        run: ci/setup.sh build
+      - name: age
+        run: ci/setup.sh age
+      - name: Fetch upstream
+        run: ci/fetch-upstream.sh full
+      - name: Patch for the server
+        env:
+          SERVER_IPV4: ${{ vars.PLUMA_SERVER_IPV4 }}
+          SERVER_PORT: ${{ vars.PLUMA_SERVER_PORT }}
+          SERVER_IPV6: ${{ vars.PLUMA_SERVER_IPV6 }}
+          RSA_PUBLIC_KEY: ${{ vars.PLUMA_RSA_PUBLIC_KEY }}
+          TEAM_ID: ${{ vars.PLUMA_TEAM_ID }}
+        run: ci/configure.sh server
+      - name: Signing identity and profiles
+        env:
+          PLUMA_DIST_P12_B64: ${{ secrets.PLUMA_DIST_P12_B64 }}
+          PLUMA_DIST_P12_PASSWORD: ${{ secrets.PLUMA_DIST_P12_PASSWORD }}
+          PLUMA_PROFILE_MAIN: ${{ secrets.PLUMA_PROFILE_MAIN }}
+          PLUMA_PROFILE_SHARE: ${{ secrets.PLUMA_PROFILE_SHARE }}
+          PLUMA_PROFILE_NOTIFICATION_SERVICE: ${{ secrets.PLUMA_PROFILE_NOTIFICATION_SERVICE }}
+          PLUMA_PROFILE_NOTIFICATION_CONTENT: ${{ secrets.PLUMA_PROFILE_NOTIFICATION_CONTENT }}
+          PLUMA_PROFILE_WIDGET: ${{ secrets.PLUMA_PROFILE_WIDGET }}
+          PLUMA_PROFILE_SIRI_INTENTS: ${{ secrets.PLUMA_PROFILE_SIRI_INTENTS }}
+          PLUMA_PROFILE_BROADCAST_UPLOAD: ${{ secrets.PLUMA_PROFILE_BROADCAST_UPLOAD }}
+          TEAM_ID: ${{ vars.PLUMA_TEAM_ID }}
+          CODESIGNING: ${{ runner.temp }}/pluma-codesigning
+        run: |
+          umask 077
+          python3 -I ci/preflight_sign.py --app config/app.env --team-id "$TEAM_ID" --out-dir "$CODESIGNING"
+          ci/keychain.sh create "$CODESIGNING/identity.p12"
+          rm -f "$CODESIGNING/identity.p12"
+      - name: Restore the Bazel cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/pluma-bazel
+          key: bazel-ipa-${{ hashFiles('upstream.env', 'config/**', 'ci/patch.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            bazel-ipa-${{ hashFiles('upstream.env', 'config/**', 'ci/patch.py') }}-
+            bazel-ipa-
+      - name: Build
+        id: build
+        env:
+          PLUMA_CODESIGNING_DIR: ${{ runner.temp }}/pluma-codesigning
+        run: ci/build.sh ipa
+      - name: Remove the signing identity
+        if: always()
+        run: |
+          ci/keychain.sh delete
+          rm -rf "$RUNNER_TEMP/pluma-codesigning"
+      - name: Trim the Bazel cache
+        if: always() && steps.build.outcome != 'skipped'
+        env:
+          MAX_GB: ${{ vars.PLUMA_BAZEL_CACHE_GB || '6' }}
+        run: python3 -I ci/cache_gc.py ~/pluma-bazel/disk --max-gb "$MAX_GB"
+      - name: Save the Bazel cache
+        if: always() && steps.build.outcome != 'skipped'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/pluma-bazel
+          key: bazel-ipa-${{ hashFiles('upstream.env', 'config/**', 'ci/patch.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Encrypt the IPA
+        env:
+          PLUMA_AGE_RECIPIENT: ${{ vars.PLUMA_AGE_RECIPIENT }}
+        run: ci/encrypt.sh out
+      - name: Upload the IPA
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pluma-ios
+          path: out/
+          retention-days: 30
+          if-no-files-found: error
+
+  prune-caches:
+    needs: [build-sim, build-ipa]
+    if: always() && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Older Bazel caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ci/prune-caches.sh bazel-sim- bazel-ipa-
