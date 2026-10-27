@@ -39,7 +39,7 @@ Set these in the repository's *Settings → Secrets and variables → Actions �
 | `PLUMA_RSA_PUBLIC_KEY` | The server key as a PKCS#1 PEM: `openssl rsa -in server_pkcs1.key -RSAPublicKey_out` |
 | `PLUMA_TEAM_ID` | The Apple Team ID (10 characters, *Membership details* in the Apple Developer account). Setting it turns on signed builds. |
 | `PLUMA_AGE_RECIPIENT` | The owner's [age](https://age-encryption.org) public key (`age1...`); see [Signing](#signing). |
-| `PLUMA_BAZEL_CACHE_GB` | Optional. The size the Bazel disk cache is trimmed to before it is saved, in GB; 6 by default. |
+| `PLUMA_BAZEL_CACHE_GB` | Optional. The size the Bazel disk cache is trimmed to before it is saved, in GB; 12 by default (a full simulator cache is about 9 GB, about 3 GB compressed in the Actions cache). |
 
 None of these values is a secret: every IPA carries them. The server variables have the same names as in `pluma-android`.
 
@@ -150,7 +150,7 @@ The jobs run on GitHub's `macos-26` runners with Xcode 26.2 selected explicitly,
 
 The Bazel disk cache and Bazel's downloads are kept in the GitHub Actions cache, one entry for the simulator app and one for the IPA:
 - the entry is saved even when a build fails, so a re-run continues from where it stopped;
-- before saving, the disk cache is trimmed to 6 GB (`PLUMA_BAZEL_CACHE_GB`), least recently used entries first;
+- before saving, the disk cache is trimmed to 12 GB (`PLUMA_BAZEL_CACHE_GB`), least recently used entries first;
 - older entries of each kind are deleted after the run, so the two kinds fit in the repository's 10 GB together.
 
 A cold build takes about an hour. A repeat build without changes takes minutes. An edit of TelegramCore or MtProtoKit, which most of the app depends on, compiles nearly everything again.

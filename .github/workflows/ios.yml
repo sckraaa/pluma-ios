@@ -106,7 +106,7 @@ jobs:
       - name: Trim the Bazel cache
         if: always() && steps.build.outcome != 'skipped'
         env:
-          MAX_GB: ${{ vars.PLUMA_BAZEL_CACHE_GB || '6' }}
+          MAX_GB: ${{ vars.PLUMA_BAZEL_CACHE_GB || '12' }}
         run: python3 -I ci/cache_gc.py ~/pluma-bazel/disk --max-gb "$MAX_GB"
       - name: Save the Bazel cache
         if: always() && steps.build.outcome != 'skipped' && github.event_name != 'pull_request'
@@ -220,7 +220,7 @@ jobs:
       - name: Trim the Bazel cache
         if: always() && steps.build.outcome != 'skipped'
         env:
-          MAX_GB: ${{ vars.PLUMA_BAZEL_CACHE_GB || '6' }}
+          MAX_GB: ${{ vars.PLUMA_BAZEL_CACHE_GB || '12' }}
         run: python3 -I ci/cache_gc.py ~/pluma-bazel/disk --max-gb "$MAX_GB"
       - name: Save the Bazel cache
         if: always() && steps.build.outcome != 'skipped'
