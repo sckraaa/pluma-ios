@@ -322,6 +322,16 @@ DAMAGE = (
     ("submodules/TelegramUI/Sources/StoreDownloadedMedia.swift", 'let albumName = "Telegram"', 'let albumName = "Telegram Media"'),
     ("submodules/TelegramUI/Sources/DeviceContactDataManager.swift", 'if address.label == "Telegram", let peerId',
      'if address.label == "Telegram" || address.label == "TG", let peerId'),
+    # The scheme.
+    (BUILD, "                <string>tg</string>\n", "                <string>tg</string>\n                <string>tgapp</string>\n"),
+    ("submodules/QrCodeUI/Sources/QrCodeScanScreen.swift", 'filteredCodes = codes.filter { $0.message.hasPrefix("tg://") }',
+     'filteredCodes = codes.filter { $0.message.hasPrefix("tg://login") }'),
+    ("submodules/TelegramUI/Components/ShareExtensionContext/Sources/ShareExtensionContext.swift",
+     'self.openUrl("tg://shareStory?session=', 'self.openUrl("tg://share-story?session='),
+    (patch.URL_HANDLING, "    if let parsedUrl = URL(string: url), parsedUrl.scheme == \"tg\", let host = parsedUrl.host, let query = parsedUrl.query {\n"
+     "        if let internalUrl = parseInternalUrl(sharedContext: sharedContext, context: context, query: host + \"?\" + query), case .peer",
+     "    if let parsedUrl = URL(string: url), [\"tg\"].contains(parsedUrl.scheme), let host = parsedUrl.host, let query = parsedUrl.query {\n"
+     "        if let internalUrl = parseInternalUrl(sharedContext: sharedContext, context: context, query: host + \"?\" + query), case .peer"),
     # Traces of Telegram elsewhere in the network code.
     (NETWORK, "            context.keychain = keychain\n",
      '            context.keychain = keychain\n            let fallbackAddress = "149.154.167.51"\n'),
@@ -431,7 +441,7 @@ class UpstreamTest(unittest.TestCase):
         self.assertNotIn("CallSessionConnection.Reflector(", tree.read(CALLS))
         build = tree.read(BUILD)
         self.assertEqual(build.count("<string>Pluma</string>"), 9)
-        self.assertIn("                <string>pluma</string>\n", build)
+        self.assertIn("                <string>plm</string>\n", build)
         conf = json.loads(tree.read(patch.CONFIGURATION))
         self.assertEqual(conf["team_id"], "ABCDE12345")
         self.assertEqual(set(conf), patch.required_configuration_keys(tree))
@@ -456,6 +466,12 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn("<string>Pluma stores your contacts heavily encrypted", build)
         self.assertIn('CXProviderConfiguration(localizedName: "Pluma")',
                       tree.read("submodules/TelegramCallsUI/Sources/CallKitIntegration.swift"))
+        # plm:// instead of tg://.
+        self.assertNotIn("<string>tg</string>", build)
+        self.assertIn('let urlString = "plm://login?token=\\(tokenString)"',
+                      tree.read("submodules/AuthorizationUI/Sources/AuthorizationSequencePhoneEntryControllerNode.swift"))
+        self.assertIn('codes.filter { $0.message.hasPrefix("plm://") }', tree.read("submodules/QrCodeUI/Sources/QrCodeScanScreen.swift"))
+        self.assertEqual(tree.read(patch.URL_HANDLING).count(patch.URL_HANDLING_OWN), 4)
 
     def test_dev_server(self):
         dev = patch.load_env(ROOT / "config/dev/server.env")

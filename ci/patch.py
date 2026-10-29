@@ -15,7 +15,8 @@ goes to the build configuration that Telegram-iOS's Make.py reads
 The brand: Pluma's images (rendered into brand/ios by brand/render.sh)
 replace Telegram's, each upstream file checked by its SHA-256 first, and the
 texts the user sees say Pluma where they said Telegram (the counts of the
-pinned commit are part of the patch).
+pinned commit are part of the patch). The app's links use its own scheme,
+plm://, not Telegram's tg://.
 
 Standard library only, so the CI and a developer machine run it as is.
 """
@@ -185,13 +186,46 @@ CODE_NAMES = (
      'if address.label == "{name}", let peerId = parseAppSpecificContactReference(', 1),
 )
 
+# The links the app makes with Telegram's scheme tg://, which Pluma's replaces:
+# (file, text with {scheme}, how many times).
+SCHEME_LINKS = (
+    # The QR code of a sign-in on another device, and what the scanner of
+    # another device accepts: only Pluma's codes sign in to Pluma.
+    ("submodules/AuthorizationUI/Sources/AuthorizationSequencePhoneEntryControllerNode.swift",
+     'let urlString = "{scheme}://login?token=\\(tokenString)"', 1),
+    ("submodules/QrCodeUI/Sources/QrCodeScanScreen.swift",
+     'filteredCodes = codes.filter { $0.message.hasPrefix("{scheme}://") }', 1),
+    # The QR code of a proxy (the phone's camera opens it in the app).
+    ("submodules/QrCodeUI/Sources/QrCodeScreen.swift", ': "{scheme}://proxy")?server=', 1),
+    ("submodules/QrCodeUI/Sources/QrCodeScreen.swift", ': "{scheme}://socks")?server=', 1),
+    # The link a settings search result copies.
+    ("submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreen.swift",
+     'let link = "{scheme}://settings/\\(item.id)"', 1),
+    # Links that open the app from outside: after a chat import, and from the
+    # share extension (its scheme, and the story it hands over).
+    ("submodules/ChatImportUI/Sources/ChatImportActivityScreen.swift",
+     'let url = URL(string: "{scheme}://localpeer?id=\\(controller.peerId.toInt64())")!', 1),
+    ("submodules/TelegramUI/Components/ShareExtensionContext/Sources/ShareExtensionContext.swift",
+     'appSpecificScheme: "{scheme}", openUrl:', 1),
+    ("submodules/TelegramUI/Components/ShareExtensionContext/Sources/ShareExtensionContext.swift",
+     'self.openUrl("{scheme}://shareStory?session=\\(sessionId)")', 1),
+)
+# Links the app reads: proxies, sticker sets, wallpapers and ads given as
+# links take the app's own scheme as well as tg:// (OpenUrl.swift does so for
+# every link already).
+URL_HANDLING = "submodules/UrlHandling/Sources/UrlHandling.swift"
+URL_HANDLING_TG = 'if let parsedUrl = URL(string: url), parsedUrl.scheme == "tg", let host = parsedUrl.host,'
+URL_HANDLING_OWN = ('if let parsedUrl = URL(string: url), parsedUrl.scheme == "tg" || parsedUrl.scheme == '
+                    'sharedContext.applicationBindings.appSpecificScheme, let host = parsedUrl.host,')
+
 # Everything the patch reads, edits or checks: the check job fetches only
 # these (ci/fetch-upstream.sh sparse).
 UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_DIRS
                   + (APP_ICON,) + tuple(sorted(r for r in BRAND_REPLACED if not r.startswith(APP_ICON + "/")))
                   + (APP_DELEGATE, INTRO_ANIMATIONS, STRINGS)
                   + tuple(INFOPLIST_STRINGS.format(lang) for lang in INFOPLIST_NAMES)
-                  + tuple(sorted({rel for rel, _, _ in CODE_NAMES})))
+                  + tuple(sorted({rel for rel, _, _ in CODE_NAMES}))
+                  + tuple(sorted({rel for rel, _, _ in SCHEME_LINKS})) + (URL_HANDLING,))
 
 
 class PatchError(Exception):
@@ -744,6 +778,7 @@ def patch(tree, c):
 
     patch_brand(tree)
     patch_names(tree, c)
+    patch_scheme(tree, c)
 
     # The build configuration of Make.py, with exactly the keys it reads.
     conf = c.build_configuration()
@@ -902,7 +937,34 @@ def patch_names(tree, c):
                  f"<string>{c.app_name} iOS Color Theme File</string>")
 
     for rel, text, count in CODE_NAMES:
-        tree.replace(rel, text.format(name="Telegram"), text.format(name=c.app_name), count=count)
+        tree.replace(rel, text.replace("{name}", "Telegram"), text.replace("{name}", c.app_name), count=count)
+
+
+def patch_scheme(tree, c):
+    """plm:// instead of tg://. The app registers its own scheme, not
+    Telegram's: tg:// links from other apps open Telegram, if it is installed.
+    The links the app makes use its scheme, and the QR code sign-in works
+    between Pluma clients only. Links of Telegram's scheme inside the app
+    (in messages, from bots) still open in the app, as they always did."""
+    # The scheme of the app's own links (the build configuration) already
+    # replaces telegram:// (patch()); tg:// is no longer registered beside it.
+    tree.replace(APP_BUILD, "                <string>tg</string>\n                <string>tonsite</string>\n",
+                 "                <string>tonsite</string>\n")
+    for rel, text, count in SCHEME_LINKS:
+        tree.replace(rel, text.replace("{scheme}", "tg"), text.replace("{scheme}", c.url_scheme), count=count)
+    tree.replace(URL_HANDLING, URL_HANDLING_TG, URL_HANDLING_OWN, count=4)
+
+
+def verify_scheme(tree, c):
+    build = tree.read(APP_BUILD)
+    schemes = re.findall(r"<key>CFBundleURLSchemes</key>\s*<array>(.*?)</array>", build, re.S)
+    registered = [v for block in schemes for v in re.findall(r"<string>([^<]*)</string>", block)]
+    if sorted(registered) != sorted([c.url_scheme, "tonsite"]):
+        raise PatchError(f"{APP_BUILD}: the app registers the URL schemes {registered}")
+    for rel in sorted({rel for rel, _, _ in SCHEME_LINKS}):
+        text = tree.read(rel)
+        if '"tg://' in text or 'appSpecificScheme: "tg"' in text:
+            raise PatchError(f"{rel}: still makes tg:// links")
 
 
 def verify_names(tree, c):
@@ -921,7 +983,7 @@ def verify_names(tree, c):
         if " " in value and TELEGRAM_WORD.search(value):
             raise PatchError(f"{APP_BUILD}: {value[:60]!r} still names Telegram")
     for rel, text, _ in CODE_NAMES:
-        if text.format(name="Telegram") in tree.read(rel):
+        if text.replace("{name}", "Telegram") in tree.read(rel):
             raise PatchError(f"{rel}: still names Telegram")
 
 
@@ -1019,6 +1081,7 @@ def verify(tree, c):
 
     verify_brand(tree)
     verify_names(tree, c)
+    verify_scheme(tree, c)
 
     build = tree.read(APP_BUILD)
     if "<string>Telegram</string>" in build or "<string>telegram</string>" in build:
