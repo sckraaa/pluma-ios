@@ -13,7 +13,9 @@ goes to the build configuration that Telegram-iOS's Make.py reads
 (--configurationPath), written here as build-system/pluma-configuration.json.
 
 The brand: Pluma's images (rendered into brand/ios by brand/render.sh)
-replace Telegram's, each upstream file checked by its SHA-256 first.
+replace Telegram's, each upstream file checked by its SHA-256 first, and the
+texts the user sees say Pluma where they said Telegram (the counts of the
+pinned commit are part of the patch).
 
 Standard library only, so the CI and a developer machine run it as is.
 """
@@ -123,11 +125,73 @@ BRAND_REMOVED = {
     f"{APP_ICON}/Assets/Plane.svg": "f4da98d58f274a9d95d491badd14afafa378f335a0bd2b496db83836e21f15e8",
 }
 
+# The built-in English strings: the interface (the generated
+# PresentationStrings) and the texts of the push notifications.
+STRINGS = "Telegram/Telegram-iOS/en.lproj/Localizable.strings"
+# The permission prompts and, for two languages, the name under the icon:
+# the name of Telegram in each language's InfoPlist.strings and how many times
+# the pinned commit has it.
+INFOPLIST_STRINGS = "Telegram/Telegram-iOS/{}.lproj/InfoPlist.strings"
+INFOPLIST_NAMES = {
+    "ar": {"\u062a\u064a\u0644\u064a\u062c\u0631\u0627\u0645": 7},  # تيليجرام, also under the icon
+    "be": {"Telegram": 4},
+    "ca": {"Telegram": 4},
+    "de": {"Telegram": 4},
+    "en": {"Telegram": 4},
+    "es": {"Telegram": 4},
+    "fa": {"\u062a\u0644\u06af\u0631\u0627\u0645": 4},  # تلگرام
+    "fr": {"Telegram": 5},
+    "id": {"Telegram": 4},
+    "it": {"Telegram": 4},
+    # 텔레그램, also under the icon; with the subject particle 이, which is 가
+    # after a vowel.
+    "ko": {"Telegram": 2, "\ud154\ub808\uadf8\ub7a8\uc774": 2, "\ud154\ub808\uadf8\ub7a8": 1},
+    "ms": {"Telegram": 4},
+    "nl": {"Telegram": 4},
+    "pl": {"Telegram": 4},
+    "pt": {"Telegram": 4},
+    "ru": {"Telegram": 2},
+    "tr": {"Telegram": 4},
+    "uk": {"Telegram": 4},
+    "uz": {"Telegram": 4},
+}
+KOREAN_SUBJECT = ("\ud154\ub808\uadf8\ub7a8\uc774", "\uac00")
+# The name in source code: (file, text, how many times). {name} is the app's.
+CODE_NAMES = (
+    # The album the app saves photos and videos to.
+    ("submodules/TelegramUI/Sources/StoreDownloadedMedia.swift",
+     '        let albumName = "{name}"\n', 1),
+    # The name in the system call screen (iOS 13; later ones show the app's).
+    ("submodules/TelegramCallsUI/Sources/CallKitIntegration.swift",
+     'CXProviderConfiguration(localizedName: "{name}")', 1),
+    # The widget of a passcode-locked app.
+    ("submodules/WidgetItems/Sources/WidgetItems.swift",
+     'generalLockedText: "Open {name} and enter passcode to edit widget.",', 1),
+    ("Telegram/SiriIntents/IntentHandler.swift",
+     'NSLocalizedDescriptionKey: "Open {name} and enter passcode to edit widget."', 1),
+    # The service account 777000 until the server's data arrives.
+    ("submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift",
+     'firstName: "{name} Notifications"', 1),
+    # The e-mail about a login code that does not arrive.
+    ("submodules/AuthorizationUI/Sources/AuthorizationSequenceController.swift",
+     'emailBody.append("{name}: \\(appVersion)\\n")', 1),
+    # The label of the app's entry in a contact of the address book, written
+    # and read back: Telegram installed on the same phone writes its own.
+    ("submodules/AccountContext/Sources/DeviceContactData.swift",
+     'self.init(label: "{name}", value: "\\(phonebookUsernamePrefix)', 1),
+    ("submodules/TelegramUI/Sources/DeviceContactDataManager.swift",
+     'if address.label == "{name}", let peerId = parseAppSpecificContactReference(', 3),
+    ("Telegram/SiriIntents/IntentContacts.swift",
+     'if address.label == "{name}", let peerId = parseAppSpecificContactReference(', 1),
+)
+
 # Everything the patch reads, edits or checks: the check job fetches only
 # these (ci/fetch-upstream.sh sparse).
 UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_DIRS
                   + (APP_ICON,) + tuple(sorted(r for r in BRAND_REPLACED if not r.startswith(APP_ICON + "/")))
-                  + (APP_DELEGATE, INTRO_ANIMATIONS))
+                  + (APP_DELEGATE, INTRO_ANIMATIONS, STRINGS)
+                  + tuple(INFOPLIST_STRINGS.format(lang) for lang in INFOPLIST_NAMES)
+                  + tuple(sorted({rel for rel, _, _ in CODE_NAMES})))
 
 
 class PatchError(Exception):
@@ -679,6 +743,7 @@ def patch(tree, c):
                  f"                <string>{c.url_scheme}</string>\n")
 
     patch_brand(tree)
+    patch_names(tree, c)
 
     # The build configuration of Make.py, with exactly the keys it reads.
     conf = c.build_configuration()
@@ -783,6 +848,83 @@ def patch_brand(tree):
                  "    vec4 cloud_color = {111/255., 143/255., 114/255., 1}; // pluma: #6F8F72\n")
 
 
+# An entry of a .strings file, "key" = "value";, where the value may span
+# lines: the key with what precedes the value, the value, the end.
+STRINGS_ENTRY = re.compile(r'^("(?:[^"\\]|\\.)*"\s*=\s*")((?:[^"\\]|\\.)*)(";)', re.M)
+# The name as a word, also right after an escaped line break (\nTelegram).
+TELEGRAM_WORD = re.compile(r"(?:(?<![0-9A-Za-z_])|(?<=\\n))(Telegram|TELEGRAM)(?![0-9A-Za-z_])")
+# The entries of the English strings that name Telegram, and how many times
+# they do, in the pinned commit. Keys never change (the code refers to them),
+# nor do URLs, user names or link targets: they are lower case or part of
+# another word (telegram.org, t.me, TelegramTips, (telegram)).
+STRINGS_RENAMED = (556, 609)
+
+
+def rename_strings(text, name):
+    """The values of a .strings file with the word Telegram (TELEGRAM) as
+    name; returns the text, the entries changed and the occurrences."""
+    entries = occurrences = 0
+
+    def entry(m):
+        nonlocal entries, occurrences
+        value, n = TELEGRAM_WORD.subn(lambda w: name if w.group(1) == "Telegram" else name.upper(), m.group(2))
+        if n:
+            entries += 1
+            occurrences += n
+        return m.group(1) + value + m.group(3)
+
+    return STRINGS_ENTRY.sub(entry, text), entries, occurrences
+
+
+def patch_names(tree, c):
+    """Pluma, not Telegram, in what the user reads: the built-in strings, the
+    permission prompts, the name in other languages and a few texts of the
+    code."""
+    text, entries, occurrences = rename_strings(tree.read(STRINGS), c.app_name)
+    if (entries, occurrences) != STRINGS_RENAMED:
+        raise PatchError(f"{STRINGS}: Telegram in {entries} entries ({occurrences} times), expected "
+                         f"{STRINGS_RENAMED[0]} ({STRINGS_RENAMED[1]} times); upstream changed the strings")
+    tree.write(STRINGS, text)
+
+    for lang, names in INFOPLIST_NAMES.items():
+        rel = INFOPLIST_STRINGS.format(lang)
+        for old, count in names.items():
+            new = c.app_name + KOREAN_SUBJECT[1] if old == KOREAN_SUBJECT[0] else c.app_name
+            tree.replace(rel, old, new, count=count)
+
+    # The main Info.plist: the permission prompts in English (the
+    # InfoPlist.strings of the language override them) and the theme files.
+    tree.replace(APP_BUILD, "    <string>Telegram stores your contacts heavily encrypted",
+                 f"    <string>{c.app_name} stores your contacts heavily encrypted")
+    tree.replace(APP_BUILD, "When you send your location to your friends, Telegram needs access to show them a map.",
+                 f"When you send your location to your friends, {c.app_name} needs access to show them a map.", count=3)
+    tree.replace(APP_BUILD, "<string>Telegram iOS Color Theme File</string>",
+                 f"<string>{c.app_name} iOS Color Theme File</string>")
+
+    for rel, text, count in CODE_NAMES:
+        tree.replace(rel, text.format(name="Telegram"), text.format(name=c.app_name), count=count)
+
+
+def verify_names(tree, c):
+    for m in STRINGS_ENTRY.finditer(tree.read(STRINGS)):
+        if TELEGRAM_WORD.search(m.group(2)):
+            raise PatchError(f"{STRINGS}: {m.group(0)[:80]!r} still names Telegram")
+    for lang, names in INFOPLIST_NAMES.items():
+        rel = INFOPLIST_STRINGS.format(lang)
+        text = tree.read(rel)
+        for old in names:
+            if old in text:
+                raise PatchError(f"{rel}: still names Telegram ({old})")
+        if "CFBundleDisplayName" in text and f'"CFBundleDisplayName" = "{c.app_name}";' not in text:
+            raise PatchError(f"{rel}: the name under the icon is not {c.app_name}")
+    for value in re.findall(r"<string>([^<]*)</string>", tree.read(APP_BUILD)):
+        if " " in value and TELEGRAM_WORD.search(value):
+            raise PatchError(f"{APP_BUILD}: {value[:60]!r} still names Telegram")
+    for rel, text, _ in CODE_NAMES:
+        if text.format(name="Telegram") in tree.read(rel):
+            raise PatchError(f"{rel}: still names Telegram")
+
+
 def verify_brand(tree):
     for rel in sorted(set(BRAND_REPLACED) | set(BRAND_ADDED)):
         if tree.sha256(rel) != hashlib.sha256((BRAND / rel).read_bytes()).hexdigest():
@@ -876,6 +1018,7 @@ def verify(tree, c):
         raise PatchError(f"{BACKUP}: backup addresses are not off")
 
     verify_brand(tree)
+    verify_names(tree, c)
 
     build = tree.read(APP_BUILD)
     if "<string>Telegram</string>" in build or "<string>telegram</string>" in build:

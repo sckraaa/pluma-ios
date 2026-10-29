@@ -224,6 +224,30 @@ class TreeTest(unittest.TestCase):
         self.assertFalse((self.tree.root / "b/c.png").exists())
 
 
+class RenameTest(unittest.TestCase):
+    def test_values_only(self):
+        text = ('/* Telegram */\n'
+                '"Application.Name" = "Telegram";\n'
+                '"Contacts.InviteToTelegram" = "Invite to Telegram";\n'
+                '"Passcode.AppLockedAlert" = "Telegram\\nLocked";\n'
+                '"Conversation.UpdateTelegram" = "UPDATE TELEGRAM";\n'
+                '"Settings.TipsUsername" = "TelegramTips";\n'
+                '"Settings.FAQ_URL" = "https://telegram.org/faq#general";\n'
+                '"Cocoon.Text" = "[@cocoon](telegram) on Telegram\'s \\"Telegram\\" network";\n'
+                '"AppUpgrade.Running" = "Optimizing Telegram...\nPlease keep Telegram open.";\n')
+        out, entries, occurrences = patch.rename_strings(text, "Pluma")
+        self.assertEqual((entries, occurrences), (6, 8))
+        self.assertEqual(out, '/* Telegram */\n'
+                              '"Application.Name" = "Pluma";\n'
+                              '"Contacts.InviteToTelegram" = "Invite to Pluma";\n'
+                              '"Passcode.AppLockedAlert" = "Pluma\\nLocked";\n'
+                              '"Conversation.UpdateTelegram" = "UPDATE PLUMA";\n'
+                              '"Settings.TipsUsername" = "TelegramTips";\n'
+                              '"Settings.FAQ_URL" = "https://telegram.org/faq#general";\n'
+                              '"Cocoon.Text" = "[@cocoon](telegram) on Pluma\'s \\"Pluma\\" network";\n'
+                              '"AppUpgrade.Running" = "Optimizing Pluma...\nPlease keep Pluma open.";\n')
+
+
 class BrandTest(unittest.TestCase):
     def test_brand_files_are_the_patch_list(self):
         # brand/render.sh writes exactly the files the patch copies.
@@ -288,6 +312,16 @@ DAMAGE = (
     (INTRO, "cloud_color = {42/255., 180/255., 247/255., 1};", "cloud_color = {42/255., 181/255., 247/255., 1};"),
     (INTRO, "powerful_bg_color = {47/255., 90/255., 131/255., 1};", "powerful_bg_color = {47/255., 90/255., 132/255., 1};"),
     (patch.APP_ICON + "/icon.json", '"image-name" : "Plane.svg"', '"image-name" : "Plane2.svg"'),
+    # The names.
+    (patch.STRINGS, '"Watch.AppName" = "Telegram";\n', '"Watch.AppName" = "Watch";\n'),
+    (patch.STRINGS, '"Application.Name" = "Telegram";\n', '"Application.Name" = "Telegram";\n"Application.Title" = "Telegram";\n'),
+    (patch.INFOPLIST_STRINGS.format("ru"), "облаке Telegram", "облаке Телеграм"),
+    (patch.INFOPLIST_STRINGS.format("ko"), '"CFBundleDisplayName" = "텔레그램";', '"CFBundleDisplayName" = "Telegram";'),
+    (BUILD, "<string>Telegram iOS Color Theme File</string>", "<string>Telegram Color Theme File</string>"),
+    (BUILD, "your friends, Telegram needs access to show them a map. You also", "your friends, Telegram needs access to show them the map. You also"),
+    ("submodules/TelegramUI/Sources/StoreDownloadedMedia.swift", 'let albumName = "Telegram"', 'let albumName = "Telegram Media"'),
+    ("submodules/TelegramUI/Sources/DeviceContactDataManager.swift", 'if address.label == "Telegram", let peerId',
+     'if address.label == "Telegram" || address.label == "TG", let peerId'),
     # Traces of Telegram elsewhere in the network code.
     (NETWORK, "            context.keychain = keychain\n",
      '            context.keychain = keychain\n            let fallbackAddress = "149.154.167.51"\n'),
@@ -410,6 +444,18 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn('alternate_icon_folders = [\n    "BlueIcon",\n]\n', build)
         self.assertEqual(tree.read(APP_DELEGATE).count("PresentationAppIcon("), 1)
         self.assertIn("vec4 cloud_color = {111/255., 143/255., 114/255., 1};", tree.read(INTRO))
+        # The names.
+        strings = tree.read(patch.STRINGS)
+        for entry in ('"Application.Name" = "Pluma";', '"Tour.Title1" = "Pluma";', '"Settings.FAQ" = "Pluma FAQ";',
+                      '"Passcode.AppLockedAlert" = "Pluma\\nLocked";', '"Conversation.UpdateTelegram" = "UPDATE PLUMA";',
+                      '"Settings.TipsUsername" = "TelegramTips";', '"Settings.FAQ_URL" = "https://telegram.org/faq#general";'):
+            self.assertIn(entry, strings)
+        self.assertIn('"CFBundleDisplayName" = "Pluma";', tree.read(patch.INFOPLIST_STRINGS.format("ar")))
+        self.assertIn('"CFBundleDisplayName" = "Pluma";', tree.read(patch.INFOPLIST_STRINGS.format("ko")))
+        self.assertIn("위치를 지도에 표시하기 위해 Pluma가 위치", tree.read(patch.INFOPLIST_STRINGS.format("ko")))
+        self.assertIn("<string>Pluma stores your contacts heavily encrypted", build)
+        self.assertIn('CXProviderConfiguration(localizedName: "Pluma")',
+                      tree.read("submodules/TelegramCallsUI/Sources/CallKitIntegration.swift"))
 
     def test_dev_server(self):
         dev = patch.load_env(ROOT / "config/dev/server.env")
