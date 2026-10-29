@@ -84,6 +84,7 @@ DARK_THEME = "submodules/TelegramPresentationData/Sources/DefaultDarkPresentatio
 PRESENTATION_DATA = "submodules/TelegramPresentationData/Sources/PresentationData.swift"
 THEME_SETTINGS = "submodules/TelegramUIPreferences/Sources/PresentationThemeSettings.swift"
 LEGACY_COLORS = "submodules/LegacyComponents/Sources/TGColor.m"
+AVATAR_NODE = "submodules/AvatarNode/Sources/AvatarNode.swift"
 SETTINGS_ITEMS = "submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoSettingsItems.swift"
 SETTINGS_SEARCH = "submodules/SettingsUI/Sources/Search/SettingsSearchableItems.swift"
 MAKE = "build-system/Make/Make.py"
@@ -235,7 +236,7 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + tuple(INFOPLIST_STRINGS.format(lang) for lang in INFOPLIST_NAMES)
                   + tuple(sorted({rel for rel, _, _ in CODE_NAMES}))
                   + tuple(sorted({rel for rel, _, _ in SCHEME_LINKS})) + (URL_HANDLING,)
-                  + (DAY_THEME, DARK_THEME, PRESENTATION_DATA, THEME_SETTINGS, LEGACY_COLORS)
+                  + (DAY_THEME, DARK_THEME, PRESENTATION_DATA, THEME_SETTINGS, LEGACY_COLORS, AVATAR_NODE)
                   + (SETTINGS_ITEMS, SETTINGS_SEARCH))
 
 
@@ -932,6 +933,12 @@ def patch_brand(tree):
 # dark mode, Night; both take these colours. Text and secondary text keep
 # upstream's greys, which differ from the palette's by a shade.
 
+# The colours of the avatars that stand for Saved Messages and for reposts.
+AVATAR_SAVED_MESSAGES = ("    static let savedMessagesColors: [UIColor] = [\n"
+                         "        UIColor(rgb: 0x2a9ef1), UIColor(rgb: 0x72d5fd)\n")
+AVATAR_REPOST = ("    static let repostColors: [UIColor] = [\n"
+                 "        UIColor(rgb: 0x3DA1FD), UIColor(rgb: 0x34C76F)\n")
+
 # (file, text, replacement, how many times).
 PALETTE_EDITS = (
     # Day Classic (and Day): the accent, the source of 64 colours.
@@ -1097,6 +1104,14 @@ PALETTE_EDITS = (
      "            if baseTheme == .night && self.baseColor == .blue {\n                return UIColor(rgb: 0x9dbb9f) // pluma: sage\n", 1),
     # The accent of the legacy screens (camera, media editor, location).
     (LEGACY_COLORS, "        color = TGColorWithHex(0x0088ff);\n", "        color = TGColorWithHex(0x5b7a5e); // pluma: sage\n", 1),
+    # The avatars drawn instead of a photo: Saved Messages (also replies and
+    # notes) and reposted stories, gradients of Telegram's blue in any theme.
+    (AVATAR_NODE, AVATAR_SAVED_MESSAGES, AVATAR_SAVED_MESSAGES.replace(
+        "UIColor(rgb: 0x2a9ef1), UIColor(rgb: 0x72d5fd)\n",
+        "UIColor(rgb: 0x5b7a5e), UIColor(rgb: 0x9dbb9f) // pluma: sage\n"), 1),
+    (AVATAR_NODE, AVATAR_REPOST, AVATAR_REPOST.replace(
+        "UIColor(rgb: 0x3DA1FD), UIColor(rgb: 0x34C76F)\n",
+        "UIColor(rgb: 0x4f6e52), UIColor(rgb: 0x9dbb9f) // pluma: sage\n"), 1),
 )
 
 # Night's message colours, each kind on one long line: (file, a text that
@@ -1185,6 +1200,12 @@ def verify_palette(tree):
                 raise PatchError(f"{rel}: Telegram's blue {blue} is still there")
     if "PresentationThemeAccentColor(baseColor: .blue)" in tree.read(PRESENTATION_DATA):
         raise PatchError(f"{PRESENTATION_DATA}: Night still gets the blue accent")
+    # The other avatar colours stay: they are the peer colours, one per user.
+    avatars = tree.read(AVATAR_NODE)
+    for name in ("savedMessagesColors", "repostColors"):
+        found = re.search(r"    static let %s: \[UIColor\] = \[\n(.*)\n" % name, avatars)
+        if not found or any(blue.lower() in found.group(1).lower() for blue in TELEGRAM_BLUES):
+            raise PatchError(f"{AVATAR_NODE}: {name} is not sage")
 
 
 # An entry of a .strings file, "key" = "value";, where the value may span

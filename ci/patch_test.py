@@ -341,6 +341,8 @@ DAMAGE = (
      "effectiveColors = PresentationThemeAccentColor(baseColor: .cyan)\n"),
     (patch.THEME_SETTINGS, "                value = 0x0088ff\n", "                value = 0x0089ff\n"),
     (patch.LEGACY_COLORS, "TGColorWithHex(0x0088ff)", "TGColorWithHex(0x0089ff)"),
+    (patch.AVATAR_NODE, "UIColor(rgb: 0x2a9ef1), UIColor(rgb: 0x72d5fd)\n    ]", "UIColor(rgb: 0x2a9ef1), UIColor(rgb: 0x72d5fe)\n    ]"),
+    (patch.AVATAR_NODE, "UIColor(rgb: 0x3DA1FD), UIColor(rgb: 0x34C76F)", "UIColor(rgb: 0x3DA1FD), UIColor(rgb: 0x34C76E)"),
     # Telegram's support.
     (patch.SETTINGS_ITEMS, "interaction.openSettings(.faq)", "interaction.openSettings(.faqPage)"),
     (patch.SETTINGS_SEARCH, "        allItems.append(contentsOf: helpItems)\n", "        allItems += helpItems\n"),
@@ -501,6 +503,12 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn("secondaryTextColor: UIColor(rgb: 0xb2ceb4), linkTextColor: UIColor(rgb: 0xb2ceb4),", dark)
         self.assertIn("let defaultPatternWallpaper: TelegramWallpaper = .color(0x131513)\n", dark)
         self.assertNotIn("baseColor: .blue", tree.read(patch.PRESENTATION_DATA))
+        avatars = tree.read(patch.AVATAR_NODE)
+        self.assertIn("    static let savedMessagesColors: [UIColor] = [\n"
+                      "        UIColor(rgb: 0x5b7a5e), UIColor(rgb: 0x9dbb9f) // pluma: sage\n", avatars)
+        self.assertIn("    static let repostColors: [UIColor] = [\n"
+                      "        UIColor(rgb: 0x4f6e52), UIColor(rgb: 0x9dbb9f) // pluma: sage\n", avatars)
+        self.assertIn("[UIColor(rgb: 0x2a9ef1), UIColor(rgb: 0x72d5fd)],", avatars)  # a peer colour, kept
         # No support section.
         self.assertNotIn("Settings_Support", tree.read(patch.SETTINGS_ITEMS))
         self.assertNotIn("let helpItems = ", tree.read(patch.SETTINGS_SEARCH))
