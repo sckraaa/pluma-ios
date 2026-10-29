@@ -341,6 +341,9 @@ DAMAGE = (
      "effectiveColors = PresentationThemeAccentColor(baseColor: .cyan)\n"),
     (patch.THEME_SETTINGS, "                value = 0x0088ff\n", "                value = 0x0089ff\n"),
     (patch.LEGACY_COLORS, "TGColorWithHex(0x0088ff)", "TGColorWithHex(0x0089ff)"),
+    # Telegram's support.
+    (patch.SETTINGS_ITEMS, "interaction.openSettings(.faq)", "interaction.openSettings(.faqPage)"),
+    (patch.SETTINGS_SEARCH, "        allItems.append(contentsOf: helpItems)\n", "        allItems += helpItems\n"),
     ("submodules/QrCodeUI/Sources/QrCodeScanScreen.swift", 'filteredCodes = codes.filter { $0.message.hasPrefix("tg://") }',
      'filteredCodes = codes.filter { $0.message.hasPrefix("tg://login") }'),
     ("submodules/TelegramUI/Components/ShareExtensionContext/Sources/ShareExtensionContext.swift",
@@ -498,6 +501,9 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn("secondaryTextColor: UIColor(rgb: 0xb2ceb4), linkTextColor: UIColor(rgb: 0xb2ceb4),", dark)
         self.assertIn("let defaultPatternWallpaper: TelegramWallpaper = .color(0x131513)\n", dark)
         self.assertNotIn("baseColor: .blue", tree.read(patch.PRESENTATION_DATA))
+        # No support section.
+        self.assertNotIn("Settings_Support", tree.read(patch.SETTINGS_ITEMS))
+        self.assertNotIn("let helpItems = ", tree.read(patch.SETTINGS_SEARCH))
 
     def test_dev_server(self):
         dev = patch.load_env(ROOT / "config/dev/server.env")

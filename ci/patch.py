@@ -17,7 +17,8 @@ replace Telegram's, each upstream file checked by its SHA-256 first, and the
 texts the user sees say Pluma where they said Telegram (the counts of the
 pinned commit are part of the patch). The app's links use its own scheme,
 plm://, not Telegram's tg://. The default themes take the palette "graphite
-and sage" instead of Telegram's blue.
+and sage" instead of Telegram's blue. Settings no longer lead to Telegram's
+support, FAQ and feature channel.
 
 Standard library only, so the CI and a developer machine run it as is.
 """
@@ -83,6 +84,8 @@ DARK_THEME = "submodules/TelegramPresentationData/Sources/DefaultDarkPresentatio
 PRESENTATION_DATA = "submodules/TelegramPresentationData/Sources/PresentationData.swift"
 THEME_SETTINGS = "submodules/TelegramUIPreferences/Sources/PresentationThemeSettings.swift"
 LEGACY_COLORS = "submodules/LegacyComponents/Sources/TGColor.m"
+SETTINGS_ITEMS = "submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoSettingsItems.swift"
+SETTINGS_SEARCH = "submodules/SettingsUI/Sources/Search/SettingsSearchableItems.swift"
 MAKE = "build-system/Make/Make.py"
 BUILD_CONFIGURATION = "build-system/Make/BuildConfiguration.py"
 VERSIONS = "versions.json"
@@ -232,7 +235,8 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + tuple(INFOPLIST_STRINGS.format(lang) for lang in INFOPLIST_NAMES)
                   + tuple(sorted({rel for rel, _, _ in CODE_NAMES}))
                   + tuple(sorted({rel for rel, _, _ in SCHEME_LINKS})) + (URL_HANDLING,)
-                  + (DAY_THEME, DARK_THEME, PRESENTATION_DATA, THEME_SETTINGS, LEGACY_COLORS))
+                  + (DAY_THEME, DARK_THEME, PRESENTATION_DATA, THEME_SETTINGS, LEGACY_COLORS)
+                  + (SETTINGS_ITEMS, SETTINGS_SEARCH))
 
 
 class PatchError(Exception):
@@ -803,6 +807,7 @@ def patch(tree, c):
     patch_names(tree, c)
     patch_scheme(tree, c)
     patch_palette(tree)
+    patch_support(tree)
 
     # The build configuration of Make.py, with exactly the keys it reads.
     conf = c.build_configuration()
@@ -1128,6 +1133,43 @@ TELEGRAM_BLUES = ("0x0088ff", "0x3e88f7", "0x2ca5e0", "0x46739e", "0x4892f2", "0
                   "0x3DA1FD", "0xd9f4ff", "0x004bad", "0x0b8bed", "0x57b2e0", "0x0077d9", "0x61BCF9")
 
 
+SUPPORT_ITEMS_OLD = src(" " * 4, """
+    items[.support]!.append(PeerInfoScreenDisclosureItem(id: 0, text: presentationData.strings.Settings_Support, icon: PresentationResourcesSettings.support, action: {
+        interaction.openSettings(.support)
+    }))
+    items[.support]!.append(PeerInfoScreenDisclosureItem(id: 1, text: presentationData.strings.Settings_FAQ, icon: PresentationResourcesSettings.faq, action: {
+        interaction.openSettings(.faq)
+    }))
+    items[.support]!.append(PeerInfoScreenDisclosureItem(id: 2, text: presentationData.strings.Settings_Tips, icon: PresentationResourcesSettings.tips, action: {
+        interaction.openSettings(.tips)
+    }))
+""")
+
+SUPPORT_SEARCH_OLD = src(" " * 8, """
+    let helpItems = helpSearchableItems(context: context)
+    allItems.append(contentsOf: helpItems)
+""")
+
+
+def patch_support(tree):
+    """The last section of Settings leads to Telegram's services only: "Ask a
+    Question" asks the server for Telegram's support account (help.getSupport,
+    which Pluma's server does not serve), the FAQ is telegram.org/faq and
+    "Features" is the channel @TelegramTips. The section goes, and so do its
+    items in the settings search."""
+    tree.replace_lines(SETTINGS_ITEMS, SUPPORT_ITEMS_OLD,
+                       "    // pluma: no support section; its items lead to Telegram's support, FAQ and channel.\n")
+    tree.replace_lines(SETTINGS_SEARCH, SUPPORT_SEARCH_OLD,
+                       "        // pluma: no support, FAQ or features items (see PeerInfoSettingsItems.swift).\n")
+
+
+def verify_support(tree):
+    if "items[.support]!.append(" in tree.read(SETTINGS_ITEMS):
+        raise PatchError(f"{SETTINGS_ITEMS}: Settings still lead to Telegram's support")
+    if "helpSearchableItems(context: context)" in tree.read(SETTINGS_SEARCH):
+        raise PatchError(f"{SETTINGS_SEARCH}: the settings search still leads to Telegram's support")
+
+
 def patch_palette(tree):
     for rel, old, new, count in PALETTE_EDITS:
         tree.replace(rel, old, new, count=count)
@@ -1345,6 +1387,7 @@ def verify(tree, c):
     verify_names(tree, c)
     verify_scheme(tree, c)
     verify_palette(tree)
+    verify_support(tree)
 
     build = tree.read(APP_BUILD)
     if "<string>Telegram</string>" in build or "<string>telegram</string>" in build:
