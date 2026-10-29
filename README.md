@@ -16,16 +16,43 @@ The repository holds no copy of the app's code. CI fetches the upstream release 
   - a public build, as from the App Store: no internal debug features, no App Center, no in-app purchases;
   - no iCloud and no Siri, which need capabilities of their own.
 
-  The name under the icon and in the share sheet is "Pluma". The app's own links (the widget opens the app with them) use the `pluma://` scheme, so they do not open Telegram installed on the same phone. These two are edits of `Telegram/BUILD`.
+  The name under the icon and in the share sheet is "Pluma". The app registers the `plm://` scheme instead of Telegram's `tg://` ([Branding](#branding)). These are edits of `Telegram/BUILD`.
+- **Branding.** Pluma's icons, logos, name, link scheme and colours instead of Telegram's: see [Branding](#branding).
 - **Build flags.** The upstream `.bazelrc` imports `pluma.bazelrc`, which [`ci/build.sh`](ci/build.sh) writes: the cache locations, and no provisioning profiles for a simulator build.
 
 After the edits, the result is checked again. MtProtoKit, TelegramCore and TelegramVoip may hold no address in Telegram's published ranges, and their only RSA keys must be the server's. The check also covers the layer (`currentLayer()` is 228), the versions of `versions.json`, and the `Make.py` options and targets the build relies on.
 
 What the patch leaves, and why:
-- **Links** to `t.me`, `telegram.org` and `fragment.com` in the interface: share links, the FAQ, the terms. There are about 120 of them, and each opens only when tapped. They change together with the rest of the rebranding (the icon, the strings that say "Telegram").
+- **Links** to `t.me`, `telegram.org` and `fragment.com` in the interface: share links, the terms, the privacy policy. There are about 120 of them in the code and 54 in the strings, and each opens only when tapped. The rebranding leaves URLs as they are.
 - **The reflector benchmark** of TelegramUI's `AppDelegate` measures a call server of Telegram's. It runs only in internal builds or behind a hidden debug switch; this is a public build.
 - **Connection probing.** MtProtoKit pings `google.com` or `8.8.8.8` (ICMP) when a proxy the user set up stops answering.
 - **Translation and app icons.** Translation through Google, and app icons from the App Store in "Open in…", load only when the user asks.
+
+## Branding
+
+The app looks like Pluma, not like Telegram. The brand kit of the server repository (task 017: the logo and the palette "graphite and sage") is the source; the patch applies it:
+
+- **Icons and logos.** [`brand/render.sh`](brand/render.sh) renders the images from the kit's SVGs ([`brand/pluma-icon-square.svg`](brand/pluma-icon-square.svg), [`brand/pluma-mark.svg`](brand/pluma-mark.svg), [`brand/pluma-mark-mono.svg`](brand/pluma-mark-mono.svg)) into [`brand/ios`](brand/ios), each under the upstream path of the file it replaces. The patch checks each upstream file by its SHA-256 and copies Pluma's over it:
+  - the app icon (Icon Composer, `Telegram.icon`): the mark on white, a light mark on graphite in the dark appearance, and the tinted and clear ones iOS 26 derives;
+  - the alternate icon `BlueIcon`, which the app counts as its default one. The other alternate icons are Telegram's: the bundle no longer carries them, and the icon picker shows Pluma's only;
+  - the home screen quick action, the context menu item, the call screen title and CallKit;
+  - the QR code logos and their animations ([`brand/tgs.py`](brand/tgs.py) writes the mark as a still Lottie);
+  - the first page of the intro (the mark on a white disc, no paper plane); the pages "Powerful" and "Cloud-Based" are sage instead of blue.
+- **Name.** "Telegram" becomes "Pluma" wherever the user reads it: the built-in English strings (556 entries, feature names included, such as "Pluma Premium"; string keys, URLs and user names stay), the permission prompts in every language (in Arabic, Persian and Korean script too, and the name under the icon in Arabic and Korean), the Photos album, CallKit, the locked widget, the label of the app's entry in address book contacts.
+- **Link scheme.** The app registers `plm://`, not `tg://`, which stays with Telegram installed on the same phone. The links it makes use `plm://`, the QR code of a sign-in on another device among them; its scanner takes `plm://` codes only, so a sign-in by QR code works between Pluma clients. `tg://` links inside the app (messages, bots) still open in it.
+- **Colours.** Day Classic and Night, the themes of a fresh install, take the palette: sage accents (`#5B7A5E` light, `#9DBB9F` dark), sage links, bubbles, time and checks, a white or graphite chat background instead of Telegram's pattern. The first accent the theme settings offer is sage. The other built-in themes ("Day", "Night Tinted") and the other accents stay as they are.
+- **Settings.** The support section ("Ask a Question", the FAQ, "Pluma Features") leads only to Telegram's services and is gone.
+
+Every edit is exact, as the rest of the patch: the counts of the pinned commit are part of it (the strings, the colours, the links), and an upstream update that moves any of them stops the patch.
+
+To change an image, edit the SVG and re-render; this needs rsvg-convert (librsvg), ImageMagick 7 and Python 3, and writes the same bytes on a re-run:
+
+```sh
+brand/render.sh                      # brand/ios
+python3 -m unittest discover -s ci -p '*_test.py'
+```
+
+A new or renamed file in `brand/ios` needs its entry in `BRAND_REPLACED` or `BRAND_ADDED` of [`ci/patch.py`](ci/patch.py); the tests compare the two.
 
 ## Configuration
 
