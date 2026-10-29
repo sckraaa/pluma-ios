@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import hashlib
 import io
 import json
 import os
@@ -208,11 +209,40 @@ class TreeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, self.assertRaises(patch.PatchError):
             patch.Tree(d)
 
+    def test_files_by_hash(self):
+        sha = hashlib.sha256(b"one two two\nvoid f() {\n    body;\n        \n    end;\n}\n").hexdigest()
+        with self.assertRaises(patch.PatchError):
+            self.tree.replace_file("a.txt", "0" * 64, b"x")
+        with self.assertRaises(patch.PatchError):
+            self.tree.replace_file("b.txt", sha, b"x")
+        with self.assertRaises(patch.PatchError):
+            self.tree.add_file("a.txt", b"x")
+        self.tree.replace_file("a.txt", sha, b"\x89PNG")
+        self.assertEqual((self.tree.root / "a.txt").read_bytes(), b"\x89PNG")
+        self.tree.add_file("b/c.png", b"c")
+        self.tree.remove_file("b/c.png", hashlib.sha256(b"c").hexdigest())
+        self.assertFalse((self.tree.root / "b/c.png").exists())
+
+
+class BrandTest(unittest.TestCase):
+    def test_brand_files_are_the_patch_list(self):
+        # brand/render.sh writes exactly the files the patch copies.
+        self.assertEqual(patch.brand_files(), sorted(set(patch.BRAND_REPLACED) | set(patch.BRAND_ADDED)))
+        self.assertFalse(set(patch.BRAND_ADDED) & set(patch.BRAND_REPLACED))
+        for rel in patch.BRAND_REMOVED:
+            self.assertTrue(rel.startswith(patch.APP_ICON + "/"))
+
+    def test_upstream_paths_cover_the_brand(self):
+        paths = patch.UPSTREAM_PATHS
+        for rel in list(patch.BRAND_REPLACED) + list(patch.BRAND_REMOVED) + list(patch.BRAND_ADDED):
+            self.assertTrue(any(rel == p or rel.startswith(p + "/") for p in paths), rel)
+
 
 # --- the patch on the pinned upstream ------------------------------------------
 
 NETWORK, ACCOUNT, AUTH_KEYS, ENCRYPTION = patch.NETWORK, patch.ACCOUNT, patch.AUTH_KEYS, patch.ENCRYPTION
 BACKUP, DNS, CALLS, BUILD, MAKE = patch.BACKUP, patch.DNS, patch.CALLS, patch.APP_BUILD, patch.MAKE
+APP_DELEGATE, INTRO = patch.APP_DELEGATE, patch.INTRO_ANIMATIONS
 
 # Damage to each place the patch edits or checks, as (file, text in the
 # pinned upstream, replacement): every one must stop the patch with an error
@@ -252,6 +282,12 @@ DAMAGE = (
     (DNS, "timeout:10.0 onQueue:[MTQueue concurrentDefaultQueue] orSignal", "timeout:5.0 onQueue:[MTQueue concurrentDefaultQueue] orSignal"),
     (CALLS, 'ip: "91.108.9.38",', 'ip: "91.108.9.39",'),
     (patch.BAZELRC, "build --action_env=ZERO_AR_DATE=1\n", "build --action_env=ZERO_AR_DATE=1\ntry-import %workspace%/user.bazelrc\n"),
+    # The brand.
+    (BUILD, '    "PremiumTurbo",\n]\n', '    "PremiumTurbo",\n    "Premium2",\n]\n'),
+    (APP_DELEGATE, 'PresentationAppIcon(name: "New2", imageName: "New2"),', 'PresentationAppIcon(name: "New3", imageName: "New3"),'),
+    (INTRO, "cloud_color = {42/255., 180/255., 247/255., 1};", "cloud_color = {42/255., 181/255., 247/255., 1};"),
+    (INTRO, "powerful_bg_color = {47/255., 90/255., 131/255., 1};", "powerful_bg_color = {47/255., 90/255., 132/255., 1};"),
+    (patch.APP_ICON + "/icon.json", '"image-name" : "Plane.svg"', '"image-name" : "Plane2.svg"'),
     # Traces of Telegram elsewhere in the network code.
     (NETWORK, "            context.keychain = keychain\n",
      '            context.keychain = keychain\n            let fallbackAddress = "149.154.167.51"\n'),
@@ -287,15 +323,19 @@ def upstream_files():
 
 
 class RecordingTree(patch.Tree):
-    """A tree that remembers what the patch wrote."""
+    """A tree that remembers what the patch wrote or removed."""
 
     def __init__(self, root, written):
         super().__init__(root)
         self.written = written
 
-    def write(self, rel, text):
+    def write_bytes(self, rel, data):
         self.written.add(str(rel))
-        super().write(rel, text)
+        super().write_bytes(rel, data)
+
+    def unlink(self, rel):
+        self.written.add(str(rel))
+        super().unlink(rel)
 
 
 @unittest.skipIf(not os.environ.get("CI") and upstream_files() is None,
@@ -362,6 +402,14 @@ class UpstreamTest(unittest.TestCase):
         self.assertEqual(conf["team_id"], "ABCDE12345")
         self.assertEqual(set(conf), patch.required_configuration_keys(tree))
         self.assertTrue(tree.read(patch.BAZELRC).endswith("try-import %workspace%/pluma.bazelrc\n"))
+        # The brand: Pluma's images, one alternate icon, the intro in sage.
+        for rel in list(patch.BRAND_REPLACED) + list(patch.BRAND_ADDED):
+            self.assertEqual((self.root / rel).read_bytes(), (patch.BRAND / rel).read_bytes(), rel)
+        for rel in patch.BRAND_REMOVED:
+            self.assertFalse((self.root / rel).exists(), rel)
+        self.assertIn('alternate_icon_folders = [\n    "BlueIcon",\n]\n', build)
+        self.assertEqual(tree.read(APP_DELEGATE).count("PresentationAppIcon("), 1)
+        self.assertIn("vec4 cloud_color = {111/255., 143/255., 114/255., 1};", tree.read(INTRO))
 
     def test_dev_server(self):
         dev = patch.load_env(ROOT / "config/dev/server.env")
@@ -375,6 +423,33 @@ class UpstreamTest(unittest.TestCase):
         self.run_patch()
         with self.assertRaises(patch.PatchError):
             self.run_patch()
+
+    def test_damaged_images(self):
+        # A changed or missing upstream image stops the patch too.
+        for rel in ("Telegram/Telegram-iOS/BlueIcon.alticon/BlueIcon@3x.png", "Telegram/Telegram-iOS/Resources/PlaneLogo.tgs",
+                    "submodules/TelegramUI/Images.xcassets/Chat/Context Menu/Telegram.imageset/tlogo_24.pdf",
+                    patch.APP_ICON + "/Assets/Oval.svg"):
+            for damage in ("byte", "missing"):
+                with self.subTest(rel=rel, damage=damage):
+                    self.tearDown()
+                    self.written.add(rel)
+                    if damage == "byte":
+                        data = bytearray(self.files[rel])
+                        data[-1] ^= 1
+                        (self.root / rel).write_bytes(bytes(data))
+                    else:
+                        (self.root / rel).unlink()
+                    with self.assertRaises(patch.PatchError) as e:
+                        self.run_patch()
+                    self.assertIn(rel, str(e.exception))
+        # A file of Pluma's icon that upstream has already.
+        self.tearDown()
+        rel = patch.BRAND_ADDED[0]
+        self.written.add(rel)
+        (self.root / rel).write_bytes(b"\x89PNG")
+        with self.assertRaises(patch.PatchError) as e:
+            self.run_patch()
+        self.assertIn(rel, str(e.exception))
 
     def test_damage(self):
         for rel, old, new in DAMAGE:

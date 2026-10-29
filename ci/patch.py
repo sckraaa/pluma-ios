@@ -12,6 +12,9 @@ The app's identity (bundle ID, api_id, api_hash, Team ID) is not an edit: it
 goes to the build configuration that Telegram-iOS's Make.py reads
 (--configurationPath), written here as build-system/pluma-configuration.json.
 
+The brand: Pluma's images (rendered into brand/ios by brand/render.sh)
+replace Telegram's, each upstream file checked by its SHA-256 first.
+
 Standard library only, so the CI and a developer machine run it as is.
 """
 
@@ -69,6 +72,8 @@ BACKUP = "submodules/MtProtoKit/Sources/MTBackupAddressSignals.m"
 DNS = "submodules/MtProtoKit/Sources/MTDNS.m"
 CALLS = "submodules/TelegramVoip/Sources/OngoingCallContext.swift"
 APP_BUILD = "Telegram/BUILD"
+APP_DELEGATE = "submodules/TelegramUI/Sources/AppDelegate.swift"
+INTRO_ANIMATIONS = "submodules/RMIntro/Sources/core/animations.c"
 MAKE = "build-system/Make/Make.py"
 BUILD_CONFIGURATION = "build-system/Make/BuildConfiguration.py"
 VERSIONS = "versions.json"
@@ -78,9 +83,51 @@ BAZELRC = ".bazelrc"
 CONFIGURATION = "build-system/pluma-configuration.json"
 PLUMA_BAZELRC = "pluma.bazelrc"
 
+# Pluma's images, rendered by brand/render.sh under the upstream paths of the
+# files they replace, and the SHA-256 of each of those files in the pinned
+# commit.
+BRAND = pathlib.Path(__file__).resolve().parent.parent / "brand" / "ios"
+APP_ICON = "Telegram/Telegram-iOS/Telegram.icon"
+BRAND_REPLACED = {
+    # The app icon (Icon Composer) and the alternate icon the app counts as
+    # its default one.
+    f"{APP_ICON}/icon.json": "cf7c84b1ceef48a16c9ea2c193428417f99b80258752d7fcc14914f6b0ca4c89",
+    "Telegram/Telegram-iOS/BlueIcon.alticon/BlueIcon@2x.png": "a2f7b28961cbf6fa0a46b970a8f928f057784619d51a555a76af95d5fcf1e049",
+    "Telegram/Telegram-iOS/BlueIcon.alticon/BlueIcon@3x.png": "93510b572e0aa62f2d919147abe61511121d6b22048d9123ca49951d72097eaa",
+    "Telegram/Telegram-iOS/BlueIcon.alticon/BlueIconIpad.png": "0df79fe993096053534a6b8e29564d5ca45e5dfed3b08efc13b46f88498d4d30",
+    "Telegram/Telegram-iOS/BlueIcon.alticon/BlueIconIpad@2x.png": "e0512a4bc616c30db3cd45f2d0f5f9cc2daa59e6629e1715b2c966e3d1cab852",
+    "Telegram/Telegram-iOS/BlueIcon.alticon/BlueIconLargeIpad@2x.png": "c1ad8db762259527ff8b2d787196010bec2584ca6a5e906da2138b43f7940050",
+    "Telegram/Telegram-iOS/BlueIcon.alticon/BlueNotificationIcon.png": "5efeec2428e5cb6e7c2094b23ac6b2a095610e10175436d72235862796ab64b3",
+    "Telegram/Telegram-iOS/BlueIcon.alticon/BlueNotificationIcon@2x.png": "1ef3dc249a9fef7b0adfec5c9c9afbaf49d66f3f7d0520908cfb4da25aa73565",
+    "Telegram/Telegram-iOS/BlueIcon.alticon/BlueNotificationIcon@3x.png": "a4997112e7808dd56e58f1e8eb05a4fdb203ce2021ca0070296a631e0534b3e1",
+    # The home screen quick action and the context menu item of the app.
+    "Telegram/Telegram-iOS/Icons.xcassets/Shortcuts/AppIcon.imageset/tlogo_24.pdf": "787186461237a57b6a8406d61f8e34a16e0fe852b412cb7d727823ea956fea3b",
+    "submodules/TelegramUI/Images.xcassets/Chat/Context Menu/Telegram.imageset/tlogo_24.pdf": "787186461237a57b6a8406d61f8e34a16e0fe852b412cb7d727823ea956fea3b",
+    # Calls: the call screen title and CallKit's button of the app.
+    "submodules/TelegramUI/Images.xcassets/Call/CallTitleLogo.imageset/ic_calls_tlogo.pdf": "a2a9c3cb4b640df4dd49f76edae8ede35b2454a880756d37b7725cc06131ac2a",
+    "submodules/TelegramUI/Images.xcassets/Call/CallKitLogo.imageset/CallKitLogo@2x.png": "ad30551081c7852c8d0776360fbb30fed0ca21ef96a08b84c7bc09bac342f4ff",
+    "submodules/TelegramUI/Images.xcassets/Call/CallKitLogo.imageset/CallKitLogo@3x.png": "d3f5692599ba33a620ee3a576d3dce76b8587fa4ca048fb2a017ffd14766f8ee",
+    # The logos of the QR codes, still and animated.
+    "submodules/TelegramUI/Images.xcassets/Chat/Links/QrLogo.imageset/ic_qrlogo.pdf": "7c70dc0384fa389e83ec8258c17c72fa9440927835ae82684fece7883686e59f",
+    "submodules/TelegramUI/Images.xcassets/Share/QrPlaneIcon.imageset/ic_qrlogo.pdf": "b1360bb26ad4df49470c1fd27c2238b68d390db8ad8bc4a67d0dd00b4f893b71",
+    "Telegram/Telegram-iOS/Resources/PlaneLogo.tgs": "d13203f9221c5dfd0a4a34a835f7f7d5b53e90276077998b9784299c914995e4",
+    "Telegram/Telegram-iOS/Resources/PlaneLogoPlain.tgs": "486cbe566d05f023f3c72ec00b55f921deb1f7aed2efb630fe717425e2d98d0a",
+    # The first page of the intro: the sphere and the plane around it.
+    "Telegram/Telegram-iOS/Resources/intro/telegram_sphere@2x.png": "621831c454689762c79c80083f797352aa420c488c19ba924da006ab533dd0bb",
+    "Telegram/Telegram-iOS/Resources/intro/telegram_plane1@2x.png": "c28d4e5438f3a10fa1df725764b4bc897af475983070aaf08df1b631334a10a1",
+}
+# The layers of Pluma's app icon, and those of Telegram's that go.
+BRAND_ADDED = tuple(f"{APP_ICON}/Assets/{n}.png" for n in ("Feather1", "Feather2", "Feather3", "Ring"))
+BRAND_REMOVED = {
+    f"{APP_ICON}/Assets/Oval.svg": "30b7245c9edef107ea7520cdd958246fcc771fa0872bb2f6cd13ab2dc11cfffd",
+    f"{APP_ICON}/Assets/Plane.svg": "f4da98d58f274a9d95d491badd14afafa378f335a0bd2b496db83836e21f15e8",
+}
+
 # Everything the patch reads, edits or checks: the check job fetches only
 # these (ci/fetch-upstream.sh sparse).
-UPSTREAM_PATHS = (VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_DIRS
+UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_DIRS
+                  + (APP_ICON,) + tuple(sorted(r for r in BRAND_REPLACED if not r.startswith(APP_ICON + "/")))
+                  + (APP_DELEGATE, INTRO_ANIMATIONS))
 
 
 class PatchError(Exception):
@@ -195,9 +242,39 @@ class Tree:
         return (self.root / rel).read_text(encoding="utf-8")
 
     def write(self, rel, text):
+        self.write_bytes(rel, text.encode("utf-8"))
+
+    def write_bytes(self, rel, data):
         p = self.root / rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text, encoding="utf-8")
+        p.write_bytes(data)
+
+    def unlink(self, rel):
+        (self.root / rel).unlink()
+
+    def sha256(self, rel):
+        p = self.root / rel
+        return hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None
+
+    def expect_file(self, rel, sha256):
+        """The file must be the one of the pinned commit, byte for byte."""
+        found = self.sha256(rel)
+        if found != sha256:
+            state = "missing" if found is None else f"SHA-256 {found}"
+            raise PatchError(f"{rel}: {state}, expected {sha256}; upstream changed it")
+
+    def replace_file(self, rel, sha256, data):
+        self.expect_file(rel, sha256)
+        self.write_bytes(rel, data)
+
+    def add_file(self, rel, data):
+        if (self.root / rel).exists():
+            raise PatchError(f"{rel}: already exists; upstream changed it")
+        self.write_bytes(rel, data)
+
+    def remove_file(self, rel, sha256):
+        self.expect_file(rel, sha256)
+        self.unlink(rel)
 
     def expect(self, rel, s, count=1):
         found = self.read(rel).count(s)
@@ -601,6 +678,8 @@ def patch(tree, c):
     tree.replace(APP_BUILD, "                <string>telegram</string>\n",
                  f"                <string>{c.url_scheme}</string>\n")
 
+    patch_brand(tree)
+
     # The build configuration of Make.py, with exactly the keys it reads.
     conf = c.build_configuration()
     want = required_configuration_keys(tree)
@@ -616,6 +695,106 @@ def patch(tree, c):
     tree.write(BAZELRC, rc + ("" if rc.endswith("\n") else "\n")
                + "\n# pluma: the flags of ci/build.sh.\n"
                + f"try-import %workspace%/{PLUMA_BAZELRC}\n")
+
+
+ALTERNATE_ICONS_OLD = """alternate_icon_folders = [
+    "BlackIcon",
+    "BlackClassicIcon",
+    "BlackFilledIcon",
+    "BlueIcon",
+    "BlueClassicIcon",
+    "BlueFilledIcon",
+    "WhiteFilledIcon",
+    "New1",
+    "New2",
+    "Premium",
+    "PremiumBlack",
+    "PremiumTurbo",
+]
+"""
+
+APP_ICONS_OLD = src(" " * 16, """
+    var icons = [
+        PresentationAppIcon(name: "BlueIcon", imageName: "BlueIcon", isDefault: buildConfig.isAppStoreBuild),
+        PresentationAppIcon(name: "New2", imageName: "New2"),
+        PresentationAppIcon(name: "New1", imageName: "New1"),
+        PresentationAppIcon(name: "BlackIcon", imageName: "BlackIcon"),
+        PresentationAppIcon(name: "BlueClassicIcon", imageName: "BlueClassicIcon"),
+        PresentationAppIcon(name: "BlackClassicIcon", imageName: "BlackClassicIcon"),
+        PresentationAppIcon(name: "BlueFilledIcon", imageName: "BlueFilledIcon"),
+        PresentationAppIcon(name: "BlackFilledIcon", imageName: "BlackFilledIcon")
+    ]
+    if buildConfig.isInternalBuild {
+        icons.append(PresentationAppIcon(name: "WhiteFilledIcon", imageName: "WhiteFilledIcon"))
+    }
+
+    icons.append(PresentationAppIcon(name: "Premium", imageName: "Premium", isPremium: true))
+    icons.append(PresentationAppIcon(name: "PremiumTurbo", imageName: "PremiumTurbo", isPremium: true))
+    icons.append(PresentationAppIcon(name: "PremiumBlack", imageName: "PremiumBlack", isPremium: true))
+
+    return icons
+""")
+
+
+def brand_files():
+    """The files of brand/ios, as paths relative to it."""
+    if not BRAND.is_dir():
+        raise PatchError(f"{BRAND}: missing (brand/render.sh)")
+    return sorted(p.relative_to(BRAND).as_posix() for p in BRAND.rglob("*")
+                  if p.is_file() and not p.name.startswith("."))
+
+
+def patch_brand(tree):
+    """Pluma's images in place of Telegram's: the app icon and the alternate
+    one, the logos of the quick action, the context menu, calls and QR codes,
+    and the first page of the intro."""
+    want = sorted(set(BRAND_REPLACED) | set(BRAND_ADDED))
+    if brand_files() != want:
+        raise PatchError(f"brand/ios holds {brand_files()}, the patch expects {want}; "
+                         "re-run brand/render.sh or update BRAND_* in ci/patch.py")
+    for rel, sha256 in BRAND_REPLACED.items():
+        tree.replace_file(rel, sha256, (BRAND / rel).read_bytes())
+    for rel, sha256 in BRAND_REMOVED.items():
+        tree.remove_file(rel, sha256)
+    for rel in BRAND_ADDED:
+        tree.add_file(rel, (BRAND / rel).read_bytes())
+
+    # One alternate icon, Pluma's, in the folder of the one the app counts as
+    # its default (BlueIcon: the icon picker, the theme file type); the
+    # others are Telegram's, so the bundle carries them no more and the
+    # picker does not offer them.
+    tree.replace(APP_BUILD, ALTERNATE_ICONS_OLD,
+                 "# pluma: Pluma's icon only, in the folder the app counts as its default.\n"
+                 "alternate_icon_folders = [\n"
+                 '    "BlueIcon",\n'
+                 "]\n")
+    tree.replace_lines(APP_DELEGATE, APP_ICONS_OLD, src(" " * 16, """
+        // pluma: Pluma's icon only; the others are Telegram's.
+        return [
+            PresentationAppIcon(name: "BlueIcon", imageName: "BlueIcon", isDefault: buildConfig.isAppStoreBuild)
+        ]
+    """))
+
+    # The intro: sage instead of Telegram's blues behind the pages "Powerful"
+    # (#4F6E52) and "Cloud-Based" (#6F8F72).
+    tree.replace(INTRO_ANIMATIONS, "    vec4 powerful_bg_color = {47/255., 90/255., 131/255., 1};\n",
+                 "    vec4 powerful_bg_color = {79/255., 110/255., 82/255., 1}; // pluma: #4F6E52\n")
+    tree.replace(INTRO_ANIMATIONS, "    vec4 cloud_color = {42/255., 180/255., 247/255., 1};\n",
+                 "    vec4 cloud_color = {111/255., 143/255., 114/255., 1}; // pluma: #6F8F72\n")
+
+
+def verify_brand(tree):
+    for rel in sorted(set(BRAND_REPLACED) | set(BRAND_ADDED)):
+        if tree.sha256(rel) != hashlib.sha256((BRAND / rel).read_bytes()).hexdigest():
+            raise PatchError(f"{rel}: not Pluma's image of brand/ios")
+    for rel in BRAND_REMOVED:
+        if (tree.root / rel).exists():
+            raise PatchError(f"{rel}: Telegram's image is still there")
+    m = re.search(r"^alternate_icon_folders = \[(.*?)\]", tree.read(APP_BUILD), re.S | re.M)
+    if not m or re.findall(r'"([^"]+)"', m.group(1)) != ["BlueIcon"]:
+        raise PatchError(f"{APP_BUILD}: alternate icons other than Pluma's")
+    if tree.read(APP_DELEGATE).count("PresentationAppIcon(") != 1:
+        raise PatchError(f"{APP_DELEGATE}: the icon picker offers Telegram's icons")
 
 
 IPV4 = re.compile(r"(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])")
@@ -695,6 +874,8 @@ def verify(tree, c):
         raise PatchError(f"{ACCOUNT}: a fresh install does not start on datacenter 1")
     if "[MTSignal complete];\n}\n\n@end\n" not in tree.read(BACKUP):
         raise PatchError(f"{BACKUP}: backup addresses are not off")
+
+    verify_brand(tree)
 
     build = tree.read(APP_BUILD)
     if "<string>Telegram</string>" in build or "<string>telegram</string>" in build:
