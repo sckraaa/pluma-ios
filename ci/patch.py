@@ -16,7 +16,8 @@ The brand: Pluma's images (rendered into brand/ios by brand/render.sh)
 replace Telegram's, each upstream file checked by its SHA-256 first, and the
 texts the user sees say Pluma where they said Telegram (the counts of the
 pinned commit are part of the patch). The app's links use its own scheme,
-plm://, not Telegram's tg://.
+plm://, not Telegram's tg://. The default themes take the palette "graphite
+and sage" instead of Telegram's blue.
 
 Standard library only, so the CI and a developer machine run it as is.
 """
@@ -77,6 +78,11 @@ CALLS = "submodules/TelegramVoip/Sources/OngoingCallContext.swift"
 APP_BUILD = "Telegram/BUILD"
 APP_DELEGATE = "submodules/TelegramUI/Sources/AppDelegate.swift"
 INTRO_ANIMATIONS = "submodules/RMIntro/Sources/core/animations.c"
+DAY_THEME = "submodules/TelegramPresentationData/Sources/DefaultDayPresentationTheme.swift"
+DARK_THEME = "submodules/TelegramPresentationData/Sources/DefaultDarkPresentationTheme.swift"
+PRESENTATION_DATA = "submodules/TelegramPresentationData/Sources/PresentationData.swift"
+THEME_SETTINGS = "submodules/TelegramUIPreferences/Sources/PresentationThemeSettings.swift"
+LEGACY_COLORS = "submodules/LegacyComponents/Sources/TGColor.m"
 MAKE = "build-system/Make/Make.py"
 BUILD_CONFIGURATION = "build-system/Make/BuildConfiguration.py"
 VERSIONS = "versions.json"
@@ -225,7 +231,8 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + (APP_DELEGATE, INTRO_ANIMATIONS, STRINGS)
                   + tuple(INFOPLIST_STRINGS.format(lang) for lang in INFOPLIST_NAMES)
                   + tuple(sorted({rel for rel, _, _ in CODE_NAMES}))
-                  + tuple(sorted({rel for rel, _, _ in SCHEME_LINKS})) + (URL_HANDLING,))
+                  + tuple(sorted({rel for rel, _, _ in SCHEME_LINKS})) + (URL_HANDLING,)
+                  + (DAY_THEME, DARK_THEME, PRESENTATION_DATA, THEME_SETTINGS, LEGACY_COLORS))
 
 
 class PatchError(Exception):
@@ -393,6 +400,22 @@ class Tree:
         if found != count:
             raise PatchError(f"{rel}: {found} occurrences of {old.strip()[:80]!r}..., expected {count}")
         self.write(rel, out)
+
+    def replace_in_line(self, rel, anchor, edits):
+        """Edits the one line that holds anchor: each (old, new, count) must
+        occur exactly count times in it."""
+        lines = self.read(rel).split("\n")
+        hits = [i for i, line in enumerate(lines) if anchor in line]
+        if len(hits) != 1:
+            raise PatchError(f"{rel}: {len(hits)} lines with {anchor.strip()[:60]!r}..., expected 1; upstream changed it")
+        line = lines[hits[0]]
+        for old, new, count in edits:
+            if line.count(old) != count:
+                raise PatchError(f"{rel}: {line.count(old)} occurrences of {old!r} in the line of "
+                                 f"{anchor.strip()[:40]!r}..., expected {count}")
+            line = line.replace(old, new)
+        lines[hits[0]] = line
+        self.write(rel, "\n".join(lines))
 
     def replace_body(self, rel, head, tail, body, must_contain=()):
         """Replaces what lies between head and the first tail after it."""
@@ -779,6 +802,7 @@ def patch(tree, c):
     patch_brand(tree)
     patch_names(tree, c)
     patch_scheme(tree, c)
+    patch_palette(tree)
 
     # The build configuration of Make.py, with exactly the keys it reads.
     conf = c.build_configuration()
@@ -881,6 +905,244 @@ def patch_brand(tree):
                  "    vec4 powerful_bg_color = {79/255., 110/255., 82/255., 1}; // pluma: #4F6E52\n")
     tree.replace(INTRO_ANIMATIONS, "    vec4 cloud_color = {42/255., 180/255., 247/255., 1};\n",
                  "    vec4 cloud_color = {111/255., 143/255., 114/255., 1}; // pluma: #6F8F72\n")
+
+
+# --- palette "graphite and sage" ----------------------------------------------
+#
+# Task 017 of the server repository. Graphite for text, icons and headers;
+# sage the single accent:
+#
+#   role                         light                       dark
+#   accent (buttons, switches,   #5B7A5E, white text         #9DBB9F, text #131513
+#     counters, selection)
+#   soft accent                  #6F8F72 on #E3EAE2          #7FA082 on #2C3A2D
+#   links                        #4F6E52                     #B2CEB4
+#   incoming bubble              #F1F2F0                     #232623
+#   outgoing bubble              #E3EAE2 -> #D5E1D4,         #2C3A2D -> #36473A,
+#                                  text #1F2E20                text #E8ECE8
+#   time and checks, outgoing    #5B7A5E                     #B2CEB4
+#   background                   #FFFFFF                     #131513
+#
+# The default themes of a fresh install are Day Classic and, with the system's
+# dark mode, Night; both take these colours. Text and secondary text keep
+# upstream's greys, which differ from the palette's by a shade.
+
+# (file, text, replacement, how many times).
+PALETTE_EDITS = (
+    # Day Classic (and Day): the accent, the source of 64 colours.
+    (DAY_THEME, "public let defaultDayAccentColor = UIColor(rgb: 0x0088ff)\n",
+     "public let defaultDayAccentColor = UIColor(rgb: 0x5b7a5e) // pluma: sage\n", 1),
+    (DAY_THEME, "        startButtonColor: UIColor(rgb: 0x2ca5e0),\n", "        startButtonColor: defaultDayAccentColor,\n", 1),
+    (DAY_THEME, "PresentationThemeGradientColors(topColor: UIColor(rgb: 0x46739e), bottomColor: UIColor(rgb: 0x2a5982))",
+     "PresentationThemeGradientColors(topColor: UIColor(rgb: 0x5b7a5e), bottomColor: UIColor(rgb: 0x4f6e52))", 1),
+    (DAY_THEME, "        contentColor: UIColor(rgb: 0x35c759),\n", "        contentColor: defaultDayAccentColor,\n", 1),
+    (DAY_THEME, "neutral1: PresentationThemeFillForeground(fillColor: UIColor(rgb: 0x4892f2),",
+     "neutral1: PresentationThemeFillForeground(fillColor: UIColor(rgb: 0x6f8f72),", 1),
+    (DAY_THEME, "        itemSelectedBackgroundColor: UIColor(rgb: 0xe9f0fa),\n",
+     "        itemSelectedBackgroundColor: UIColor(rgb: 0xe3eae2),\n", 1),
+    (DAY_THEME, "        checkmarkColor: day ? defaultDayAccentColor : UIColor(rgb: 0x21c004),\n",
+     "        checkmarkColor: defaultDayAccentColor,\n", 1),
+    (DAY_THEME, "PresentationThemeGradientColors(topColor: UIColor(rgb: 0x72d5fd), bottomColor: UIColor(rgb: 0x2a9ef1))",
+     "PresentationThemeGradientColors(topColor: UIColor(rgb: 0x9dbb9f), bottomColor: UIColor(rgb: 0x5b7a5e))", 1),
+    (DAY_THEME, "storyUnseenColors: PresentationThemeGradientColors(topColor: UIColor(rgb: 0x34C76F), bottomColor: UIColor(rgb: 0x3DA1FD))",
+     "storyUnseenColors: PresentationThemeGradientColors(topColor: UIColor(rgb: 0x9dbb9f), bottomColor: UIColor(rgb: 0x4f6e52))", 1),
+    # Day Classic's messages: the incoming bubble (and its highlight)...
+    (DAY_THEME, "                    fill: [UIColor(rgb: 0xffffff)],\n                    highlightedFill: UIColor(rgb: 0xd9f4ff),\n",
+     "                    fill: [UIColor(rgb: 0xf1f2f0)],\n                    highlightedFill: UIColor(rgb: 0xe3eae2),\n", 2),
+    (DAY_THEME, "highlightedFill: UIColor(rgb: 0xd9f4ff),", "highlightedFill: UIColor(rgb: 0xe3eae2),", 2),
+    (DAY_THEME, "UIColor(rgb: 0x004bad)", "UIColor(rgb: 0x4f6e52)", 6),
+    (DAY_THEME, "fileTitleColor: UIColor(rgb: 0x0b8bed),", "fileTitleColor: UIColor(rgb: 0x4f6e52),", 1),
+    # ... the outgoing one, sage instead of green, with its time and checks.
+    (DAY_THEME, "fill: [UIColor(rgb: 0xe1ffc7)],", "fill: [UIColor(rgb: 0xe3eae2), UIColor(rgb: 0xd5e1d4)],", 2),
+    (DAY_THEME, "highlightedFill: UIColor(rgb: 0xbaff93),", "highlightedFill: UIColor(rgb: 0xc5d4c4),", 2),
+    (DAY_THEME, "UIColor(rgb: 0x3fc33b)", "UIColor(rgb: 0x5b7a5e)", 12),
+    (DAY_THEME, "            primaryTextColor: UIColor(rgb: 0x000000),\n"
+                "            secondaryTextColor: UIColor(rgb: 0x008c09, alpha: 0.8),\n",
+     "            primaryTextColor: UIColor(rgb: 0x1f2e20),\n"
+     "            secondaryTextColor: UIColor(rgb: 0x5b7a5e),\n", 1),
+    (DAY_THEME, "fileDurationColor: UIColor(rgb: 0x008c09, alpha: 0.8),", "fileDurationColor: UIColor(rgb: 0x5b7a5e),", 1),
+    (DAY_THEME, "accentTextColor: UIColor(rgb: 0x00a700),", "accentTextColor: UIColor(rgb: 0x4f6e52),", 1),
+    (DAY_THEME, "UIColor(rgb: 0x93d987)", "UIColor(rgb: 0x9dbb9f)", 3),
+    (DAY_THEME, "mediaControlInnerBackgroundColor: UIColor(rgb: 0xe1ffc7),", "mediaControlInnerBackgroundColor: UIColor(rgb: 0xe3eae2),", 1),
+    (DAY_THEME, "pendingActivityColor: UIColor(rgb: 0x42b649),", "pendingActivityColor: UIColor(rgb: 0x5b7a5e),", 1),
+    (DAY_THEME, "fileTitleColor: UIColor(rgb: 0x3faa3c),", "fileTitleColor: UIColor(rgb: 0x4f6e52),", 1),
+    (DAY_THEME, "fileDescriptionColor: UIColor(rgb: 0x6fb26a),", "fileDescriptionColor: UIColor(rgb: 0x6f8f72),", 1),
+    (DAY_THEME, "mediaPlaceholderColor: UIColor(rgb: 0xd2f2b6),", "mediaPlaceholderColor: UIColor(rgb: 0xd5e1d4),", 1),
+    (DAY_THEME, "UIColor(rgb: 0x00A700)", "UIColor(rgb: 0x5b7a5e)", 4),
+    (DAY_THEME, "textSelectionColor: UIColor(rgb: 0xbbde9f),", "textSelectionColor: UIColor(rgb: 0x5b7a5e, alpha: 0.25),", 1),
+    (DAY_THEME, "outgoingCheckColor: UIColor(rgb: 0x19c700),", "outgoingCheckColor: UIColor(rgb: 0x5b7a5e),", 1),
+    # Bluish greys of buttons in chats and of sticker outlines.
+    (DAY_THEME, "UIColor(rgb: 0x596e89, alpha: 0.35)", "UIColor(rgb: 0x6b6f6b, alpha: 0.35)", 2),
+    (DAY_THEME, "UIColor(rgb: 0x86a9c9, alpha: 0.5)", "UIColor(rgb: 0x9aa29a, alpha: 0.5)", 2),
+    # Day's outgoing gradient, which ends in the accent.
+    (DAY_THEME, "fill: [UIColor(rgb: 0x57b2e0), defaultDayAccentColor],", "fill: [UIColor(rgb: 0x6f8f72), defaultDayAccentColor],", 2),
+    (DAY_THEME, "highlightedFill: UIColor(rgb: 0x57b2e0).withMultipliedBrightnessBy(0.7),",
+     "highlightedFill: UIColor(rgb: 0x6f8f72).withMultipliedBrightnessBy(0.7),", 2),
+    (DAY_THEME, "mediaPlaceholderColor: UIColor(rgb: 0x0077d9),", "mediaPlaceholderColor: UIColor(rgb: 0x4f6e52),", 1),
+    # Day Classic's chat background: plain white, not Telegram's pattern (a
+    # file on Telegram's servers). The dates and service messages on it: grey
+    # on #F1F2F0, as Day has them on white.
+    (DAY_THEME, "    let defaultPatternWallpaper: TelegramWallpaper = defaultBuiltinWallpaper(data: .default, "
+                "colors: defaultBuiltinWallpaperGradientColors.map(\\.rgb))\n",
+     "    // pluma: a plain white chat background.\n"
+     "    let defaultPatternWallpaper: TelegramWallpaper = .color(0xffffff)\n", 1),
+    (DAY_THEME, "withDefaultWallpaper: PresentationThemeServiceMessageColorComponents(fill: UIColor(rgb: 0x939fab, alpha: 0.5), "
+                "primaryText: UIColor(rgb: 0xffffff), linkHighlight: UIColor(rgb: 0x748391, alpha: 0.25), scam: UIColor(rgb: 0xffffff), "
+                "dateFillStatic: UIColor(rgb: 0x000000, alpha: 0.2), dateFillFloating: UIColor(rgb: 0x939fab, alpha: 0.5))",
+     "withDefaultWallpaper: PresentationThemeServiceMessageColorComponents(fill: UIColor(rgb: 0xf1f2f0), "
+     "primaryText: UIColor(rgb: 0x6b6f6b), linkHighlight: UIColor(rgb: 0x748391, alpha: 0.25), scam: UIColor(rgb: 0xff3b30), "
+     "dateFillStatic: UIColor(rgb: 0xf1f2f0), dateFillFloating: UIColor(rgb: 0xf1f2f0, alpha: 0.9))", 1),
+    (DAY_THEME, "        dateTextColor: PresentationThemeVariableColor(color: UIColor(rgb: 0xffffff))\n",
+     "        dateTextColor: PresentationThemeVariableColor(withWallpaper: UIColor(rgb: 0xffffff), "
+     "withoutWallpaper: UIColor(rgb: 0x6b6f6b))\n", 1),
+
+    # Night: sage where it is white (its accent), the palette's bubbles and
+    # background, dark text on the accent.
+    (DARK_THEME, "accentColor: UIColor(rgb: 0x3e88f7), backgroundColors: [], bubbleColors: [], animateBubbleColors: false,",
+     "accentColor: UIColor(rgb: 0x9dbb9f), backgroundColors: [], bubbleColors: [], animateBubbleColors: false,", 1),
+    (DARK_THEME, "        } else if accentColor.rgb == 0x3e88f7 {\n            bubbleColors = [\n                0x0771ff,\n"
+                 "                0x9047ff,\n                0xa256bf,\n            ].reversed()\n",
+     "        } else if accentColor.rgb == 0x9dbb9f {\n            // pluma: the palette's outgoing bubbles with its accent.\n"
+     "            bubbleColors = [0x2c3a2d, 0x36473a]\n", 1),
+    (DARK_THEME, "            if initialAccentColor.lightness > 0.735 {\n                secondaryBadgeTextColor = UIColor(rgb: 0x000000)\n",
+     "            // pluma: dark text on the palette's accent too.\n"
+     "            if initialAccentColor.lightness > 0.735 || initialAccentColor.rgb == 0x9dbb9f {\n"
+     "                secondaryBadgeTextColor = UIColor(rgb: 0x000000)\n", 1),
+    (DARK_THEME, "    let rootNavigationBar = PresentationThemeRootNavigationBar(\n        buttonColor: UIColor(rgb: 0xffffff),\n",
+     "    let rootNavigationBar = PresentationThemeRootNavigationBar(\n        buttonColor: UIColor(rgb: 0x9dbb9f),\n", 1),
+    (DARK_THEME, "        accentTextColor: UIColor(rgb: 0xffffff),\n        blurredBackgroundColor:",
+     "        accentTextColor: UIColor(rgb: 0x9dbb9f),\n        blurredBackgroundColor:", 1),
+    (DARK_THEME, "        badgeBackgroundColor:  UIColor(rgb: 0xffffff),\n        badgeStrokeColor: UIColor(rgb: 0x1c1c1d),\n"
+                 "        badgeTextColor:  UIColor(rgb: 0x000000)",
+     "        badgeBackgroundColor:  UIColor(rgb: 0x9dbb9f),\n        badgeStrokeColor: UIColor(rgb: 0x1c1c1d),\n"
+     "        badgeTextColor:  UIColor(rgb: 0x131513)", 2),
+    (DARK_THEME, "        selectedIconColor: UIColor(rgb: 0xffffff),\n", "        selectedIconColor: UIColor(rgb: 0x9dbb9f),\n", 1),
+    (DARK_THEME, "        selectedTextColor: UIColor(rgb: 0xffffff),\n", "        selectedTextColor: UIColor(rgb: 0x9dbb9f),\n", 1),
+    (DARK_THEME, "        accentColor: UIColor(rgb: 0xffffff),\n", "        accentColor: UIColor(rgb: 0x9dbb9f),\n", 1),
+    (DARK_THEME, "        accentTextColor: UIColor(rgb: 0xffffff),\n        disabledTextColor: UIColor(rgb: 0x525252),\n"
+                 "        startButtonColor: UIColor(rgb: 0xffffff),\n",
+     "        accentTextColor: UIColor(rgb: 0x9dbb9f),\n        disabledTextColor: UIColor(rgb: 0x525252),\n"
+     "        startButtonColor: UIColor(rgb: 0x9dbb9f),\n", 1),
+    (DARK_THEME, "        contentColor: UIColor(rgb: 0x67ce67),\n", "        contentColor: UIColor(rgb: 0x9dbb9f),\n", 1),
+    (DARK_THEME, "        blocksBackgroundColor: UIColor(rgb: 0x000000),\n", "        blocksBackgroundColor: UIColor(rgb: 0x131513),\n", 1),
+    (DARK_THEME, "        plainBackgroundColor: UIColor(rgb: 0x000000),\n", "        plainBackgroundColor: UIColor(rgb: 0x131513),\n", 1),
+    (DARK_THEME, "        itemAccentColor: UIColor(rgb: 0xffffff),\n", "        itemAccentColor: UIColor(rgb: 0x9dbb9f),\n", 1),
+    (DARK_THEME, "            fillColor: UIColor(rgb: 0xffffff),\n            strokeColor: UIColor(rgb: 0xffffff, alpha: 0.3),\n"
+                 "            foregroundColor:  UIColor(rgb: 0x000000)\n",
+     "            fillColor: UIColor(rgb: 0x9dbb9f),\n            strokeColor: UIColor(rgb: 0xffffff, alpha: 0.3),\n"
+     "            foregroundColor:  UIColor(rgb: 0x131513)\n", 1),
+    (DARK_THEME, "itemBarChart: PresentationThemeItemBarChart(color1: UIColor(rgb: 0xffffff),",
+     "itemBarChart: PresentationThemeItemBarChart(color1: UIColor(rgb: 0x9dbb9f),", 1),
+    (DARK_THEME, "        backgroundColor: UIColor(rgb: 0x000000),\n        itemSeparatorColor:",
+     "        backgroundColor: UIColor(rgb: 0x131513),\n        itemSeparatorColor:", 1),
+    (DARK_THEME, "        itemBackgroundColor: UIColor(rgb: 0x000000),\n        pinnedItemBackgroundColor:",
+     "        itemBackgroundColor: UIColor(rgb: 0x131513),\n        pinnedItemBackgroundColor:", 1),
+    (DARK_THEME, "        checkmarkColor: UIColor(rgb: 0xffffff),\n", "        checkmarkColor: UIColor(rgb: 0x9dbb9f),\n", 1),
+    (DARK_THEME, "        unreadBadgeActiveBackgroundColor: UIColor(rgb: 0xffffff),\n        unreadBadgeActiveTextColor: UIColor(rgb: 0x000000),\n",
+     "        unreadBadgeActiveBackgroundColor: UIColor(rgb: 0x9dbb9f),\n        unreadBadgeActiveTextColor: UIColor(rgb: 0x131513),\n", 1),
+    (DARK_THEME, "        verifiedIconFillColor: UIColor(rgb: 0xffffff),\n        verifiedIconForegroundColor:  UIColor(rgb: 0x000000),\n",
+     "        verifiedIconFillColor: UIColor(rgb: 0x9dbb9f),\n        verifiedIconForegroundColor:  UIColor(rgb: 0x131513),\n", 1),
+    (DARK_THEME, "PresentationThemeGradientColors(topColor: UIColor(rgb: 0x72d5fd), bottomColor: UIColor(rgb: 0x2a9ef1))",
+     "PresentationThemeGradientColors(topColor: UIColor(rgb: 0x9dbb9f), bottomColor: UIColor(rgb: 0x5b7a5e))", 1),
+    (DARK_THEME, "storyUnseenColors: PresentationThemeGradientColors(topColor: UIColor(rgb: 0x34C76F), bottomColor: UIColor(rgb: 0x3DA1FD))",
+     "storyUnseenColors: PresentationThemeGradientColors(topColor: UIColor(rgb: 0xb2ceb4), bottomColor: UIColor(rgb: 0x7fa082))", 1),
+    (DARK_THEME, "fill: [UIColor(rgb: 0x1D1D1D, alpha: incomingBubbleAlpha)],", "fill: [UIColor(rgb: 0x232623, alpha: incomingBubbleAlpha)],", 2),
+    (DARK_THEME, "fill: [UIColor(rgb: 0x61BCF9), UIColor(rgb: 0x0088ff)],\n                    highlightedFill: UIColor(rgb: 0x61BCF9),",
+     "fill: [UIColor(rgb: 0x2c3a2d), UIColor(rgb: 0x36473a)],\n                    highlightedFill: UIColor(rgb: 0x36473a),", 2),
+    (DARK_THEME, "        infoLinkTextColor: UIColor(rgb: 0xffffff),\n        outgoingCheckColor: UIColor(rgb: 0xffffff),\n",
+     "        infoLinkTextColor: UIColor(rgb: 0xb2ceb4),\n        outgoingCheckColor: UIColor(rgb: 0xb2ceb4),\n", 1),
+    (DARK_THEME, "selectionControlColors: PresentationThemeFillStrokeForeground(fillColor: UIColor(rgb: 0xffffff), "
+                 "strokeColor: UIColor(rgb: 0xffffff), foregroundColor:  UIColor(rgb: 0x000000)),",
+     "selectionControlColors: PresentationThemeFillStrokeForeground(fillColor: UIColor(rgb: 0x9dbb9f), "
+     "strokeColor: UIColor(rgb: 0xffffff), foregroundColor:  UIColor(rgb: 0x131513)),", 1),
+    (DARK_THEME, "        buttonColor: UIColor(rgb: 0xffffff),\n        micLevelColor: UIColor(rgb: 0xffffff, alpha: 0.2),\n"
+                 "        activeIconColor:  UIColor(rgb: 0x000000)\n",
+     "        buttonColor: UIColor(rgb: 0x9dbb9f),\n        micLevelColor: UIColor(rgb: 0x9dbb9f, alpha: 0.2),\n"
+     "        activeIconColor:  UIColor(rgb: 0x131513)\n", 1),
+    (DARK_THEME, "        panelBackgroundColorNoWallpaper: UIColor(rgb: 0x000000),\n",
+     "        panelBackgroundColorNoWallpaper: UIColor(rgb: 0x131513),\n", 1),
+    (DARK_THEME, "        panelControlAccentColor: UIColor(rgb: 0xffffff),\n", "        panelControlAccentColor: UIColor(rgb: 0x9dbb9f),\n", 1),
+    (DARK_THEME, "        actionControlFillColor: UIColor(rgb: 0xffffff),\n        actionControlForegroundColor:  UIColor(rgb: 0x000000),\n",
+     "        actionControlFillColor: UIColor(rgb: 0x9dbb9f),\n        actionControlForegroundColor:  UIColor(rgb: 0x131513),\n", 1),
+    (DARK_THEME, "        badgeBackgroundColor: UIColor(rgb: 0xffffff),\n        badgeStrokeColor: UIColor(rgb: 0xffffff),\n"
+                 "        badgeTextColor:  UIColor(rgb: 0x000000)\n",
+     "        badgeBackgroundColor: UIColor(rgb: 0x9dbb9f),\n        badgeStrokeColor: UIColor(rgb: 0x9dbb9f),\n"
+     "        badgeTextColor:  UIColor(rgb: 0x131513)\n", 1),
+    (DARK_THEME, "        standardActionTextColor: UIColor(rgb: 0xffffff),\n", "        standardActionTextColor: UIColor(rgb: 0x9dbb9f),\n", 1),
+    (DARK_THEME, "        controlAccentColor: UIColor(rgb: 0xffffff),\n", "        controlAccentColor: UIColor(rgb: 0x9dbb9f),\n", 1),
+    (DARK_THEME, "        checkContentColor:  UIColor(rgb: 0x000000)\n", "        checkContentColor:  UIColor(rgb: 0x131513)\n", 1),
+    (DARK_THEME, "        badgeFillColor: UIColor(rgb: 0xffffff),\n        badgeForegroundColor: UIColor(rgb: 0x000000),\n",
+     "        badgeFillColor: UIColor(rgb: 0x9dbb9f),\n        badgeForegroundColor: UIColor(rgb: 0x131513),\n", 1),
+    # Night's chat background: plain graphite, not Telegram's pattern.
+    (DARK_THEME, "    let defaultPatternWallpaper: TelegramWallpaper = defaultBuiltinWallpaper(data: .default, "
+                 "colors: defaultDarkWallpaperGradientColors.map(\\.rgb), intensity: -34)\n",
+     "    // pluma: a plain graphite chat background.\n"
+     "    let defaultPatternWallpaper: TelegramWallpaper = .color(0x131513)\n", 1),
+
+    # With the system's dark mode the app gave Night the blue accent; Night
+    # is in Pluma's colours itself now.
+    (PRESENTATION_DATA, "                            if automaticTheme == .builtin(.night) && effectiveColors == nil {\n"
+                        "                                effectiveColors = PresentationThemeAccentColor(baseColor: .blue)\n"
+                        "                            }\n",
+     "                            // pluma: no blue accent for Night; it has Pluma's colours itself.\n", 1),
+    # The first accent the theme settings offer, the default one: sage.
+    (THEME_SETTINGS, "            case .blue:\n                value = 0x0088ff\n",
+     "            case .blue:\n                value = 0x5b7a5e // pluma: sage\n", 1),
+    (THEME_SETTINGS, "            if baseTheme == .night && self.baseColor == .blue {\n                return UIColor(rgb: 0x3e88f7)\n",
+     "            if baseTheme == .night && self.baseColor == .blue {\n                return UIColor(rgb: 0x9dbb9f) // pluma: sage\n", 1),
+    # The accent of the legacy screens (camera, media editor, location).
+    (LEGACY_COLORS, "        color = TGColorWithHex(0x0088ff);\n", "        color = TGColorWithHex(0x5b7a5e); // pluma: sage\n", 1),
+)
+
+# Night's message colours, each kind on one long line: (file, a text that
+# only that line has, edits within the line).
+PALETTE_LINE_EDITS = (
+    # Incoming: sage links and controls.
+    (DARK_THEME, "            secondaryTextColor: UIColor(rgb: 0xffffff, alpha: 0.5), linkTextColor: UIColor(rgb: 0xffffff),", (
+        ("linkTextColor: UIColor(rgb: 0xffffff),", "linkTextColor: UIColor(rgb: 0xb2ceb4),", 1),
+        ("accentTextColor: UIColor(rgb: 0xffffff),", "accentTextColor: UIColor(rgb: 0x9dbb9f),", 1),
+        ("accentControlColor: UIColor(rgb: 0xffffff),", "accentControlColor: UIColor(rgb: 0x9dbb9f),", 1),
+        ("mediaActiveControlColor: UIColor(rgb: 0xffffff),", "mediaActiveControlColor: UIColor(rgb: 0x9dbb9f),", 1),
+        ("radioProgress: UIColor(rgb: 0xffffff),", "radioProgress: UIColor(rgb: 0x9dbb9f),", 1),
+        (" bar: UIColor(rgb: 0xffffff),", " bar: UIColor(rgb: 0x9dbb9f),", 1),
+        ("textSelectionColor: UIColor(rgb: 0xffffff, alpha: 0.2),", "textSelectionColor: UIColor(rgb: 0x9dbb9f, alpha: 0.3),", 1),
+        ("textSelectionKnobColor: UIColor(rgb: 0xffffff)", "textSelectionKnobColor: UIColor(rgb: 0x9dbb9f)", 1),
+    )),
+    # Outgoing: light text, light sage time, checks, links and controls.
+    (DARK_THEME, "            ), primaryTextColor: UIColor(rgb: 0xffffff), secondaryTextColor: UIColor(rgb: 0xffffff, alpha: 0.5),", (
+        ("primaryTextColor: UIColor(rgb: 0xffffff),", "primaryTextColor: UIColor(rgb: 0xe8ece8),", 1),
+        ("secondaryTextColor: UIColor(rgb: 0xffffff, alpha: 0.5),", "secondaryTextColor: UIColor(rgb: 0xb2ceb4),", 1),
+        ("linkTextColor: UIColor(rgb: 0xffffff),", "linkTextColor: UIColor(rgb: 0xb2ceb4),", 1),
+        ("accentTextColor: UIColor(rgb: 0xffffff),", "accentTextColor: UIColor(rgb: 0xb2ceb4),", 1),
+        ("accentControlColor: UIColor(rgb: 0xffffff),", "accentControlColor: UIColor(rgb: 0xb2ceb4),", 1),
+        ("mediaActiveControlColor: UIColor(rgb: 0xffffff),", "mediaActiveControlColor: UIColor(rgb: 0xb2ceb4),", 1),
+        ("mediaControlInnerBackgroundColor:  UIColor(rgb: 0x313131),", "mediaControlInnerBackgroundColor:  UIColor(rgb: 0x2c3a2d),", 1),
+        ("radioProgress: UIColor(rgb: 0xffffff),", "radioProgress: UIColor(rgb: 0xb2ceb4),", 1),
+        (" bar: UIColor(rgb: 0xffffff),", " bar: UIColor(rgb: 0xb2ceb4),", 1),
+        ("textSelectionKnobColor: UIColor(rgb: 0xffffff)", "textSelectionKnobColor: UIColor(rgb: 0xb2ceb4)", 1),
+    )),
+)
+
+# Telegram's blues of the default themes; none may be left.
+TELEGRAM_BLUES = ("0x0088ff", "0x3e88f7", "0x2ca5e0", "0x46739e", "0x4892f2", "0xe9f0fa", "0x72d5fd", "0x2a9ef1",
+                  "0x3DA1FD", "0xd9f4ff", "0x004bad", "0x0b8bed", "0x57b2e0", "0x0077d9", "0x61BCF9")
+
+
+def patch_palette(tree):
+    for rel, old, new, count in PALETTE_EDITS:
+        tree.replace(rel, old, new, count=count)
+    for rel, anchor, edits in PALETTE_LINE_EDITS:
+        tree.replace_in_line(rel, anchor, edits)
+
+
+def verify_palette(tree):
+    for rel in (DAY_THEME, DARK_THEME):
+        text = tree.read(rel)
+        for blue in TELEGRAM_BLUES:
+            if blue in text:
+                raise PatchError(f"{rel}: Telegram's blue {blue} is still there")
+    if "PresentationThemeAccentColor(baseColor: .blue)" in tree.read(PRESENTATION_DATA):
+        raise PatchError(f"{PRESENTATION_DATA}: Night still gets the blue accent")
 
 
 # An entry of a .strings file, "key" = "value";, where the value may span
@@ -1082,6 +1344,7 @@ def verify(tree, c):
     verify_brand(tree)
     verify_names(tree, c)
     verify_scheme(tree, c)
+    verify_palette(tree)
 
     build = tree.read(APP_BUILD)
     if "<string>Telegram</string>" in build or "<string>telegram</string>" in build:

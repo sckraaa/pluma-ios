@@ -209,6 +209,14 @@ class TreeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, self.assertRaises(patch.PatchError):
             patch.Tree(d)
 
+    def test_replace_in_line(self):
+        self.tree.replace_in_line("a.txt", "one two", (("two", "2", 2), ("one", "1", 1)))
+        self.assertTrue(self.tree.read("a.txt").startswith("1 2 2\nvoid f() {\n"))
+        with self.assertRaises(patch.PatchError):
+            self.tree.replace_in_line("a.txt", "    ", (("x", "y", 0),))  # two lines
+        with self.assertRaises(patch.PatchError):
+            self.tree.replace_in_line("a.txt", "body", (("body", "b", 2),))
+
     def test_files_by_hash(self):
         sha = hashlib.sha256(b"one two two\nvoid f() {\n    body;\n        \n    end;\n}\n").hexdigest()
         with self.assertRaises(patch.PatchError):
@@ -324,6 +332,15 @@ DAMAGE = (
      'if address.label == "Telegram" || address.label == "TG", let peerId'),
     # The scheme.
     (BUILD, "                <string>tg</string>\n", "                <string>tg</string>\n                <string>tgapp</string>\n"),
+    # The palette.
+    (patch.DAY_THEME, "public let defaultDayAccentColor = UIColor(rgb: 0x0088ff)", "public let defaultDayAccentColor = UIColor(rgb: 0x0087ff)"),
+    (patch.DAY_THEME, "accentControlColor: UIColor(rgb: 0x3fc33b),", "accentControlColor: UIColor(rgb: 0x3fc33c),"),
+    (patch.DARK_THEME, "fill: [UIColor(rgb: 0x61BCF9), UIColor(rgb: 0x0088ff)],", "fill: [UIColor(rgb: 0x61BCF9), UIColor(rgb: 0x0077ff)],"),
+    (patch.DARK_THEME, "mediaControlInnerBackgroundColor:  UIColor(rgb: 0x313131)", "mediaControlInnerBackgroundColor:  UIColor(rgb: 0x323232)"),
+    (patch.PRESENTATION_DATA, "effectiveColors = PresentationThemeAccentColor(baseColor: .blue)\n",
+     "effectiveColors = PresentationThemeAccentColor(baseColor: .cyan)\n"),
+    (patch.THEME_SETTINGS, "                value = 0x0088ff\n", "                value = 0x0089ff\n"),
+    (patch.LEGACY_COLORS, "TGColorWithHex(0x0088ff)", "TGColorWithHex(0x0089ff)"),
     ("submodules/QrCodeUI/Sources/QrCodeScanScreen.swift", 'filteredCodes = codes.filter { $0.message.hasPrefix("tg://") }',
      'filteredCodes = codes.filter { $0.message.hasPrefix("tg://login") }'),
     ("submodules/TelegramUI/Components/ShareExtensionContext/Sources/ShareExtensionContext.swift",
@@ -472,6 +489,15 @@ class UpstreamTest(unittest.TestCase):
                       tree.read("submodules/AuthorizationUI/Sources/AuthorizationSequencePhoneEntryControllerNode.swift"))
         self.assertIn('codes.filter { $0.message.hasPrefix("plm://") }', tree.read("submodules/QrCodeUI/Sources/QrCodeScanScreen.swift"))
         self.assertEqual(tree.read(patch.URL_HANDLING).count(patch.URL_HANDLING_OWN), 4)
+        # The palette.
+        day, dark = tree.read(patch.DAY_THEME), tree.read(patch.DARK_THEME)
+        self.assertIn("public let defaultDayAccentColor = UIColor(rgb: 0x5b7a5e)", day)
+        self.assertEqual(day.count("fill: [UIColor(rgb: 0xe3eae2), UIColor(rgb: 0xd5e1d4)],"), 2)
+        self.assertIn("let defaultPatternWallpaper: TelegramWallpaper = .color(0xffffff)\n", day)
+        self.assertEqual(dark.count("fill: [UIColor(rgb: 0x2c3a2d), UIColor(rgb: 0x36473a)],"), 2)
+        self.assertIn("secondaryTextColor: UIColor(rgb: 0xb2ceb4), linkTextColor: UIColor(rgb: 0xb2ceb4),", dark)
+        self.assertIn("let defaultPatternWallpaper: TelegramWallpaper = .color(0x131513)\n", dark)
+        self.assertNotIn("baseColor: .blue", tree.read(patch.PRESENTATION_DATA))
 
     def test_dev_server(self):
         dev = patch.load_env(ROOT / "config/dev/server.env")
