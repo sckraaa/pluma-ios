@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Lints the shell scripts (shellcheck) and the workflow (actionlint, which
-# also runs shellcheck on its run: steps). actionlint is fetched at the
-# version pinned here and checked against its SHA-256 when it is missing.
+# Lints the shell scripts of ci/ and brand/ (shellcheck) and the workflow
+# (actionlint, which also runs shellcheck on its run: steps). actionlint is
+# fetched at the version pinned here and checked against its SHA-256 when it
+# is missing.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ACTIONLINT_VERSION=1.7.12
 
-shellcheck -x ci/*.sh
+shellcheck -x ci/*.sh brand/*.sh
 
 actionlint=$(command -v actionlint || true)
 if [ -z "$actionlint" ]; then
