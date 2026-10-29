@@ -178,10 +178,9 @@ The jobs run on GitHub's `macos-26` runners with Xcode 26.2 selected explicitly,
 The Bazel disk cache and Bazel's downloads are kept in the GitHub Actions cache, one entry for the simulator app and one for the IPA:
 - the entry is saved even when a build fails, so a re-run continues from where it stopped;
 - before saving, the disk cache is trimmed to 12 GB (`PLUMA_BAZEL_CACHE_GB`), least recently used entries first;
-- older entries of each kind are deleted after the run, so the two kinds fit in the repository's 10 GB together;
-- a build takes only the entry of the same patch, configuration and upstream (`upstream.env`, `config/`, `ci/patch.py`), to continue after a failure. A change of any of them builds from an empty cache: on 2026-10-29 a build that started from the cache of the previous patch kept the old code of a module the patch had changed (`AvatarNode`, Saved Messages colours), and a cold build had the new one.
+- older entries of each kind are deleted after the run, so the two kinds fit in the repository's 10 GB together.
 
-A cold build, and so any change of the patch, takes about an hour. A repeat build without changes takes minutes. An edit of TelegramCore or MtProtoKit, which most of the app depends on, compiles nearly everything again.
+A cold build takes about an hour. A repeat build without changes takes minutes. An edit of TelegramCore or MtProtoKit, which most of the app depends on, compiles nearly everything again.
 
 Since the repository is public, set *Settings → Actions → General → Fork pull request workflows* to require approval for all outside collaborators.
 

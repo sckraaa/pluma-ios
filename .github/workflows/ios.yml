@@ -96,10 +96,9 @@ jobs:
         with:
           path: ~/pluma-bazel
           key: bazel-sim-${{ hashFiles('upstream.env', 'config/**', 'ci/patch.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
-          # Only the cache of the same patch, configuration and upstream: one of
-          # another patch kept the old code of a changed module (README, Caches).
           restore-keys: |
             bazel-sim-${{ hashFiles('upstream.env', 'config/**', 'ci/patch.py') }}-
+            bazel-sim-
       - name: Build
         id: build
         run: ci/build.sh sim
@@ -205,10 +204,9 @@ jobs:
         with:
           path: ~/pluma-bazel
           key: bazel-ipa-${{ hashFiles('upstream.env', 'config/**', 'ci/patch.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
-          # Only the cache of the same patch, configuration and upstream: one of
-          # another patch kept the old code of a changed module (README, Caches).
           restore-keys: |
             bazel-ipa-${{ hashFiles('upstream.env', 'config/**', 'ci/patch.py') }}-
+            bazel-ipa-
       - name: Build
         id: build
         env:
