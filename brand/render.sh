@@ -11,6 +11,10 @@
 #   pluma-mark.svg         the mark: the ring #111111, the feathers #4A4A4A,
 #                          #8A8A8A, #BDBDBD;
 #   pluma-mark-mono.svg    the mark in black, for template images.
+# One file is copied as it is, not drawn:
+#   pluma-devices.tgs      the laptop of Settings > Devices: upstream's
+#                          Devices.tgs in the palette, the mark in place of
+#                          the plane on the lid and in the QR code.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -189,6 +193,9 @@ pdf "$tmp/qrmark.svg" "$out/submodules/TelegramUI/Images.xcassets/Share/QrPlaneI
 mkdir -p "$out/Telegram/Telegram-iOS/Resources"
 python3 -I tgs.py pluma-mark-mono.svg "$out/Telegram/Telegram-iOS/Resources/PlaneLogo.tgs" --color FFFFFF --disc "$graphite"
 python3 -I tgs.py pluma-mark-mono.svg "$out/Telegram/Telegram-iOS/Resources/PlaneLogoPlain.tgs" --color FFFFFF
+
+# The laptop animation of Settings > Devices.
+cp pluma-devices.tgs "$out/Telegram/Telegram-iOS/Resources/Devices.tgs"
 
 # The first page of the intro: the mark on a white disc in place of
 # Telegram's blue sphere, and no paper plane flying around it (a transparent

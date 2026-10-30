@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import gzip
 import hashlib
 import io
 import json
@@ -269,6 +270,102 @@ class BrandTest(unittest.TestCase):
         for rel in list(patch.BRAND_REPLACED) + list(patch.BRAND_REMOVED) + list(patch.BRAND_ADDED):
             self.assertTrue(any(rel == p or rel.startswith(p + "/") for p in paths), rel)
 
+    def test_devices_animation(self):
+        # brand/render.sh copies the source as it is; a sticker-sized Lottie
+        # animation, gzipped like upstream's.
+        data = (patch.BRAND / "Telegram/Telegram-iOS/Resources/Devices.tgs").read_bytes()
+        self.assertEqual(data, (ROOT / "brand/pluma-devices.tgs").read_bytes(), "re-run brand/render.sh")
+        anim = json.loads(gzip.decompress(data))
+        self.assertEqual((anim["w"], anim["h"]), (512, 512))
+        self.assertGreater(anim["op"], anim["ip"])
+        self.assertTrue(anim["layers"])
+
+
+class ClientLinksTest(unittest.TestCase):
+    # The closures of RecentSessionsController.swift that open the links of
+    # Settings > Devices: "Learn More", then the header's two.
+    SOURCE = ('    }, openOtherAppsUrl: {\n'
+              '        context.sharedContext.openExternalUrl(context: context, urlContext: .generic, '
+              'url: "https://telegram.org/apps", forceExternal: true, presentationData: p, dismissInput: {})\n'
+              '    }, openDesktopLink: {\n'
+              '        context.sharedContext.openExternalUrl(context: context, urlContext: .generic, '
+              'url: "https://getdesktop.telegram.org", forceExternal: true, presentationData: p, dismissInput: {})\n'
+              '    }, openWebLink: {\n'
+              '        context.sharedContext.openExternalUrl(context: context, urlContext: .generic, '
+              'url: "https://web.telegram.org", forceExternal: true, presentationData: p, dismissInput: {})\n'
+              '    })\n')
+    # Its QR scanner: the two links under the viewfinder and their text.
+    SCAN = ('                                    case "desktop":\n'
+            '                                        self.context.sharedContext.openExternalUrl(context: self.context, urlContext: .generic, '
+            'url: "https://getdesktop.telegram.org", forceExternal: true, presentationData: p, dismissInput: {})\n'
+            '                                    case "web":\n'
+            '                                        self.context.sharedContext.openExternalUrl(context: self.context, urlContext: .generic, '
+            'url: "https://web.telegram.org", forceExternal: true, presentationData: p, dismissInput: {})\n')
+    TEXT = ('"AuthSessions.AddDevice.ScanInstallInfo" = "Go to [getdesktop.telegram.org](desktop) or '
+            '[web.telegram.org](web) to get the QR code";\n')
+
+    def write(self, sessions=SOURCE, scan=SCAN, text=TEXT):
+        self.tree.write(patch.SESSIONS, sessions)
+        self.tree.write(patch.QR_SCAN, scan)
+        self.tree.write(patch.STRINGS, text)
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.dir.name)
+        (root / "Telegram").mkdir()
+        (root / "Telegram/BUILD").write_text("")
+        (root / "versions.json").write_text("{}")
+        self.tree = patch.Tree(root)
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_links(self):
+        self.write()
+        with self.assertRaises(patch.PatchError):
+            patch.verify_client_links(self.tree)
+        patch.patch_client_links(self.tree)
+        patch.verify_client_links(self.tree)
+        self.assertEqual(self.tree.read(patch.SESSIONS),
+                         self.SOURCE.replace('"https://getdesktop.telegram.org"', '"https://pluma.chat/"')
+                         .replace('"https://web.telegram.org"', '"https://web.pluma.chat/"'))
+        self.assertEqual(self.tree.read(patch.QR_SCAN),
+                         self.SCAN.replace('"https://getdesktop.telegram.org"', '"https://pluma.chat/"')
+                         .replace('"https://web.telegram.org"', '"https://web.pluma.chat/"'))
+        self.assertEqual(self.tree.read(patch.STRINGS),
+                         '"AuthSessions.AddDevice.ScanInstallInfo" = "Go to [pluma.chat](desktop) or '
+                         '[web.pluma.chat](web) to get the QR code";\n')
+
+    def test_scanner_changed(self):
+        for scan, text in ((self.SCAN.replace('case "web":', 'case "webClient":'), self.TEXT),             # another case
+                           (self.SCAN, self.TEXT.replace("to get the QR code", "to get a QR code"))):   # another text
+            with self.subTest(scan=scan[:20], text=text[-24:]):
+                self.write(scan=scan, text=text)
+                with self.assertRaises(patch.PatchError):
+                    patch.patch_client_links(self.tree)
+                    patch.verify_client_links(self.tree)
+
+    def test_upstream_changed(self):
+        for old, new in (('"https://getdesktop.telegram.org"', '"https://desktop.telegram.org"'),  # another URL
+                         ("openWebLink", "openWebClientLink"),                                     # another closure
+                         ('"https://telegram.org/apps"', '"https://web.telegram.org/a/"')):        # one more link
+            with self.subTest(old=old):
+                self.write(sessions=self.SOURCE.replace(old, new))
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.patch_client_links(self.tree)
+                    patch.verify_client_links(self.tree)
+                self.assertIn(patch.SESSIONS, str(e.exception))
+
+    def test_table(self):
+        self.assertIn(patch.SESSIONS, patch.UPSTREAM_PATHS)
+        self.assertIn(patch.QR_SCAN, patch.UPSTREAM_PATHS)
+        self.assertIn(patch.STRINGS, patch.UPSTREAM_PATHS)
+        for _, text, old, new, _ in patch.CLIENT_LINKS:
+            with self.subTest(old=old):
+                self.assertEqual(text.count("{url}"), 1)
+                self.assertRegex(old, patch.CLIENT_SITES)
+                self.assertRegex(new, r"\Ahttps://(web\.)?pluma\.chat/\Z")
+
 
 # --- the patch on the pinned upstream ------------------------------------------
 
@@ -354,6 +451,12 @@ DAMAGE = (
      "        if let internalUrl = parseInternalUrl(sharedContext: sharedContext, context: context, query: host + \"?\" + query), case .peer",
      "    if let parsedUrl = URL(string: url), [\"tg\"].contains(parsedUrl.scheme), let host = parsedUrl.host, let query = parsedUrl.query {\n"
      "        if let internalUrl = parseInternalUrl(sharedContext: sharedContext, context: context, query: host + \"?\" + query), case .peer"),
+    # The links of Settings > Devices.
+    (patch.SESSIONS, 'url: "https://getdesktop.telegram.org", forceExternal', 'url: "https://desktop.telegram.org", forceExternal'),
+    (patch.SESSIONS, "    }, openWebLink: {\n", "    }, openWebClientLink: {\n"),
+    (patch.SESSIONS, 'url: "https://telegram.org/apps", forceExternal', 'url: "https://web.telegram.org/a/", forceExternal'),
+    (patch.QR_SCAN, 'url: "https://getdesktop.telegram.org", forceExternal', 'url: "https://desktop.telegram.org", forceExternal'),
+    (patch.STRINGS, "or [web.telegram.org](web) to get the QR code", "or [web.telegram.org](web) to get a QR code"),
     # Traces of Telegram elsewhere in the network code.
     (NETWORK, "            context.keychain = keychain\n",
      '            context.keychain = keychain\n            let fallbackAddress = "149.154.167.51"\n'),
@@ -494,6 +597,21 @@ class UpstreamTest(unittest.TestCase):
                       tree.read("submodules/AuthorizationUI/Sources/AuthorizationSequencePhoneEntryControllerNode.swift"))
         self.assertIn('codes.filter { $0.message.hasPrefix("plm://") }', tree.read("submodules/QrCodeUI/Sources/QrCodeScanScreen.swift"))
         self.assertEqual(tree.read(patch.URL_HANDLING).count(patch.URL_HANDLING_OWN), 4)
+        # Settings > Devices: Pluma's site and web client behind the header,
+        # whose text names no site; "Learn More" is left as it is.
+        sessions = tree.read(patch.SESSIONS)
+        self.assertIn('url: "https://pluma.chat/", forceExternal: true', sessions)
+        self.assertIn('url: "https://web.pluma.chat/", forceExternal: true', sessions)
+        self.assertIn('url: "https://telegram.org/apps", forceExternal: true', sessions)
+        self.assertIn('"AuthSessions.HeaderInfo" = "Link [Pluma Desktop](desktop) or [Pluma Web](web) by scanning a QR code.";',
+                      strings)
+        # Its QR scanner names and opens the same two sites.
+        scan = tree.read(patch.QR_SCAN)
+        self.assertIn('url: "https://pluma.chat/", forceExternal: true', scan)
+        self.assertIn('url: "https://web.pluma.chat/", forceExternal: true', scan)
+        self.assertNotRegex(scan, patch.CLIENT_SITES)
+        self.assertIn('"AuthSessions.AddDevice.ScanInstallInfo" = "Go to [pluma.chat](desktop) or [web.pluma.chat](web) to get the QR code";',
+                      strings)
         # The palette.
         day, dark = tree.read(patch.DAY_THEME), tree.read(patch.DARK_THEME)
         self.assertIn("public let defaultDayAccentColor = UIColor(rgb: 0x5b7a5e)", day)
@@ -529,6 +647,7 @@ class UpstreamTest(unittest.TestCase):
     def test_damaged_images(self):
         # A changed or missing upstream image stops the patch too.
         for rel in ("Telegram/Telegram-iOS/BlueIcon.alticon/BlueIcon@3x.png", "Telegram/Telegram-iOS/Resources/PlaneLogo.tgs",
+                    "Telegram/Telegram-iOS/Resources/Devices.tgs",
                     "submodules/TelegramUI/Images.xcassets/Chat/Context Menu/Telegram.imageset/tlogo_24.pdf",
                     patch.APP_ICON + "/Assets/Oval.svg"):
             for damage in ("byte", "missing"):

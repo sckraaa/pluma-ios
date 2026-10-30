@@ -23,7 +23,7 @@ The repository holds no copy of the app's code. CI fetches the upstream release 
 After the edits, the result is checked again. MtProtoKit, TelegramCore and TelegramVoip may hold no address in Telegram's published ranges, and their only RSA keys must be the server's. The check also covers the layer (`currentLayer()` is 228), the versions of `versions.json`, and the `Make.py` options and targets the build relies on.
 
 What the patch leaves, and why:
-- **Links** to `t.me`, `telegram.org` and `fragment.com` in the interface: share links, the terms, the privacy policy. There are about 120 of them in the code and 54 in the strings, and each opens only when tapped. The rebranding leaves URLs as they are.
+- **Links** to `t.me`, `telegram.org` and `fragment.com` in the interface: share links, the terms, the privacy policy. There are about 120 of them in the code and 54 in the strings, and each opens only when tapped. The rebranding leaves URLs as they are, except the links to Telegram's desktop and web clients in Settings → Devices and in its QR scanner ([Branding](#branding)).
 - **The reflector benchmark** of TelegramUI's `AppDelegate` measures a call server of Telegram's. It runs only in internal builds or behind a hidden debug switch; this is a public build.
 - **Connection probing.** MtProtoKit pings `google.com` or `8.8.8.8` (ICMP) when a proxy the user set up stops answering.
 - **Translation and app icons.** Translation through Google, and app icons from the App Store in "Open in…", load only when the user asks.
@@ -37,15 +37,17 @@ The app looks like Pluma, not like Telegram. The brand kit of the server reposit
   - the alternate icon `BlueIcon`, which the app counts as its default one. The other alternate icons are Telegram's: the bundle no longer carries them, and the icon picker shows Pluma's only;
   - the home screen quick action, the context menu item, the call screen title and CallKit;
   - the QR code logos and their animations ([`brand/tgs.py`](brand/tgs.py) writes the mark as a still Lottie);
+  - the laptop animation of Settings → Devices (`Devices.tgs`): Telegram's own animation in the palette, with the mark, centred on the disc, in place of the plane on the lid and in the QR code. It is not drawn from the SVGs: `render.sh` copies [`brand/pluma-devices.tgs`](brand/pluma-devices.tgs) as it is;
   - the first page of the intro (the mark on a white disc, no paper plane); the pages "Powerful" and "Cloud-Based" are sage instead of blue.
 - **Name.** "Telegram" becomes "Pluma" wherever the user reads it: the built-in English strings (556 entries, feature names included, such as "Pluma Premium"; string keys, URLs and user names stay), the permission prompts in every language (in Arabic, Persian and Korean script too, and the name under the icon in Arabic and Korean), the Photos album, CallKit, the locked widget, the label of the app's entry in address book contacts.
 - **Link scheme.** The app registers `plm://`, not `tg://`, which stays with Telegram installed on the same phone. The links it makes use `plm://`, the QR code of a sign-in on another device among them; its scanner takes `plm://` codes only, so a sign-in by QR code works between Pluma clients. `tg://` links inside the app (messages, bots) still open in it.
+- **Client links.** In the header of Settings → Devices ("Link Pluma Desktop or Pluma Web by scanning a QR code"), "Pluma Desktop" opens Pluma's site https://pluma.chat/ and "Pluma Web" its web client https://web.pluma.chat/, as in the Android client, instead of getdesktop.telegram.org and web.telegram.org (`CLIENT_LINKS` in `ci/patch.py`). The QR scanner opened from that screen does the same under its viewfinder, and its text reads "Go to pluma.chat or web.pluma.chat to get the QR code" (`AuthSessions.AddDevice.ScanInstallInfo`, `CLIENT_TEXTS`; English is the only language the app bundles). The header's text names no site, so its string stays. "Learn More" under the sessions, which the app shows only when the server enables the QR login camera (`qr_login_camera`), still opens telegram.org/apps.
 - **Colours.** Day Classic and Night, the themes of a fresh install, take the palette: sage accents (`#5B7A5E` light, `#9DBB9F` dark), sage links, bubbles, time and checks, a white or graphite chat background instead of Telegram's pattern. The first accent the theme settings offer is sage. The other built-in themes ("Day", "Night Tinted") and the other accents stay as they are.
 - **Settings.** The support section ("Ask a Question", the FAQ, "Pluma Features") leads only to Telegram's services and is gone.
 
 Every edit is exact, as the rest of the patch: the counts of the pinned commit are part of it (the strings, the colours, the links), and an upstream update that moves any of them stops the patch.
 
-To change an image, edit the SVG and re-render; this needs rsvg-convert (librsvg), ImageMagick 7 and Python 3, and writes the same bytes on a re-run:
+To change an image, edit the SVG (or replace `brand/pluma-devices.tgs`) and re-render; this needs rsvg-convert (librsvg), ImageMagick 7 and Python 3, and writes the same bytes on a re-run:
 
 ```sh
 brand/render.sh                      # brand/ios

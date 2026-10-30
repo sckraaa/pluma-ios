@@ -16,9 +16,10 @@ The brand: Pluma's images (rendered into brand/ios by brand/render.sh)
 replace Telegram's, each upstream file checked by its SHA-256 first, and the
 texts the user sees say Pluma where they said Telegram (the counts of the
 pinned commit are part of the patch). The app's links use its own scheme,
-plm://, not Telegram's tg://. The default themes take the palette "graphite
-and sage" instead of Telegram's blue. Settings no longer lead to Telegram's
-support, FAQ and feature channel.
+plm://, not Telegram's tg://, and Settings > Devices links to Pluma's site
+and web client, not to Telegram's clients. The default themes take the
+palette "graphite and sage" instead of Telegram's blue. Settings no longer
+lead to Telegram's support, FAQ and feature channel.
 
 Standard library only, so the CI and a developer machine run it as is.
 """
@@ -125,6 +126,10 @@ BRAND_REPLACED = {
     "submodules/TelegramUI/Images.xcassets/Share/QrPlaneIcon.imageset/ic_qrlogo.pdf": "b1360bb26ad4df49470c1fd27c2238b68d390db8ad8bc4a67d0dd00b4f893b71",
     "Telegram/Telegram-iOS/Resources/PlaneLogo.tgs": "d13203f9221c5dfd0a4a34a835f7f7d5b53e90276077998b9784299c914995e4",
     "Telegram/Telegram-iOS/Resources/PlaneLogoPlain.tgs": "486cbe566d05f023f3c72ec00b55f921deb1f7aed2efb630fe717425e2d98d0a",
+    # The laptop of Settings > Devices (the header of RecentSessionsController),
+    # copied from brand/pluma-devices.tgs: the plane on its lid and in its QR
+    # code is the mark.
+    "Telegram/Telegram-iOS/Resources/Devices.tgs": "9abb2d5dbd4ac7d2a83722b4871b6be03f76605d1594bcb5b17204ec8e4285fe",
     # The first page of the intro: the sphere and the plane around it.
     "Telegram/Telegram-iOS/Resources/intro/telegram_sphere@2x.png": "621831c454689762c79c80083f797352aa420c488c19ba924da006ab533dd0bb",
     "Telegram/Telegram-iOS/Resources/intro/telegram_plane1@2x.png": "c28d4e5438f3a10fa1df725764b4bc897af475983070aaf08df1b631334a10a1",
@@ -228,6 +233,42 @@ URL_HANDLING_TG = 'if let parsedUrl = URL(string: url), parsedUrl.scheme == "tg"
 URL_HANDLING_OWN = ('if let parsedUrl = URL(string: url), parsedUrl.scheme == "tg" || parsedUrl.scheme == '
                     'sharedContext.applicationBindings.appSpecificScheme, let host = parsedUrl.host,')
 
+# Settings > Devices: the links of its header ("Link Pluma Desktop or Pluma
+# Web by scanning a QR code", AuthSessions.HeaderInfo) open Pluma's site and
+# its web client instead of Telegram's, as in the Android client (the owner's
+# decision): (file, text with {url}, Telegram's URL, Pluma's, how many
+# times). The screen's "Learn More" (openOtherAppsUrl, telegram.org/apps)
+# stays.
+SESSIONS = "submodules/SettingsUI/Sources/Privacy and Security/Recent Sessions/RecentSessionsController.swift"
+# The QR scanner opened from that screen ("Link Desktop Device") names and
+# opens the same two sites under its viewfinder.
+QR_SCAN = "submodules/QrCodeUI/Sources/QrCodeScanScreen.swift"
+CLIENT_LINKS = (
+    (SESSIONS, '    }, openDesktopLink: {\n'
+               '        context.sharedContext.openExternalUrl(context: context, urlContext: .generic, url: "{url}", ',
+     "https://getdesktop.telegram.org", "https://pluma.chat/", 1),
+    (SESSIONS, '    }, openWebLink: {\n'
+               '        context.sharedContext.openExternalUrl(context: context, urlContext: .generic, url: "{url}", ',
+     "https://web.telegram.org", "https://web.pluma.chat/", 1),
+    (QR_SCAN, '                                    case "desktop":\n'
+              '                                        self.context.sharedContext.openExternalUrl(context: self.context, urlContext: .generic, url: "{url}", ',
+     "https://getdesktop.telegram.org", "https://pluma.chat/", 1),
+    (QR_SCAN, '                                    case "web":\n'
+              '                                        self.context.sharedContext.openExternalUrl(context: self.context, urlContext: .generic, url: "{url}", ',
+     "https://web.telegram.org", "https://web.pluma.chat/", 1),
+)
+# The text of the scanner that names those sites, by key, in the only
+# language the app bundles (en.lproj): (file, entry, Pluma's entry, how many).
+CLIENT_TEXTS = (
+    (STRINGS,
+     '"AuthSessions.AddDevice.ScanInstallInfo" = "Go to [getdesktop.telegram.org](desktop) or '
+     '[web.telegram.org](web) to get the QR code";',
+     '"AuthSessions.AddDevice.ScanInstallInfo" = "Go to [pluma.chat](desktop) or '
+     '[web.pluma.chat](web) to get the QR code";', 1),
+)
+# Telegram's client sites, which none of those files may open after the edits.
+CLIENT_SITES = re.compile(r"(?:get)?desktop\.telegram\.org|web\.telegram\.org")
+
 # Everything the patch reads, edits or checks: the check job fetches only
 # these (ci/fetch-upstream.sh sparse).
 UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_DIRS
@@ -236,6 +277,7 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + tuple(INFOPLIST_STRINGS.format(lang) for lang in INFOPLIST_NAMES)
                   + tuple(sorted({rel for rel, _, _ in CODE_NAMES}))
                   + tuple(sorted({rel for rel, _, _ in SCHEME_LINKS})) + (URL_HANDLING,)
+                  + tuple(sorted({rel for rel, _, _, _, _ in CLIENT_LINKS}))
                   + (DAY_THEME, DARK_THEME, PRESENTATION_DATA, THEME_SETTINGS, LEGACY_COLORS, AVATAR_NODE)
                   + (SETTINGS_ITEMS, SETTINGS_SEARCH))
 
@@ -807,6 +849,7 @@ def patch(tree, c):
     patch_brand(tree)
     patch_names(tree, c)
     patch_scheme(tree, c)
+    patch_client_links(tree)
     patch_palette(tree)
     patch_support(tree)
 
@@ -877,7 +920,7 @@ def brand_files():
 def patch_brand(tree):
     """Pluma's images in place of Telegram's: the app icon and the alternate
     one, the logos of the quick action, the context menu, calls and QR codes,
-    and the first page of the intro."""
+    the laptop of Settings > Devices and the first page of the intro."""
     want = sorted(set(BRAND_REPLACED) | set(BRAND_ADDED))
     if brand_files() != want:
         raise PatchError(f"brand/ios holds {brand_files()}, the patch expects {want}; "
@@ -1280,6 +1323,29 @@ def patch_scheme(tree, c):
     tree.replace(URL_HANDLING, URL_HANDLING_TG, URL_HANDLING_OWN, count=4)
 
 
+def patch_client_links(tree):
+    """Pluma's site and web client, not Telegram's, behind the links of
+    Settings > Devices and of its QR scanner, and named in the scanner's text."""
+    for rel, text, old, new, count in CLIENT_LINKS:
+        tree.replace(rel, text.replace("{url}", old), text.replace("{url}", new), count=count)
+    for rel, old, new, count in CLIENT_TEXTS:
+        tree.replace(rel, old, new, count=count)
+
+
+def verify_client_links(tree):
+    for rel in sorted({rel for rel, _, _, _, _ in CLIENT_LINKS}):
+        left = CLIENT_SITES.search(tree.read(rel))
+        if left:
+            raise PatchError(f"{rel}: still opens {left.group(0)}")
+    for rel, text, _, new, count in CLIENT_LINKS:
+        if tree.read(rel).count(text.replace("{url}", new)) != count:
+            raise PatchError(f"{rel}: does not open {new}")
+    for rel, old, new, count in CLIENT_TEXTS:
+        text = tree.read(rel)
+        if old in text or text.count(new) != count:
+            raise PatchError(f"{rel}: the scanner's text does not name Pluma's sites")
+
+
 def verify_scheme(tree, c):
     build = tree.read(APP_BUILD)
     schemes = re.findall(r"<key>CFBundleURLSchemes</key>\s*<array>(.*?)</array>", build, re.S)
@@ -1407,6 +1473,7 @@ def verify(tree, c):
     verify_brand(tree)
     verify_names(tree, c)
     verify_scheme(tree, c)
+    verify_client_links(tree)
     verify_palette(tree)
     verify_support(tree)
 
