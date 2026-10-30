@@ -1,0 +1,53 @@
+# Builds the Telegram-iOS release upstream.env pins without the Pluma patch,
+# for the simulator, with Telegram's own configuration: the official client,
+# talking to Telegram's servers, that Pluma is compared with
+# (ci/build-reference.sh). Run by hand only.
+#
+# It reads the Bazel cache of the Pluma simulator build, which shares most
+# third-party code with it, and saves none: the cache of the Pluma builds
+# stays as it is.
+name: reference
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reference
+  cancel-in-progress: false
+
+jobs:
+  build-reference:
+    runs-on: macos-26
+    timeout-minutes: 180
+    env:
+      UPSTREAM_DIR: /Users/Shared/telegram-ios
+      BUILD_NUMBER: ${{ github.run_number }}
+      PLUMA_BAZEL_DIR: /Users/runner/pluma-bazel
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Xcode, disk space, Metal toolchain
+        run: ci/setup.sh build
+      - name: Fetch upstream
+        run: ci/fetch-upstream.sh full
+      - name: Restore the Bazel cache of the Pluma simulator build
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/pluma-bazel
+          key: bazel-sim-${{ hashFiles('upstream.env', 'config/**', 'ci/patch.py') }}-
+          restore-keys: |
+            bazel-sim-${{ hashFiles('upstream.env', 'config/**', 'ci/patch.py') }}-
+            bazel-sim-
+      - name: Build
+        run: ci/build-reference.sh
+      - name: Upload the simulator app
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: telegram-reference-simulator
+          path: out/
+          retention-days: 7
+          if-no-files-found: error

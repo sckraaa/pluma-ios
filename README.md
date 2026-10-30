@@ -186,6 +186,10 @@ A cold build takes about an hour. A repeat build without changes takes minutes. 
 
 Since the repository is public, set *Settings → Actions → General → Fork pull request workflows* to require approval for all outside collaborators.
 
+### Reference build of Telegram
+
+*Actions → reference → Run workflow* builds the same Telegram-iOS release without the patch, with Telegram's own configuration from upstream (`build-system/appstore-configuration.json`), for the simulator: the official client on Telegram's servers, to compare Pluma with (`ci/build-reference.sh`). The App Store app runs on devices only, and Telegram publishes no simulator build. The artifact `telegram-reference-simulator` (7 days) holds `Telegram.app` (`ph.telegra.Telegraph`), which installs next to Pluma: unzip it and run `xcrun simctl install booted Telegram.app`. The job reads the Bazel cache of the Pluma simulator build and saves none.
+
 ## Local build
 
 The checks need Python 3, openssl and git, on any system:
