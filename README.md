@@ -18,6 +18,11 @@ The repository holds no copy of the app's code. CI fetches the upstream release 
 
   The name under the icon and in the share sheet is "Pluma". The app registers the `plm://` scheme instead of Telegram's `tg://` ([Branding](#branding)). These are edits of `Telegram/BUILD`.
 - **Branding.** Pluma's icons, logos, name, link scheme and colours instead of Telegram's: see [Branding](#branding).
+- **Birthdays.** The notice at the top of the chat list about contacts whose birthday is today offers to gift them Premium, which Pluma does not sell. It shows whenever Telegram's app shows it (the birthdays come from the server's `contacts.getBirthdays`), but:
+  - its second line says "Send Message" (`ContactList.Context.SendMessage`) instead of "Gift them Pluma Premium.";
+  - a tap opens the chat with the contact; with several contacts, it lists them in an action sheet, as the live location panel above the chat list lists its chats, and opens the chat of the one chosen. The list is in the order of their names, the same on every launch (the notice's own order may change);
+  - its close button dismisses it as before (`help.dismissSuggestion` with `BIRTHDAY_CONTACTS_TODAY`), but without the toast that sends the user to Settings to gift Premium: with Premium purchases blocked (`premium_purchase_blocked`) and no Stars, Settings offer no gifts.
+  - the birthday row of the contact's profile, two taps away, offers a gift (by a tap and by its gift icon) only while Premium can be bought, as the chat already does.
 - **Build flags.** The upstream `.bazelrc` imports `pluma.bazelrc`, which [`ci/build.sh`](ci/build.sh) writes: the cache locations, and no provisioning profiles for a simulator build.
 
 After the edits, the result is checked again. MtProtoKit, TelegramCore and TelegramVoip may hold no address in Telegram's published ranges, and their only RSA keys must be the server's. The check also covers the layer (`currentLayer()` is 228), the versions of `versions.json`, and the `Make.py` options and targets the build relies on.

@@ -21,6 +21,9 @@ and web client, not to Telegram's clients. The default themes take the
 palette "graphite and sage" instead of Telegram's blue. Settings no longer
 lead to Telegram's support, FAQ and feature channel.
 
+The chat list's notice about contacts' birthdays opens the chat with the
+contact instead of offering a Premium gift, which Pluma does not sell.
+
 Standard library only, so the CI and a developer machine run it as is.
 """
 
@@ -88,6 +91,12 @@ LEGACY_COLORS = "submodules/LegacyComponents/Sources/TGColor.m"
 AVATAR_NODE = "submodules/AvatarNode/Sources/AvatarNode.swift"
 SETTINGS_ITEMS = "submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoSettingsItems.swift"
 SETTINGS_SEARCH = "submodules/SettingsUI/Sources/Search/SettingsSearchableItems.swift"
+# The birthday notice of the chat list: what a tap does, its text, its close.
+CHAT_LIST = "submodules/ChatListUI/Sources/ChatListControllerNode.swift"
+CHAT_LIST_NOTICE = "submodules/TelegramUI/Components/ChatList/ChatListHeaderNoticeComponent/Sources/ChatListNoticeItem.swift"
+CHAT_LIST_PANELS = "submodules/TelegramUI/Components/GlobalControlPanelsContext/Sources/GlobalControlPanelsContext.swift"
+# The birthday row of a contact's profile.
+PROFILE_ITEMS = "submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoProfileItems.swift"
 MAKE = "build-system/Make/Make.py"
 BUILD_CONFIGURATION = "build-system/Make/BuildConfiguration.py"
 VERSIONS = "versions.json"
@@ -279,7 +288,8 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + tuple(sorted({rel for rel, _, _ in SCHEME_LINKS})) + (URL_HANDLING,)
                   + tuple(sorted({rel for rel, _, _, _, _ in CLIENT_LINKS}))
                   + (DAY_THEME, DARK_THEME, PRESENTATION_DATA, THEME_SETTINGS, LEGACY_COLORS, AVATAR_NODE)
-                  + (SETTINGS_ITEMS, SETTINGS_SEARCH))
+                  + (SETTINGS_ITEMS, SETTINGS_SEARCH)
+                  + (CHAT_LIST, CHAT_LIST_NOTICE, CHAT_LIST_PANELS, PROFILE_ITEMS))
 
 
 class PatchError(Exception):
@@ -852,6 +862,7 @@ def patch(tree, c):
     patch_client_links(tree)
     patch_palette(tree)
     patch_support(tree)
+    patch_birthdays(tree)
 
     # The build configuration of Make.py, with exactly the keys it reads.
     conf = c.build_configuration()
@@ -954,6 +965,168 @@ def patch_brand(tree):
                  "    vec4 powerful_bg_color = {79/255., 110/255., 82/255., 1}; // pluma: #4F6E52\n")
     tree.replace(INTRO_ANIMATIONS, "    vec4 cloud_color = {42/255., 180/255., 247/255., 1};\n",
                  "    vec4 cloud_color = {111/255., 143/255., 114/255., 1}; // pluma: #6F8F72\n")
+
+
+# --- birthdays ---------------------------------------------------------------
+#
+# The notice at the top of the chat list about contacts whose birthday is today
+# (contacts.getBirthdays) offers to gift them Premium, which Pluma does not
+# sell. It stays, shown whenever upstream shows it, and opens the chat instead
+# (the owner's decision): the contact's chat, or with several contacts a list
+# of them to choose the chat from. The list is an action sheet, as the live
+# location panel above the chat list lists its chats
+# (LiveLocationHeaderPanelComponent.swift), sorted by the names it shows, the
+# id breaking a tie: the notice's peers come in the order of a dictionary
+# (GlobalControlPanelsContext.swift), which may change from one launch of the
+# app to the next, and upstream's own gift picker has no order to follow
+# (ContactSelectionControllerNode.swift). The second line of the notice says "Send Message", the
+# action of a contact's context menu in the contact list
+# (ContactContextMenus.swift), instead of "Gift them Pluma Premium." The close
+# button dismisses it as upstream (help.dismissSuggestion with
+# BIRTHDAY_CONTACTS_TODAY), without the toast that sends the user to Settings
+# to gift Premium: with Premium purchases blocked and no Stars, Settings offer
+# no gifts (PeerInfoSettingsItems.swift).
+
+BIRTHDAY_OPEN_OLD = src(" " * 24, """
+    case let .birthdayPremiumGift(peers, birthdays):
+        self.effectiveContainerNode.currentItemNode.interaction?.openPremiumGift(peers, birthdays)
+""")
+BIRTHDAY_OPEN = src(" " * 24, """
+    case let .birthdayPremiumGift(peers, _):
+        // pluma: no Premium gifts. The chat with the contact; with several, a
+        // list of them to choose the chat from, as the live location panel
+        // lists its chats. The list goes by name, the same on every launch:
+        // peers come in the order of a dictionary.
+        if peers.count == 1, let peer = peers.first {
+            self.effectiveContainerNode.peerSelected?(peer, nil, true, true, nil)
+        } else if !peers.isEmpty, let controller = self.controller {
+            let actionSheet = ActionSheetController(presentationData: self.presentationData)
+            let dismissAction: () -> Void = { [weak actionSheet] in
+                actionSheet?.dismissAnimated()
+            }
+            var items: [ActionSheetItem] = []
+            items.append(ActionSheetTextItem(title: self.presentationData.strings.ChatList_BirthdayMultipleTitle(Int32(peers.count))))
+            let strings = self.presentationData.strings
+            let nameDisplayOrder = self.presentationData.nameDisplayOrder
+            let named = peers.map { ($0, $0.displayTitle(strings: strings, displayOrder: nameDisplayOrder)) }.sorted(by: { lhs, rhs in
+                lhs.1 == rhs.1 ? lhs.0.id < rhs.0.id : lhs.1.localizedCaseInsensitiveCompare(rhs.1) == .orderedAscending
+            })
+            for (peer, title) in named {
+                items.append(ActionSheetButtonItem(title: title, action: { [weak self] in
+                    dismissAction()
+                    self?.effectiveContainerNode.peerSelected?(peer, nil, true, true, nil)
+                }))
+            }
+            actionSheet.setItemGroups([
+                ActionSheetItemGroup(items: items),
+                ActionSheetItemGroup(items: [ActionSheetButtonItem(title: self.presentationData.strings.Common_Cancel, action: { dismissAction() })])
+            ])
+            controller.present(actionSheet, in: .window(.root))
+        }
+""")
+
+BIRTHDAY_TEXT_OLD = src(" " * 12, """
+    case let .birthdayPremiumGift(peers, _):
+        let title: String
+        let text: String
+        if peers.count == 1, let peer = peers.first {
+            var peerName = peer.compactDisplayTitle
+            if peerName.count > 20 {
+                peerName = peerName.prefix(20).trimmingCharacters(in: .whitespacesAndNewlines) + "\\u{2026}"
+            }
+            title = item.strings.ChatList_BirthdaySingleTitle(peerName).string
+            text = item.strings.ChatList_BirthdaySingleText
+        } else {
+            title = item.strings.ChatList_BirthdayMultipleTitle(Int32(peers.count))
+            text = item.strings.ChatList_BirthdayMultipleText
+        }
+""")
+BIRTHDAY_TEXT = (BIRTHDAY_TEXT_OLD
+                 .replace("    case let .birthdayPremiumGift(peers, _):\n",
+                          "    case let .birthdayPremiumGift(peers, _):\n" + src(" " * 16, """
+                              // pluma: "Send Message", not the offer of a Premium gift: the
+                              // notice opens the chat (ChatListControllerNode.swift).
+                          """))
+                 .replace("text = item.strings.ChatList_BirthdaySingleText\n", "text = item.strings.ContactList_Context_SendMessage\n")
+                 .replace("text = item.strings.ChatList_BirthdayMultipleText\n", "text = item.strings.ContactList_Context_SendMessage\n"))
+# The key of that line in the built-in strings, with its English text.
+BIRTHDAY_TEXT_KEY = '"ContactList.Context.SendMessage" = "Send Message";\n'
+
+BIRTHDAY_CLOSE_OLD = src(" " * 12, """
+    case .birthdayPremiumGift:
+        let _ = self.context.engine.notices.dismissServerProvidedSuggestion(suggestion: ServerProvidedSuggestion.todayBirthdays.id).startStandalone()
+        parentController.present(UndoOverlayController(presentationData: presentationData, content: .universal(animation: "anim_gift", scale: 0.058, colors: ["__allcolors__": UIColor.white], title: nil, text: presentationData.strings.ChatList_PremiumGiftInSettingsInfo, customUndoText: nil, timeout: 5.0), elevatedLayout: false, action: { _ in
+            return true
+        }), in: .current)
+""")
+BIRTHDAY_CLOSE = src(" " * 12, """
+    case .birthdayPremiumGift:
+        // pluma: no toast that sends to Settings to gift Premium; they offer no gifts.
+        let _ = self.context.engine.notices.dismissServerProvidedSuggestion(suggestion: ServerProvidedSuggestion.todayBirthdays.id).startStandalone()
+""")
+
+# The birthday row of a contact's profile offers a gift on the birthday, by a
+# tap and by its gift icon (PeerInfoProfileItems.swift), while the chat checks
+# that Premium can be bought first (premium_purchase_blocked,
+# ChatControllerOpenAttachmentMenu.swift). The notice leads there in two taps:
+# the row offers a gift only while Premium can be bought, as the chat does and
+# as the Android and web apps do. As (the pinned upstream's text, Pluma's).
+BIRTHDAY_PROFILE = (
+    ("                let isBirthdayToday = hasBirthdayToday(birthday: birthday)\n",
+     "                let isBirthdayToday = hasBirthdayToday(birthday: birthday)\n"
+     "                // pluma: a gift on the birthday only while Premium can be bought.\n"
+     "                let canGiftOnBirthday = isBirthdayToday && !PremiumConfiguration.with("
+     "appConfiguration: context.currentAppConfiguration.with { $0 }).isPremiumDisabled\n"),
+    ("                } else if isBirthdayToday && cachedData.disallowedGifts != TelegramDisallowedGifts.All {\n",
+     "                } else if canGiftOnBirthday && cachedData.disallowedGifts != TelegramDisallowedGifts.All {\n"),
+    ("icon: isBirthdayToday ? .premiumGift : nil, action: birthdayAction,",
+     "icon: canGiftOnBirthday ? .premiumGift : nil, action: birthdayAction,"),
+)
+
+# The birthday case of each file, from its head to the case after it:
+# (file, head, tail).
+BIRTHDAY_CASES = (
+    (CHAT_LIST, "                        case let .birthdayPremiumGift(", "                        case .reviewLogin:\n"),
+    (CHAT_LIST_NOTICE, "            case let .birthdayPremiumGift(", "            case let .reviewLogin("),
+    (CHAT_LIST_PANELS, "            case .birthdayPremiumGift:\n", "            case .premiumGrace:\n"),
+)
+
+
+def patch_birthdays(tree):
+    """The birthday notice of the chat list opens the chat with the contact
+    (with several, a list of them) and offers no Premium gift, nor does the
+    birthday row of the contact's profile."""
+    tree.expect(STRINGS, BIRTHDAY_TEXT_KEY)
+    tree.replace(CHAT_LIST, BIRTHDAY_OPEN_OLD, BIRTHDAY_OPEN)
+    tree.replace(CHAT_LIST_NOTICE, BIRTHDAY_TEXT_OLD, BIRTHDAY_TEXT)
+    tree.replace(CHAT_LIST_PANELS, BIRTHDAY_CLOSE_OLD, BIRTHDAY_CLOSE)
+    for old, new in BIRTHDAY_PROFILE:
+        tree.replace(PROFILE_ITEMS, old, new)
+
+
+def birthday_case(tree, rel, head, tail):
+    text = tree.read(rel)
+    if text.count(head) != 1:
+        raise PatchError(f"{rel}: {text.count(head)} birthday notice cases, expected 1")
+    start = text.index(head)
+    end = text.find(tail, start)
+    if end < 0:
+        raise PatchError(f"{rel}: no {tail.strip()!r} after the birthday notice case")
+    return text[start:end]
+
+
+def verify_birthdays(tree):
+    opened, text, closed = (birthday_case(tree, *case) for case in BIRTHDAY_CASES)
+    if "openPremiumGift(" in opened or opened.count(".peerSelected?(peer, nil, true, true, nil)") != 2:
+        raise PatchError(f"{CHAT_LIST}: the birthday notice does not open the chat")
+    if ("ChatList_BirthdaySingleText" in text or "ChatList_BirthdayMultipleText" in text
+            or text.count("text = item.strings.ContactList_Context_SendMessage\n") != 2):
+        raise PatchError(f"{CHAT_LIST_NOTICE}: the birthday notice still offers a gift")
+    if "ChatList_PremiumGiftInSettingsInfo" in closed or "suggestion: ServerProvidedSuggestion.todayBirthdays.id" not in closed:
+        raise PatchError(f"{CHAT_LIST_PANELS}: closing the birthday notice does not dismiss it, or offers a gift")
+    profile = tree.read(PROFILE_ITEMS)
+    if any(old in profile for old, _ in BIRTHDAY_PROFILE[1:]) or not all(new in profile for _, new in BIRTHDAY_PROFILE):
+        raise PatchError(f"{PROFILE_ITEMS}: the birthday row offers a gift without Premium for sale")
 
 
 # --- palette "graphite and sage" ----------------------------------------------
@@ -1476,6 +1649,7 @@ def verify(tree, c):
     verify_client_links(tree)
     verify_palette(tree)
     verify_support(tree)
+    verify_birthdays(tree)
 
     build = tree.read(APP_BUILD)
     if "<string>Telegram</string>" in build or "<string>telegram</string>" in build:

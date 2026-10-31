@@ -367,6 +367,154 @@ class ClientLinksTest(unittest.TestCase):
                 self.assertRegex(new, r"\Ahttps://(web\.)?pluma\.chat/\Z")
 
 
+class BirthdayTest(unittest.TestCase):
+    # The birthday notice of the chat list, each place with the case after it:
+    # what a tap does (ChatListControllerNode.swift)...
+    TAP = ('                        case let .birthdayPremiumGift(peers, birthdays):\n'
+           '                            self.effectiveContainerNode.currentItemNode.interaction?.openPremiumGift(peers, birthdays)\n'
+           '                        case .reviewLogin:\n'
+           '                            break\n')
+    # ... its text (ChatListNoticeItem.swift)...
+    TEXT = ('            case let .birthdayPremiumGift(peers, _):\n'
+            '                let title: String\n'
+            '                let text: String\n'
+            '                if peers.count == 1, let peer = peers.first {\n'
+            '                    var peerName = peer.compactDisplayTitle\n'
+            '                    if peerName.count > 20 {\n'
+            '                        peerName = peerName.prefix(20).trimmingCharacters(in: .whitespacesAndNewlines) + "\\u{2026}"\n'
+            '                    }\n'
+            '                    title = item.strings.ChatList_BirthdaySingleTitle(peerName).string\n'
+            '                    text = item.strings.ChatList_BirthdaySingleText\n'
+            '                } else {\n'
+            '                    title = item.strings.ChatList_BirthdayMultipleTitle(Int32(peers.count))\n'
+            '                    text = item.strings.ChatList_BirthdayMultipleText\n'
+            '                }\n'
+            '                avatarPeers = Array(peers.prefix(3))\n'
+            '            case let .reviewLogin(newSessionReview, totalCount):\n')
+    # ... and its close (GlobalControlPanelsContext.swift), with the toast.
+    CLOSE = ('            case .birthdayPremiumGift:\n'
+             '                let _ = self.context.engine.notices.dismissServerProvidedSuggestion(suggestion: '
+             'ServerProvidedSuggestion.todayBirthdays.id).startStandalone()\n'
+             '                parentController.present(UndoOverlayController(presentationData: presentationData, content: '
+             '.universal(animation: "anim_gift", scale: 0.058, colors: ["__allcolors__": UIColor.white], title: nil, '
+             'text: presentationData.strings.ChatList_PremiumGiftInSettingsInfo, customUndoText: nil, timeout: 5.0), '
+             'elevatedLayout: false, action: { _ in\n'
+             '                    return true\n'
+             '                }), in: .current)\n'
+             '            case .premiumGrace:\n')
+    KEY = '"ContactList.Context.SendMessage" = "Send Message";\n'
+    # The birthday row of a contact's profile (PeerInfoProfileItems.swift): the
+    # lines the patch edits.
+    PROFILE = "".join(old if old.endswith("\n") else old + "\n" for old, _ in patch.BIRTHDAY_PROFILE)
+
+    def write(self, tap=TAP, text=TEXT, close=CLOSE, key=KEY, profile=PROFILE):
+        self.tree.write(patch.CHAT_LIST, tap)
+        self.tree.write(patch.CHAT_LIST_NOTICE, text)
+        self.tree.write(patch.CHAT_LIST_PANELS, close)
+        self.tree.write(patch.STRINGS, key)
+        self.tree.write(patch.PROFILE_ITEMS, profile)
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.dir.name)
+        (root / "Telegram").mkdir()
+        (root / "Telegram/BUILD").write_text("")
+        (root / "versions.json").write_text("{}")
+        self.tree = patch.Tree(root)
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_notice(self):
+        self.write()
+        with self.assertRaises(patch.PatchError):
+            patch.verify_birthdays(self.tree)
+        patch.patch_birthdays(self.tree)
+        patch.verify_birthdays(self.tree)
+        # A tap opens the chat: the one contact's, or the chosen one's from
+        # the list of them, which goes by name.
+        tap = self.tree.read(patch.CHAT_LIST)
+        self.assertNotIn("openPremiumGift", tap)
+        self.assertTrue(tap.endswith("                        case .reviewLogin:\n                            break\n"))
+        for line in ("                        case let .birthdayPremiumGift(peers, _):\n",
+                     "                            if peers.count == 1, let peer = peers.first {\n"
+                     "                                self.effectiveContainerNode.peerSelected?(peer, nil, true, true, nil)\n",
+                     "                                items.append(ActionSheetTextItem(title: "
+                     "self.presentationData.strings.ChatList_BirthdayMultipleTitle(Int32(peers.count))))\n",
+                     "lhs.1 == rhs.1 ? lhs.0.id < rhs.0.id : "
+                     "lhs.1.localizedCaseInsensitiveCompare(rhs.1) == .orderedAscending\n",
+                     "                                for (peer, title) in named {\n"
+                     "                                    items.append(ActionSheetButtonItem(title: title, action: { [weak self] in\n",
+                     "                                        self?.effectiveContainerNode.peerSelected?(peer, nil, true, true, nil)\n",
+                     "ActionSheetButtonItem(title: self.presentationData.strings.Common_Cancel, action: { dismissAction() })"):
+            self.assertIn(line, tap)
+        # The text offers no gift; the rest of the notice is as it was.
+        self.assertEqual(self.tree.read(patch.CHAT_LIST_NOTICE), self.TEXT
+                         .replace("    case let .birthdayPremiumGift(peers, _):\n",
+                                  "    case let .birthdayPremiumGift(peers, _):\n"
+                                  '                // pluma: "Send Message", not the offer of a Premium gift: the\n'
+                                  "                // notice opens the chat (ChatListControllerNode.swift).\n")
+                         .replace("ChatList_BirthdaySingleText", "ContactList_Context_SendMessage")
+                         .replace("ChatList_BirthdayMultipleText", "ContactList_Context_SendMessage"))
+        # Closing it dismisses it, without the toast about gifts.
+        self.assertEqual(self.tree.read(patch.CHAT_LIST_PANELS),
+                         "            case .birthdayPremiumGift:\n"
+                         "                // pluma: no toast that sends to Settings to gift Premium; they offer no gifts.\n"
+                         "                let _ = self.context.engine.notices.dismissServerProvidedSuggestion(suggestion: "
+                         "ServerProvidedSuggestion.todayBirthdays.id).startStandalone()\n"
+                         "            case .premiumGrace:\n")
+
+    def test_verify(self):
+        # Each part of the result is checked on its own.
+        for rel, old, new in (
+            (patch.CHAT_LIST, "self?.effectiveContainerNode.peerSelected?(peer, nil, true, true, nil)", "dismissAction()"),
+            (patch.CHAT_LIST, "                            if peers.count == 1, let peer = peers.first {\n",
+             "                            self.effectiveContainerNode.currentItemNode.interaction?.openPremiumGift(peers, [:])\n"
+             "                            if peers.count == 1, let peer = peers.first {\n"),
+            (patch.CHAT_LIST_NOTICE, "text = item.strings.ContactList_Context_SendMessage\n                } else {",
+             "text = item.strings.ChatList_BirthdaySingleText\n                } else {"),
+            (patch.CHAT_LIST_PANELS, "dismissServerProvidedSuggestion(suggestion: ServerProvidedSuggestion.todayBirthdays.id)",
+             "dismissServerProvidedSuggestion(suggestion: ServerProvidedSuggestion.setupBirthday.id)"),
+            (patch.PROFILE_ITEMS, "icon: canGiftOnBirthday ? .premiumGift : nil", "icon: isBirthdayToday ? .premiumGift : nil"),
+            (patch.CHAT_LIST_PANELS, "ServerProvidedSuggestion.todayBirthdays.id).startStandalone()\n",
+             "ServerProvidedSuggestion.todayBirthdays.id).startStandalone()\n"
+             "                parentController.present(UndoOverlayController(presentationData: presentationData, content: "
+             ".universal(animation: \"anim_gift\", scale: 0.058, colors: [\"__allcolors__\": UIColor.white], title: nil, "
+             "text: presentationData.strings.ChatList_PremiumGiftInSettingsInfo, customUndoText: nil, timeout: 5.0), "
+             "elevatedLayout: false, action: { _ in return true }), in: .current)\n"),
+        ):
+            with self.subTest(rel=rel, new=new[:60]):
+                self.write()
+                patch.patch_birthdays(self.tree)
+                text = self.tree.read(rel)
+                self.assertEqual(text.count(old), 1)
+                self.tree.write(rel, text.replace(old, new))
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify_birthdays(self.tree)
+                self.assertIn(rel, str(e.exception))
+
+    def test_upstream_changed(self):
+        for part, old, new, rel in (
+            ("tap", "openPremiumGift(peers, birthdays)", "openPremiumGift(peers, birthdays, nil)", patch.CHAT_LIST),
+            ("text", "ChatList_BirthdayMultipleText", "ChatList_BirthdayMultipleGiftText", patch.CHAT_LIST_NOTICE),
+            ("close", "timeout: 5.0", "timeout: 4.0", patch.CHAT_LIST_PANELS),
+            ("key", '"Send Message"', '"Message"', patch.STRINGS),
+        ):
+            with self.subTest(part=part):
+                parts = dict(tap=self.TAP, text=self.TEXT, close=self.CLOSE, key=self.KEY)
+                parts[part] = parts[part].replace(old, new)
+                self.write(**parts)
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.patch_birthdays(self.tree)
+                self.assertIn(rel, str(e.exception))
+
+    def test_table(self):
+        for rel in (patch.CHAT_LIST, patch.CHAT_LIST_NOTICE, patch.CHAT_LIST_PANELS, patch.STRINGS):
+            self.assertIn(rel, patch.UPSTREAM_PATHS)
+        self.assertEqual([rel for rel, _, _ in patch.BIRTHDAY_CASES],
+                         [patch.CHAT_LIST, patch.CHAT_LIST_NOTICE, patch.CHAT_LIST_PANELS])
+
+
 # --- the patch on the pinned upstream ------------------------------------------
 
 NETWORK, ACCOUNT, AUTH_KEYS, ENCRYPTION = patch.NETWORK, patch.ACCOUNT, patch.AUTH_KEYS, patch.ENCRYPTION
@@ -457,6 +605,19 @@ DAMAGE = (
     (patch.SESSIONS, 'url: "https://telegram.org/apps", forceExternal', 'url: "https://web.telegram.org/a/", forceExternal'),
     (patch.QR_SCAN, 'url: "https://getdesktop.telegram.org", forceExternal', 'url: "https://desktop.telegram.org", forceExternal'),
     (patch.STRINGS, "or [web.telegram.org](web) to get the QR code", "or [web.telegram.org](web) to get a QR code"),
+    # The birthday notice of the chat list.
+    (patch.CHAT_LIST, "interaction?.openPremiumGift(peers, birthdays)", "interaction?.openPremiumGift(peers, birthdays, nil)"),
+    (patch.CHAT_LIST_NOTICE, "text = item.strings.ChatList_BirthdaySingleText", "text = item.strings.ChatList_BirthdaySingleGiftText"),
+    (patch.CHAT_LIST_PANELS, "ServerProvidedSuggestion.todayBirthdays.id).startStandalone()\n"
+     "                parentController.present(UndoOverlayController(",
+     "ServerProvidedSuggestion.todayBirthdays.id).start()\n"
+     "                parentController.present(UndoOverlayController("),
+    (patch.STRINGS, '"ContactList.Context.SendMessage" = "Send Message";', '"ContactList.Context.SendMessage" = "Message";'),
+    # The birthday row of a contact's profile.
+    (patch.PROFILE_ITEMS, "} else if isBirthdayToday && cachedData.disallowedGifts != TelegramDisallowedGifts.All {",
+     "} else if isBirthdayToday && cachedData.disallowedGifts.isEmpty {"),
+    (patch.PROFILE_ITEMS, "icon: isBirthdayToday ? .premiumGift : nil, action: birthdayAction,",
+     "icon: isBirthdayToday ? .gift : nil, action: birthdayAction,"),
     # Traces of Telegram elsewhere in the network code.
     (NETWORK, "            context.keychain = keychain\n",
      '            context.keychain = keychain\n            let fallbackAddress = "149.154.167.51"\n'),
@@ -630,6 +791,27 @@ class UpstreamTest(unittest.TestCase):
         # No support section.
         self.assertNotIn("Settings_Support", tree.read(patch.SETTINGS_ITEMS))
         self.assertNotIn("let helpItems = ", tree.read(patch.SETTINGS_SEARCH))
+        # The birthday notice opens the chat, says "Send Message" and no longer
+        # offers a gift; closing it still dismisses it.
+        chat_list = tree.read(patch.CHAT_LIST)
+        self.assertIn(patch.BIRTHDAY_OPEN, chat_list)
+        self.assertEqual(chat_list.count("for (peer, title) in named {\n"), 1)
+        self.assertNotIn("openPremiumGift(peers, birthdays)", chat_list)
+        self.assertIn("openPremiumGift([], nil)", chat_list)  # the Christmas notice's, kept
+        notice = tree.read(patch.CHAT_LIST_NOTICE)
+        self.assertEqual(notice.count("text = item.strings.ContactList_Context_SendMessage\n"), 2)
+        self.assertNotIn("ChatList_BirthdaySingleText", notice)
+        self.assertNotIn("ChatList_BirthdayMultipleText", notice)
+        panels = tree.read(patch.CHAT_LIST_PANELS)
+        self.assertIn(patch.BIRTHDAY_CLOSE, panels)
+        self.assertEqual(panels.count("ChatList_PremiumGiftInSettingsInfo"), 1)  # the Christmas notice's, kept
+        self.assertIn('"ContactList.Context.SendMessage" = "Send Message";', strings)
+        # The birthday row of a contact's profile offers a gift only while
+        # Premium can be bought.
+        profile = tree.read(patch.PROFILE_ITEMS)
+        self.assertIn("let canGiftOnBirthday = isBirthdayToday && !PremiumConfiguration.with(", profile)
+        self.assertIn("} else if canGiftOnBirthday && cachedData.disallowedGifts != TelegramDisallowedGifts.All {", profile)
+        self.assertIn("icon: canGiftOnBirthday ? .premiumGift : nil, action: birthdayAction,", profile)
 
     def test_dev_server(self):
         dev = patch.load_env(ROOT / "config/dev/server.env")
