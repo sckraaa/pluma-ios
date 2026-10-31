@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import gzip
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -57,6 +58,11 @@ cHpcIp/hW3HkD564M7f9BbGSkXItXbTwpiEWj0kXJ0b0I1OSFYxRAgMBAAE=
 -----END RSA PUBLIC KEY-----"""
 
 DEV_KEY = (ROOT / "config/dev/server_public.pem").read_text()
+
+# brand/mark_write.py, which writes the mark of the intro's first page, and the
+# animation it writes from the kit's mark.
+MARK_WRITE_SHA256 = "3a100a36a7897718d523ef76c64595e2bbb1e64ce4b7dc0cc652543871016966"
+INTRO_MARK_SHA256 = "f5d89139ddab9cc3d1ffb2ec42c574307c37e92eb92f5d2413e8fc0855221c41"
 
 
 def fingerprint(pem):
@@ -317,14 +323,25 @@ class BrandTest(unittest.TestCase):
             self.assertTrue(any(rel == p or rel.startswith(p + "/") for p in paths), rel)
 
     def test_intro(self):
-        # The textures of the first page keep upstream's sizes; the sphere is
-        # 8-bit RGBA, as upstream's is (the intro draws it into an 8-bit RGBA
-        # bitmap in the image's own colour space, texture_helper.m).
+        # The textures of the first page keep upstream's sizes and are
+        # transparent: the page's picture is the mark, a view of its own. The
+        # sphere is 8-bit RGBA, as upstream's is (the intro draws it into an
+        # 8-bit RGBA bitmap in the image's own colour space, filled with its
+        # background first, texture_helper.m).
         intro = patch.BRAND / patch.INTRO_RESOURCES
         self.assertEqual(png_header(intro / "telegram_sphere@2x.png"), (296, 296, 8, 6))
         self.assertEqual(png_header(intro / "telegram_plane1@2x.png")[:2], (164, 148))
-        # brand/render.sh places the mark on the sphere and the glyphs of the
-        # wordmark by figures measured on these files of the kit.
+        for name in ("telegram_sphere@2x.png", "telegram_plane1@2x.png"):
+            with self.subTest(texture=name):
+                _, _, rows = png_rgba(intro / name)
+                self.assertFalse(any(row[3::4].strip(b"\0") for row in rows), "not transparent")
+        # They stay a mask of the background colour, by upstream's lines that
+        # the patch pins, which the check job fetches.
+        for rel, _ in patch.INTRO_SPHERE_MASK:
+            self.assertIn(rel, patch.UPSTREAM_PATHS)
+        self.assertIn(patch.INTRO_TEXTURES, {rel for rel, _ in patch.INTRO_SPHERE_MASK})
+        # brand/render.sh places the glyphs of the wordmark, and the intro lays
+        # the mark out, by figures measured on these files of the kit.
         for name, sha in (("pluma-mark.svg", "34b88ecfd7831685b326f4a2ea47a90c4d4913940cf8591931b2604ea9aa78e8"),
                           ("pluma-wordmark.svg", "33b097ac94f2ab54423a089ee81dcbcad7397b2f9464131240f31241558a6eb2")):
             with self.subTest(svg=name):
@@ -356,11 +373,74 @@ class BrandTest(unittest.TestCase):
         bounds = re.search(r"CGRectMake\(0\.0, (-?[\d.]+), wordmark\.size\.width", patch.INTRO_WORDMARK)
         self.assertIsNotNone(bounds)
         self.assertEqual(-float(bounds.group(1)), size[1] - baseline)
-        # The intro loads the mask by that name.
+        # The intro loads the mask by that name, and its host the mark's
+        # animation by its own (the app's resources are flat in its bundle).
         names = {re.sub(r"@[23]x\.png$", ".png", pathlib.PurePath(rel).name)
                  for rel in patch.BRAND_ADDED if rel.startswith(patch.INTRO_RESOURCES + "/")}
-        self.assertEqual(names, {"pluma_wordmark.png"})
+        self.assertEqual(names, {"pluma_wordmark.png", "pluma_mark_write.json"})
         self.assertIn('[UIImage imageNamed:@"pluma_wordmark.png"]', patch.INTRO_WORDMARK)
+        self.assertEqual(sum(added.count('ManagedAnimationSource.local("pluma_mark_write")')
+                             for _, added in patch.INTRO_SPLASH_EDITS), 1)
+
+    def test_intro_mark(self):
+        # brand/mark_write.py writes the mark's animation from the kit's mark;
+        # brand/ios holds what it writes, and a re-run writes the same bytes.
+        script = ROOT / "brand/mark_write.py"
+        self.assertEqual(hashlib.sha256(script.read_bytes()).hexdigest(), MARK_WRITE_SHA256,
+                         "a new brand/mark_write.py: check its animation again and pin both")
+        data = (patch.BRAND / patch.INTRO_MARK).read_bytes()
+        self.assertEqual(hashlib.sha256(data).hexdigest(), INTRO_MARK_SHA256)
+        with tempfile.TemporaryDirectory() as d:
+            out = pathlib.Path(d) / "mark.json"
+            subprocess.run([sys.executable, "-I", str(script), str(ROOT / "brand/pluma-mark.svg"), str(out)],
+                           check=True, capture_output=True)
+            self.assertEqual(out.read_bytes(), data, "re-run brand/render.sh")
+        # What the app's player takes (LottieInstance.mm: up to 1536 px, 360
+        # fps and 9 s): 132 frames at 60 a second on the kit's 512 grid.
+        anim = json.loads(data)
+        self.assertEqual((anim["fr"], anim["ip"], anim["op"], anim["w"], anim["h"]), (60, 0, 132, 512, 512))
+        self.assertLessEqual(anim["op"] / anim["fr"], 9)
+        self.assertEqual([layer["nm"] for layer in anim["layers"]], ["Quill", "Feather1", "Feather2", "Feather3", "Ring"])
+        # The inks as rlottie's colour replacement keys them, round(c * 255) as
+        # 0xRRGGBB: the kit's, the feathers from the nib outwards, then the ring.
+        inks = []
+        for layer in anim["layers"][1:]:
+            (stroke,) = [item for item in layer["shapes"][0]["it"] if item["ty"] == "st"]
+            inks.append(int("".join(f"{round(c * 255):02x}" for c in stroke["c"]["k"][:3]), 16))
+        self.assertEqual(inks, [0x4A4A4A, 0x8A8A8A, 0xBDBDBD, 0x111111])
+        # Dark themes replace them with the dark appearance of the app icon
+        # (the solid fills of its layers in icon.json).
+        swift = "".join(added for _, added in patch.INTRO_SPLASH_EDITS)
+        (pairs,) = re.findall(r"dark \? \[([^\]]*)\] : nil", swift)
+        dark = {int(k, 16): int(v, 16) for k, v in re.findall(r"0x([0-9a-f]{6}): 0x([0-9a-f]{6})", pairs)}
+        icon = json.loads((patch.BRAND / patch.APP_ICON / "icon.json").read_text())
+        icon_dark = {}
+        for layer in icon["groups"][0]["layers"]:
+            (fill,) = [f["value"]["solid"] for f in layer["fill-specializations"] if f["appearance"] == "dark"]
+            rgb = fill.removeprefix("srgb:").split(",")[:3]
+            icon_dark[layer["name"]] = int("".join(f"{round(float(c) * 255):02x}" for c in rgb), 16)
+        self.assertEqual([dark.get(ink, ink) for ink in inks],
+                         [icon_dark[name] for name in ("Feather1", "Feather2", "Feather3", "Ring")])
+        self.assertLessEqual(set(dark), set(inks))
+        # The intro lays the mark out by the box of its ink at rest, which the
+        # script computes, on the animation's canvas.
+        spec = importlib.util.spec_from_file_location("mark_write", script)
+        mark_write = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mark_write)
+        _, facts = mark_write.build(mark_write.read_kit(str(ROOT / "brand/pluma-mark.svg")))
+        figures = dict(re.findall(r"static const CGFloat (PlumaIntro\w+) = ([\d.]+);\n", patch.INTRO_LAYOUT_CONSTANTS))
+        self.assertEqual(float(figures["PlumaIntroMarkCanvas"]), anim["w"])
+        self.assertEqual([float(figures[f"PlumaIntroMarkInk{side}"]) for side in ("Left", "Top", "Right", "Bottom")],
+                         [round(v, 2) for v in facts["ink_box"]])
+        # The animation ends on the mark at rest, which the host shows from
+        # its last frame.
+        self.assertLess(facts["rest_from"], anim["op"])
+        # The layout's three figures, each once: the mark's height, the gap to
+        # the wordmark and the share of the free space above the group.
+        for name in ("PlumaIntroMarkHeight", "PlumaIntroMarkGap", "PlumaIntroGroupBias"):
+            with self.subTest(figure=name):
+                self.assertIn(name, figures)
+                self.assertIn(name, patch.INTRO_LAYOUT)
 
     def test_devices_animation(self):
         # brand/render.sh copies the source as it is; a sticker-sized Lottie
@@ -897,6 +977,41 @@ DAMAGE = (
     (patch.INTRO_CONTROLLER, '_headlines = @[ _englishStrings[@"Tour.Title1"], _englishStrings[@"Tour.Title2"],',
      '_headlines = @[ _englishStrings[@"Tour.Title2"], _englishStrings[@"Tour.Title1"],'),
     (patch.APP_ICON + "/icon.json", '"image-name" : "Plane.svg"', '"image-name" : "Plane2.svg"'),
+    # The mark of the intro's first page and the layout of the pages.
+    (patch.INTRO_HEADER, "@property (nonatomic, copy) UIView *(^createStartButton)(CGFloat);",
+     "@property (nonatomic, copy) UIView *(^createStartButton)(CGFloat width);"),
+    (patch.INTRO_CONTROLLER, "} DeviceScreen;", "} RMDeviceScreen;"),
+    (patch.INTRO_CONTROLLER, "    bool _loadedView;\n}\n@end\n", "    bool _loadedView;\n    bool _loadedGL;\n}\n@end\n"),
+    (patch.INTRO_CONTROLLER, "    _glkView.transform = CGAffineTransformMakeScale(0.66, 0.66);",
+     "    _glkView.transform = CGAffineTransformMakeScale(0.7, 0.7);"),
+    (patch.INTRO_CONTROLLER, "        _startButton.alpha = 1.0;\n    } completion:nil];",
+     "        _startButton.alpha = 1.0;\n    } completion:^(__unused BOOL finished) {}];"),
+    (patch.INTRO_CONTROLLER, "        [self.view addSubview:_glkView];", "        [self.view addSubview:_glkView]; // the GL view"),
+    (patch.INTRO_CONTROLLER, "    [_wrapperView addSubview:_pageControl];\n}", "    [_wrapperView addSubview:_pageControl];\n    [self updateLayout];\n}"),
+    (patch.INTRO_CONTROLLER, "- (UIView *)createAnimationSnapshot {", "- (UIView *)createAnimationSnapshot\n{"),
+    (patch.INTRO_CONTROLLER, "            startButtonY = 75 + 20;", "            startButtonY = 75 + 25;"),
+    (patch.INTRO_CONTROLLER, "            pageY = isVertical ? 605 : 435;", "            pageY = isVertical ? 605 : 436;"),
+    (patch.INTRO_CONTROLLER, "    [super viewDidDisappear:animated];", "    [super viewDidDisappear:animated];\n    [self stopTimer];"),
+    (patch.INTRO_CONTROLLER, "    [_pageControl setCurrentPage:_currentPage];\n}", "    _pageControl.currentPage = _currentPage;\n}"),
+    (patch.INTRO_CONTROLLER, "@implementation TGAvailableLocalization\n", "@implementation TGAvailableLocalizationInfo\n"),
+    (patch.INTRO_SPLASH, "import RMIntro\n", "import RMIntroUI\n"),
+    (patch.INTRO_SPLASH, "    private let controller: RMIntroViewController\n", "    private let controller: RMIntroViewController?\n"),
+    (patch.INTRO_SPLASH, "suggestedLocalizationSignal: localizationSignal)", "suggestedLocalizationSignal: localizationSignal, animated: true)"),
+    (patch.INTRO_SPLASH, "            return self?.startButton.view\n", "            return self?.startButton.view ?? UIView()\n"),
+    (patch.INTRO_SPLASH, "        self.controller.defaultFrame = controllerFrame\n", "        self.controller.defaultFrame = layout.bounds\n"),
+    (patch.INTRO_SPLASH, "            self.nextPressed?(strings)\n", "            self.nextPressed?(strings ?? nil)\n"),
+    # What makes the blank sphere the mask of the first page.
+    (patch.INTRO_TEXTURES, "        CGContextFillRect(spriteContext, CGRectMake(0, 0, width, height));\n", ""),
+    (patch.INTRO_TEXTURES, '[fileName isEqualToString:@"telegram_sphere.png"]', '[fileName isEqualToString:@"telegram_sphere@2x.png"]'),
+    (patch.INTRO_CONTROLLER, "    UIColor *color = _backgroundColor;\n", "    UIColor *color = [UIColor clearColor];\n"),
+    (patch.INTRO_CONTROLLER, 'set_telegram_textures(setup_texture(@"telegram_sphere.png", color), ',
+     'set_telegram_textures(setup_texture(@"telegram_sphere.png", nil), '),
+    (INTRO, "telegram_sphere = create_textured_rectangle(CSizeMake(148, 148),", "telegram_sphere = create_textured_rectangle(CSizeMake(140, 140),"),
+    (INTRO, "fast_body = create_textured_rectangle(CSizeMake(148, 148),", "fast_body = create_textured_rectangle(CSizeMake(156, 156),"),
+    (INTRO, "            scale = 1;\n\n            fast_body.params.alpha = 1;\n", "            scale = 1.1;\n\n            fast_body.params.alpha = 1;\n"),
+    (INTRO, "telegram_sphere.params.alpha = t(0, 1, 0, duration_const*.8, Linear);",
+     "telegram_sphere.params.alpha = t(0, .8, 0, duration_const*.8, Linear);"),
+    (INTRO, "            scale = 1.005;\n", "            scale = 0.9;\n"),
     # The names.
     (patch.STRINGS, '"Watch.AppName" = "Telegram";\n', '"Watch.AppName" = "Watch";\n'),
     (patch.STRINGS, '"Application.Name" = "Telegram";\n', '"Application.Name" = "Telegram";\n"Application.Title" = "Telegram";\n'),
@@ -1098,6 +1213,41 @@ class UpstreamTest(unittest.TestCase):
         # Its animations in the arm64 simulator build too.
         self.assertIn(patch.INTRO_GL, intro)
         self.assertNotIn("TARGET_OS_SIMULATOR", intro)
+        # The mark of its first page: a view of the host's, which the intro
+        # lays out with the pages, brings in, shows on the first page and has
+        # written whenever the page appears; the GL view under everything.
+        self.assertIn(patch.INTRO_HEADER_ANCHOR + patch.INTRO_HEADER_MARK, tree.read(patch.INTRO_HEADER))
+        self.assertIn(patch.INTRO_DEVICE_SCREEN + patch.INTRO_LAYOUT_CONSTANTS, intro)
+        self.assertIn(patch.INTRO_LAYOUT, intro)
+        self.assertNotIn("isVertical", intro)
+        self.assertIn("        [self.view insertSubview:_glkView atIndex:0];\n", intro)
+        self.assertNotIn("[self.view addSubview:_glkView];", intro)
+        self.assertIn("[self.view insertSubview:_firstPageMarkContainer belowSubview:_wrapperView];\n", intro)
+        for line, added in patch.INTRO_ANIMATE_IN:
+            self.assertIn(line + added, intro)
+        self.assertIn(patch.INTRO_SNAPSHOT_ANCHOR + patch.INTRO_SNAPSHOT, intro)
+        self.assertIn(patch.INTRO_APPEAR, intro)
+        self.assertIn(patch.INTRO_SCROLL, intro)
+        self.assertIn(patch.INTRO_METHODS + patch.INTRO_METHODS_ANCHOR, intro)
+        # Back on the first page, the page changes when the finger lifts, the
+        # mark often still faded out by the scroll: it writes itself once the
+        # scroll lets it show, not before.
+        self.assertIn("    bool _firstPageMarkWritePending;\n", intro)
+        self.assertEqual(intro.count("_firstPageMarkAppeared();"), 1)
+        self.assertIn(patch.src(" " * 4, """
+            if (_firstPageMarkWritePending && _firstPageMarkView.alpha > 0.0f) {
+                _firstPageMarkWritePending = false;
+                if (_firstPageMarkAppeared != nil) {
+                    _firstPageMarkAppeared();
+        """), intro)
+        # The lines that make the blank sphere the mask of the first page stay
+        # as upstream has them.
+        for rel, s in patch.INTRO_SPHERE_MASK:
+            self.assertEqual(tree.read(rel).count(s), 1, rel)
+        splash = tree.read(patch.INTRO_SPLASH)
+        for anchor, added in patch.INTRO_SPLASH_EDITS:
+            self.assertIn(anchor + added, splash)
+        self.assertEqual(splash.count("private final class IntroMarkNode: ManagedAnimationNode {\n"), 1)
         # The names.
         strings = tree.read(patch.STRINGS)
         for entry in ('"Application.Name" = "Pluma";', '"Tour.Title1" = "Pluma";', '"Settings.FAQ" = "Pluma FAQ";',
@@ -1242,6 +1392,28 @@ class UpstreamTest(unittest.TestCase):
         with self.assertRaises(patch.PatchError) as e:
             patch.verify(tree, c)
         self.assertIn(patch.INTRO_CONTROLLER, str(e.exception))
+
+    def test_intro_without_mark(self):
+        # The check after the edits finds an intro without the first page's
+        # mark, with its pages laid out as upstream's, or with the GL view
+        # that comes back over them.
+        for rel, old, new in (
+            (patch.INTRO_HEADER, "@property (nonatomic, strong) UIView *firstPageMarkView;\n", ""),
+            (patch.INTRO_CONTROLLER, patch.INTRO_LAYOUT, patch.INTRO_LAYOUT_OLD),
+            (patch.INTRO_CONTROLLER, "[self.view insertSubview:_glkView atIndex:0];", "[self.view addSubview:_glkView];"),
+            (patch.INTRO_CONTROLLER, "    [self updateFirstPageMarkAnimated:true];\n}\n", "}\n"),
+            (patch.INTRO_SPLASH, "        self.controller.firstPageMarkView = self.markNode.view\n", ""),
+            (patch.INTRO_SPLASH, '.local("pluma_mark_write")', '.local("PlumaIntroMark")'),
+        ):
+            with self.subTest(rel=rel, old=old[:60]):
+                self.tearDown()
+                tree, c = self.run_patch()
+                text = tree.read(rel)
+                self.assertGreaterEqual(text.count(old), 1)
+                tree.write(rel, text.replace(old, new, 1))
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify(tree, c)
+                self.assertIn(rel, str(e.exception))
 
     def test_damage(self):
         for rel, old, new in DAMAGE:

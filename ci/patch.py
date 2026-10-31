@@ -20,6 +20,8 @@ plm://, not Telegram's tg://, and Settings > Devices links to Pluma's site
 and web client, not to Telegram's clients. The default themes take the
 palette "graphite and sage" instead of Telegram's blue; of the seven colours
 Telegram gives users and chats by their id, blue is sage and cyan a teal.
+The first page of the intro shows the mark writing itself, and the intro's
+pages are laid out around it.
 Settings no longer lead to Telegram's support, FAQ and feature channel.
 
 The chat list's notice about contacts' birthdays opens the chat with the
@@ -85,6 +87,11 @@ APP_BUILD = "Telegram/BUILD"
 APP_DELEGATE = "submodules/TelegramUI/Sources/AppDelegate.swift"
 INTRO_ANIMATIONS = "submodules/RMIntro/Sources/core/animations.c"
 INTRO_CONTROLLER = "submodules/RMIntro/Sources/platform/ios/RMIntroViewController.m"
+INTRO_HEADER = "submodules/RMIntro/PublicHeaders/RMIntro/RMIntroViewController.h"
+# Where the intro makes the textures of its GL view from its images.
+INTRO_TEXTURES = "submodules/RMIntro/Sources/platform/ios/texture_helper.m"
+# The intro's screen in the sign-in flow, which hosts RMIntroViewController.
+INTRO_SPLASH = "submodules/AuthorizationUI/Sources/AuthorizationSequenceSplashController.swift"
 DAY_THEME = "submodules/TelegramPresentationData/Sources/DefaultDayPresentationTheme.swift"
 DARK_THEME = "submodules/TelegramPresentationData/Sources/DefaultDarkPresentationTheme.swift"
 PRESENTATION_DATA = "submodules/TelegramPresentationData/Sources/PresentationData.swift"
@@ -150,15 +157,20 @@ BRAND_REPLACED = {
     # copied from brand/pluma-devices.tgs: the plane on its lid and in its QR
     # code is the mark.
     "Telegram/Telegram-iOS/Resources/Devices.tgs": "9abb2d5dbd4ac7d2a83722b4871b6be03f76605d1594bcb5b17204ec8e4285fe",
-    # The first page of the intro: the sphere and the plane around it.
+    # The textures of the intro's first page, the sphere and the plane around
+    # it: transparent, as the page's mark is a view of its own (brand/render.sh).
+    # The intro fills the sphere's with its background colour, so the sphere
+    # stays a square of that colour, which the first page needs (INTRO_SPHERE_MASK).
     f"{INTRO_RESOURCES}/telegram_sphere@2x.png": "621831c454689762c79c80083f797352aa420c488c19ba924da006ab533dd0bb",
     f"{INTRO_RESOURCES}/telegram_plane1@2x.png": "c28d4e5438f3a10fa1df725764b4bc897af475983070aaf08df1b631334a10a1",
 }
-# Pluma's files that upstream does not have: the layers of the app icon and
-# the title of the intro's first page, the wordmark. Then the layers of
+# Pluma's files that upstream does not have: the layers of the app icon, the
+# title of the intro's first page, the wordmark, and the page's mark writing
+# itself (a Lottie animation, brand/mark_write.py). Then the layers of
 # Telegram's icon that go.
+INTRO_MARK = f"{INTRO_RESOURCES}/pluma_mark_write.json"
 BRAND_ADDED = (tuple(f"{APP_ICON}/Assets/{n}.png" for n in ("Feather1", "Feather2", "Feather3", "Ring"))
-               + tuple(f"{INTRO_RESOURCES}/pluma_wordmark@{s}x.png" for s in (2, 3)))
+               + tuple(f"{INTRO_RESOURCES}/pluma_wordmark@{s}x.png" for s in (2, 3)) + (INTRO_MARK,))
 BRAND_REMOVED = {
     f"{APP_ICON}/Assets/Oval.svg": "30b7245c9edef107ea7520cdd958246fcc771fa0872bb2f6cd13ab2dc11cfffd",
     f"{APP_ICON}/Assets/Plane.svg": "f4da98d58f274a9d95d491badd14afafa378f335a0bd2b496db83836e21f15e8",
@@ -297,7 +309,7 @@ CLIENT_SITES = re.compile(r"(?:get)?desktop\.telegram\.org|web\.telegram\.org")
 UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_DIRS
                   + (APP_ICON, INTRO_RESOURCES)
                   + tuple(sorted(r for r in BRAND_REPLACED if not r.startswith((APP_ICON + "/", INTRO_RESOURCES + "/"))))
-                  + (APP_DELEGATE, INTRO_ANIMATIONS, INTRO_CONTROLLER, STRINGS)
+                  + (APP_DELEGATE, INTRO_ANIMATIONS, INTRO_CONTROLLER, INTRO_HEADER, INTRO_TEXTURES, INTRO_SPLASH, STRINGS)
                   + tuple(INFOPLIST_STRINGS.format(lang) for lang in INFOPLIST_NAMES)
                   + tuple(sorted({rel for rel, _, _ in CODE_NAMES}))
                   + tuple(sorted({rel for rel, _, _ in SCHEME_LINKS})) + (URL_HANDLING,)
@@ -873,6 +885,7 @@ def patch(tree, c):
                  f"                <string>{c.url_scheme}</string>\n")
 
     patch_brand(tree)
+    patch_intro_mark(tree)
     patch_names(tree, c)
     patch_scheme(tree, c)
     patch_client_links(tree)
@@ -946,12 +959,11 @@ APP_ICONS_OLD = src(" " * 16, """
 INTRO_PAGES = ("        [_pageScrollView addSubview:p];\n"
                "    }\n")
 INTRO_PAGE_ZERO = "    [_pageScrollView setPage:0];\n"
-# The intro's animations, the disc and the mark of the first page among them,
-# are an OpenGL ES view that loadGL makes; upstream returns from it at once in
-# an arm64 simulator build, with no reason given, and the page shows nothing
-# there. Pluma's simulator builds are arm64 only and are where the intro is
-# checked, so they make the view as devices do. Device builds compile the
-# same code either way.
+# The intro's animations, the pictures of its pages, are an OpenGL ES view
+# that loadGL makes; upstream returns from it at once in an arm64 simulator
+# build, with no reason given, and the pages show nothing there. Pluma's
+# simulator builds are arm64 only and are where the intro is checked, so they
+# make the view as devices do. Device builds compile the same code either way.
 INTRO_GL_OLD = ("- (void)loadGL\n{\n#if TARGET_OS_SIMULATOR && defined(__aarch64__)\n"
                 "    return;\n#endif\n")
 INTRO_GL = "- (void)loadGL\n{\n    // pluma: the GL view in the arm64 simulator too, as on devices.\n"
@@ -995,8 +1007,9 @@ def brand_files():
 def patch_brand(tree):
     """Pluma's images in place of Telegram's: the app icon and the alternate
     one, the logos of the quick action, the context menu, calls and QR codes,
-    the laptop of Settings > Devices and the first page of the intro (its disc
-    and mark, the wordmark as its title)."""
+    the laptop of Settings > Devices and the first page of the intro (blank
+    textures where the sphere was, the mark writing itself, the wordmark as its
+    title)."""
     want = sorted(set(BRAND_REPLACED) | set(BRAND_ADDED))
     if brand_files() != want:
         raise PatchError(f"brand/ios holds {brand_files()}, the patch expects {want}; "
@@ -1034,6 +1047,571 @@ def patch_brand(tree):
                  "    vec4 powerful_bg_color = {79/255., 110/255., 82/255., 1}; // pluma: #4F6E52\n")
     tree.replace(INTRO_ANIMATIONS, "    vec4 cloud_color = {42/255., 180/255., 247/255., 1};\n",
                  "    vec4 cloud_color = {111/255., 143/255., 114/255., 1}; // pluma: #6F8F72\n")
+
+
+# --- the intro's first page --------------------------------------------------
+#
+# The first page of the intro shows the mark writing itself, as Pluma's site
+# does (writeMark of its components/mark.ts), above the wordmark: no disc and no
+# paper plane. The mark is pluma_mark_write.json (brand/mark_write.py), which
+# the screen that hosts the intro, AuthorizationSequenceSplashController,
+# plays with the app's own Lottie player (ManagedAnimationNode, rlottie, as the
+# sign-in screens play theirs) and hands to RMIntroViewController as a view.
+# The kit's ink on light themes; on dark ones the ink of the app icon's dark
+# appearance (brand/render.sh) by colour replacement, which rlottie applies to
+# each colour of the file once, by its exact RGB (applyReplacements of the
+# rlottie submodule). The intro lays the view out over its GL view, brings it in
+# with the GL view (animateIn), shows it while it is on screen on its first
+# page, fades it with the scroll, and asks the host to write it from its start
+# whenever the page appears; with Reduce Motion the host shows the finished
+# mark.
+#
+# The GL view still draws on the first page, but nothing that shows at rest.
+# The textures of the sphere and the plane are transparent (BRAND_REPLACED),
+# and the intro fills the sphere's texture with its background colour before
+# it draws the image on it (setup_texture of texture_helper.m, with the colour
+# setupGL passes), so the sphere is an opaque square of that colour. On the
+# first page the GL view draws the next page's speedometer (fast_body) and that
+# square over it, a little larger (on_draw_frame of animations.c, LAYER0 and
+# LAYER4): the blank sphere is the mask that hides the speedometer. As the page
+# changes, the square fades over the speedometer, in over 0.24 s and out over
+# 0.3 s, and the mark fades in and out over the same times, so the mark and the
+# speedometer cross-fade, as Telegram's sphere and the speedometer do. Nothing
+# here edits those lines, but the page relies on them, so the patch pins them
+# (INTRO_SPHERE_MASK): without them the speedometer would show under the mark.
+#
+# The pages are one group between the status bar and the start button, placed
+# by the first page: the mark 128 pt high, the wordmark's glyphs 32 pt under it,
+# the group at 0.44 of the free space (PlumaIntroMarkHeight, PlumaIntroMarkGap,
+# PlumaIntroGroupBias). The free space starts where the app's own screens start
+# under the status bar: the host passes the larger of its layout's status bar
+# height and top safe inset, which Display takes from its DeviceMetrics, not
+# from UIKit's safe area (the status bar is 54 pt on the screens of the iPhone
+# 14 Pro to 16 Pro Max, more only when UIKit's status bar frame is taller).
+# Upstream places the pages at fixed heights from the top for each screen size
+# and leaves all the height of newer phones between the dots and the button.
+# The start button keeps upstream's place; the pictures of the other pages end
+# where the mark ends, so their titles sit under them about as the wordmark sits
+# under the mark. The GL view, opaque, then reaches over the titles' frames, so
+# loadGL puts it under everything, as on the first load, when it makes the view
+# again after the intro was away.
+
+# Upstream's lines that make the blank sphere the mask of the first page: the
+# intro fills the sphere's texture with its background colour; the sphere is
+# as large as the speedometer; on the first page the speedometer is drawn
+# first, then the sphere over it, opaque 0.24 s after the page changes to it
+# (and already when the GL view starts on it: animations.c times the fade from
+# the last change of page only).
+INTRO_SPHERE_MASK = (
+    (INTRO_TEXTURES, src(" " * 4, """
+        if ([fileName isEqualToString:@"telegram_sphere.png"]) {
+            CGContextSetFillColorWithColor(spriteContext, color.CGColor);
+            CGContextFillRect(spriteContext, CGRectMake(0, 0, width, height));
+        }
+    """)),
+    (INTRO_CONTROLLER, "    UIColor *color = _backgroundColor;\n"),
+    (INTRO_CONTROLLER, '    set_telegram_textures(setup_texture(@"telegram_sphere.png", color), '),
+    (INTRO_ANIMATIONS, "    telegram_sphere = create_textured_rectangle(CSizeMake(148, 148), telegram_sphere_texture);\n"),
+    (INTRO_ANIMATIONS, "    fast_body = create_textured_rectangle(CSizeMake(148, 148), fast_body_texture);\n"),
+    (INTRO_ANIMATIONS, ("    // LAYER0 - PREPARATION ///// ///// ///// ///// ///// ///// ///// /////\n"
+                        "    if (current_page == 0)\n    {\n        rglNormalDraw();\n\n"
+                        "        telegram_sphere.params.alpha = 1;\n\n        scale = 1;\n\n"
+                        "        float alpha = 1;\n        if (direct == 0) {\n"
+                        "            alpha = t(0, 1, 0, duration_const, Linear);\n\n            scale = 1;\n\n"
+                        "            fast_body.params.alpha = 1;\n"
+                        "            fast_body.params.scale = xyzMake(scale, scale, 1);\n"
+                        "            draw_textured_shape(&fast_body, main_matrix, NORMAL);\n        }\n")),
+    (INTRO_ANIMATIONS, ("    // LAYER4 - DETAILS ///// ///// ///// ///// ///// ///// ///// /////\n"
+                        "    if (current_page == 0)\n    {\n        rglNormalDraw();\n\n"
+                        "        if (direct == 0) {\n\n"
+                        "            telegram_sphere.params.alpha = t(0, 1, 0, duration_const*.8, Linear);\n\n"
+                        "            scale = 1.005;\n\n"
+                        "            telegram_sphere.params.scale = xyzMake(scale, scale, 1);\n"
+                        "            draw_textured_shape(&telegram_sphere, main_matrix, NORMAL);\n")),
+)
+
+INTRO_LAYOUT_CONSTANTS = "\n" + src("", """
+    // pluma: the layout of the first page, which places all of them: its mark
+    // PlumaIntroMarkHeight pt high (the ink, strokes included), the glyphs of
+    // the wordmark PlumaIntroMarkGap pt under it, and the group of the mark, the
+    // wordmark, the text and the dots at PlumaIntroGroupBias of the free space
+    // between the top inset and the start button.
+    static const CGFloat PlumaIntroMarkHeight = 128.0;
+    static const CGFloat PlumaIntroMarkGap = 32.0;
+    static const CGFloat PlumaIntroGroupBias = 0.44;
+    // The mark's animation, pluma_mark_write.json (brand/mark_write.py): a canvas
+    // of 512 units, the ink of the mark at rest within x 79.6-433.1, y 99.95-405.15.
+    static const CGFloat PlumaIntroMarkCanvas = 512.0;
+    static const CGFloat PlumaIntroMarkInkLeft = 79.6;
+    static const CGFloat PlumaIntroMarkInkTop = 99.95;
+    static const CGFloat PlumaIntroMarkInkRight = 433.1;
+    static const CGFloat PlumaIntroMarkInkBottom = 405.15;
+
+    // The side of the mark's view in whole points, so that its canvas is drawn
+    // pixel for pixel; the ink is then PlumaIntroMarkHeight high to 0.2 pt.
+    static CGFloat PlumaIntroMarkSide(void)
+    {
+        return ceil(PlumaIntroMarkCanvas * PlumaIntroMarkHeight / (PlumaIntroMarkInkBottom - PlumaIntroMarkInkTop));
+    }
+""")
+INTRO_DEVICE_SCREEN = "} DeviceScreen;\n"
+
+INTRO_HEADER_ANCHOR = "@property (nonatomic, copy) UIView *(^createStartButton)(CGFloat);\n"
+INTRO_HEADER_MARK = "\n" + src("", """
+    // pluma: the mark of the first page, a view of the host's, set before the view
+    // loads: the intro lays it out over its GL view, firstPageMarkSize large,
+    // brings it in and shows it on the first page; firstPageMarkAppeared asks the
+    // host to write the mark from its start when the page appears. topInset is
+    // where the host's screens start under the status bar: the larger of its
+    // layout's status bar height and top safe inset.
+    @property (nonatomic, strong) UIView *firstPageMarkView;
+    @property (nonatomic, copy) void (^firstPageMarkAppeared)(void);
+    @property (nonatomic) CGFloat topInset;
+    @property (class, nonatomic, readonly) CGSize firstPageMarkSize;
+""")
+
+INTRO_IVARS_ANCHOR = "    bool _loadedView;\n}\n@end\n"
+INTRO_IVARS = src(" " * 4, """
+    bool _loadedView;
+
+    // pluma: the container of firstPageMarkView, whether the intro is on screen,
+    // whether the mark is shown, and whether it is to write itself as soon as
+    // the scroll lets it show.
+    UIView *_firstPageMarkContainer;
+    bool _firstPageMarkOnScreen;
+    bool _firstPageMarkShown;
+    bool _firstPageMarkWritePending;
+""") + "}\n@end\n"
+
+# animateIn: the mark comes in as the GL view does, and writes itself from its
+# start as it fades in: (upstream's line, what follows it).
+INTRO_ANIMATE_IN = (
+    ("    _glkView.transform = CGAffineTransformMakeScale(0.66, 0.66);\n", "    \n" + src(" " * 4, """
+        // pluma: the first page's mark comes in as the GL view does.
+        CGPoint markTargetPosition = _firstPageMarkContainer.center;
+        _firstPageMarkContainer.center = CGPointMake(self.view.bounds.size.width / 2.0, self.view.bounds.size.height / 2.0);
+        _firstPageMarkContainer.transform = CGAffineTransformMakeScale(0.66, 0.66);
+    """)),
+    ("        _glkView.transform = CGAffineTransformIdentity;\n", src(" " * 8, """
+        _firstPageMarkContainer.center = markTargetPosition;
+        _firstPageMarkContainer.transform = CGAffineTransformIdentity;
+    """)),
+    ("    _glkView.alpha = 0.0;\n", "    _firstPageMarkContainer.alpha = 0.0;\n"),
+    ("        _glkView.alpha = 1.0;\n", "        _firstPageMarkContainer.alpha = _firstPageMarkShown ? 1.0 : 0.0;\n"),
+    ("        _startButton.alpha = 1.0;\n    } completion:nil];\n", "    \n" + src(" " * 4, """
+        // pluma: and the mark writes itself from its start as it fades in.
+        if (_firstPageMarkShown && _firstPageMarkAppeared != nil) {
+            void (^firstPageMarkAppeared)(void) = _firstPageMarkAppeared;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                firstPageMarkAppeared();
+            });
+        }
+    """)),
+)
+
+INTRO_GL_ADD_OLD = "        [self.view addSubview:_glkView];\n"
+INTRO_GL_ADD = src(" " * 8, """
+    // pluma: under everything, as on the first load, also when the intro makes
+    // the view again after it was away: opaque, it reaches over the titles'
+    // frames and lies under the first page's mark.
+    [self.view insertSubview:_glkView atIndex:0];
+""")
+
+INTRO_LOAD_ANCHOR = "    [_wrapperView addSubview:_pageControl];\n}\n"
+INTRO_LOAD_MARK = "    \n" + src(" " * 4, """
+    // pluma: the first page's mark, the host's view, in a container between the
+    // GL view and the pages: the intro lays the container out, brings it in and
+    // shows it on the first page, the scroll fades the view. VoiceOver reads the
+    // name from the wordmark.
+    if (_firstPageMarkView != nil) {
+        _firstPageMarkContainer = [[UIView alloc] init];
+        _firstPageMarkContainer.userInteractionEnabled = false;
+        _firstPageMarkContainer.accessibilityElementsHidden = true;
+        _firstPageMarkContainer.alpha = 0.0;
+        [_firstPageMarkContainer addSubview:_firstPageMarkView];
+        [self.view insertSubview:_firstPageMarkContainer belowSubview:_wrapperView];
+    }
+""")
+
+INTRO_SNAPSHOT_ANCHOR = "- (UIView *)createAnimationSnapshot {\n"
+INTRO_SNAPSHOT = src(" " * 4, """
+    // pluma: on the first page the picture is the mark; the GL view shows only
+    // the background colour there.
+    if (_firstPageMarkContainer != nil && _currentPage == 0) {
+        UIView *snapshotView = [_firstPageMarkContainer snapshotViewAfterScreenUpdates:false];
+        snapshotView.frame = _firstPageMarkContainer.frame;
+        return snapshotView;
+    }
+""")
+
+# updateLayout: upstream's heights for each screen size, then the frames of
+# the page control and the GL view.
+INTRO_LAYOUT_OLD = src(" " * 4, """
+    UIInterfaceOrientation isVertical = (self.view.bounds.size.height / self.view.bounds.size.width > 1.0f);
+
+    CGFloat statusBarHeight = 0;
+
+    CGFloat pageControlY = 0;
+    CGFloat glViewY = 0;
+    CGFloat startButtonY = 0;
+    CGFloat pageY = 0;
+
+    CGFloat languageButtonSpread = 60.0f;
+    CGFloat languageButtonOffset = 26.0f;
+
+    DeviceScreen deviceScreen = [self deviceScreen];
+    switch (deviceScreen)
+    {
+        case iPad:
+            glViewY = isVertical ? 121 + 90 : 121;
+            startButtonY = 120;
+            pageY = isVertical ? 485 : 335;
+            pageControlY = pageY + 200.0f;
+            break;
+
+        case iPadPro:
+            glViewY = isVertical ? 221 + 110 : 221;
+            startButtonY = 120;
+            pageY = isVertical ? 605 : 435;
+            pageControlY = pageY + 200.0f;
+            break;
+
+        case Inch35:
+            pageControlY = 162 / 2;
+            glViewY = 62 - 20;
+            startButtonY = 75;
+            pageY = 215;
+            pageControlY = pageY + 160.0f;
+            if (!_alternativeLanguageButton.isHidden) {
+                glViewY -= 40.0f;
+                pageY -= 40.0f;
+                pageControlY -= 40.0f;
+                startButtonY -= 30.0f;
+            }
+            languageButtonSpread = 65.0f;
+            languageButtonOffset = 15.0f;
+            break;
+
+        case Inch4:
+            glViewY = 62;
+            startButtonY = 75;
+            pageY = 245;
+            pageControlY = pageY + 160.0f;
+            languageButtonSpread = 50.0f;
+            languageButtonOffset = 20.0f;
+            break;
+
+        case Inch47:
+            pageControlY = 162 / 2 + 10;
+            glViewY = 62 + 25;
+            startButtonY = 75 + 5;
+            pageY = 245 + 50;
+            pageControlY = pageY + 160.0f;
+            break;
+
+        case Inch55:
+            glViewY = 62 + 45;
+            startButtonY = 75 + 20;
+            pageY = 245 + 85;
+            pageControlY = pageY + 160.0f;
+            break;
+
+        case Inch65:
+            glViewY = 62 + 85;
+            startButtonY = 75 + 30;
+            pageY = 245 + 125;
+            pageControlY = pageY + 160.0f;
+            break;
+
+        default:
+            break;
+    }
+
+    if (!_alternativeLanguageButton.isHidden) {
+        startButtonY += languageButtonSpread;
+    }
+
+    _pageControl.frame = CGRectMake(0, pageControlY, self.view.bounds.size.width, 7);
+    _glkView.frame = CGRectChangedOriginY(_glkView.frame, glViewY - statusBarHeight);
+""")
+INTRO_LAYOUT = src(" " * 4, """
+    // pluma: the pages as one group between the top inset and the start button,
+    // placed by the first page (PlumaIntroMarkHeight, PlumaIntroMarkGap,
+    // PlumaIntroGroupBias); the start button keeps upstream's place.
+    bool isIpad = ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad);
+
+    CGFloat statusBarHeight = 0;
+
+    CGFloat startButtonY = 0;
+
+    CGFloat languageButtonSpread = 60.0f;
+    CGFloat languageButtonOffset = 26.0f;
+
+    DeviceScreen deviceScreen = [self deviceScreen];
+    switch (deviceScreen)
+    {
+        case iPad:
+        case iPadPro:
+            startButtonY = 120;
+            break;
+
+        case Inch35:
+            startButtonY = 75;
+            if (!_alternativeLanguageButton.isHidden) {
+                startButtonY -= 30.0f;
+            }
+            languageButtonSpread = 65.0f;
+            languageButtonOffset = 15.0f;
+            break;
+
+        case Inch4:
+            startButtonY = 75;
+            languageButtonSpread = 50.0f;
+            languageButtonOffset = 20.0f;
+            break;
+
+        case Inch47:
+            startButtonY = 75 + 5;
+            break;
+
+        case Inch55:
+            startButtonY = 75 + 20;
+            break;
+
+        case Inch65:
+            startButtonY = 75 + 30;
+            break;
+
+        default:
+            break;
+    }
+
+    if (!_alternativeLanguageButton.isHidden) {
+        startButtonY += languageButtonSpread;
+    }
+
+    // From the top of a page's frame, 20 pt into the scroll view, the wordmark's
+    // glyphs start 26.8 pt down (RMIntroPageView's 72-pt title, its baseline at
+    // 48.5), and the dots end 7.5 pt below the top of the page control, which
+    // is dotsOffset down. The GL view's pictures of the other pages, 148 pt
+    // across its 200 (or 240 on iPad), end where the mark ends.
+    CGFloat glSize = isIpad ? 240.0f : 200.0f;
+    CGFloat dotsOffset = isIpad ? 200.0f : 160.0f;
+    CGFloat glyphTop = 20.0f + 26.8f;
+    CGFloat groupHeight = PlumaIntroMarkHeight + PlumaIntroMarkGap + (dotsOffset + 7.5f - glyphTop);
+    CGFloat buttonTop = self.view.bounds.size.height - startButtonY;
+    CGFloat markTop = round(_topInset + PlumaIntroGroupBias * MAX(0.0f, buttonTop - _topInset - groupHeight));
+
+    CGFloat pageY = round(markTop + PlumaIntroMarkHeight + PlumaIntroMarkGap - glyphTop);
+    CGFloat pageControlY = pageY + dotsOffset;
+    CGFloat glViewY = round(markTop + PlumaIntroMarkHeight - glSize / 2.0f - 74.0f * glSize / 200.0f);
+
+    _pageControl.frame = CGRectMake(0, pageControlY, self.view.bounds.size.width, 7);
+    _glkView.frame = CGRectChangedOriginY(_glkView.frame, glViewY - statusBarHeight);
+
+    // The mark's canvas, its ink centred across and at the top of the group;
+    // bounds and center, which animateIn's transform leaves alone.
+    if (_firstPageMarkContainer != nil) {
+        CGFloat markSide = PlumaIntroMarkSide();
+        CGFloat markScale = markSide / PlumaIntroMarkCanvas;
+        CGFloat markX = round(self.view.bounds.size.width / 2.0f - (PlumaIntroMarkInkLeft + PlumaIntroMarkInkRight) / 2.0f * markScale);
+        CGFloat markY = round(markTop - PlumaIntroMarkInkTop * markScale);
+        _firstPageMarkContainer.bounds = CGRectMake(0.0f, 0.0f, markSide, markSide);
+        _firstPageMarkContainer.center = CGPointMake(markX + markSide / 2.0f, markY + markSide / 2.0f);
+        _firstPageMarkView.frame = _firstPageMarkContainer.bounds;
+    }
+""").replace("            break;\n    \n", "            break;\n            \n")  # the switch's blank lines, as upstream's
+
+INTRO_APPEAR_OLD = ("- (void)viewWillAppear:(BOOL)animated\n{\n    [super viewWillAppear:animated];\n    \n    [self loadGL];\n}\n\n"
+                    "- (void)viewDidDisappear:(BOOL)animated\n{\n    [super viewDidDisappear:animated];\n    \n    [self freeGL];\n}\n")
+INTRO_APPEAR = (INTRO_APPEAR_OLD
+                .replace("    [self loadGL];\n", "    [self loadGL];\n    \n" + src(" " * 4, """
+                    // pluma: on screen again, the first page's mark shows if the page is
+                    // current, and writes itself.
+                    _firstPageMarkOnScreen = true;
+                    [self updateFirstPageMarkAnimated:true];
+                """))
+                .replace("    [self freeGL];\n", "    [self freeGL];\n    \n" + src(" " * 4, """
+                    // pluma: away, it hides at once, to write itself again when it is back.
+                    _firstPageMarkOnScreen = false;
+                    [self updateFirstPageMarkAnimated:false];
+                """)))
+
+INTRO_SCROLL_ANCHOR = "    [_pageControl setCurrentPage:_currentPage];\n}\n"
+INTRO_SCROLL = src(" " * 4, """
+    [_pageControl setCurrentPage:_currentPage];
+
+    // pluma: the first page's mark follows the scroll and the page.
+    [self updateFirstPageMarkAnimated:true];
+""") + "}\n"
+
+INTRO_METHODS_ANCHOR = "\n@end\n\n@implementation TGAvailableLocalization\n"
+INTRO_METHODS = "\n" + src("", """
+    // pluma: the first page's mark shows while the intro is on screen on that
+    // page. As the page changes it fades in over 0.24 s and out over 0.3 s, the
+    // times of the GL view's sphere (animations.c), now a square of the
+    // background colour over the next page's speedometer: the mark and the
+    // speedometer cross-fade. On its page it fades with the scroll, gone half way
+    // to the next one. Shown again after it was out of sight, it writes itself
+    // from its start (firstPageMarkAppeared), once the scroll lets it show: the
+    // page changes when the finger lifts (scrollViewDidScroll:), often while the
+    // scroll still holds the mark faded out.
+    - (void)updateFirstPageMarkAnimated:(bool)animated
+    {
+        if (_firstPageMarkContainer == nil) {
+            return;
+        }
+
+        CGFloat pageWidth = _pageScrollView.frame.size.width;
+        if (pageWidth > 0.0f) {
+            _firstPageMarkView.alpha = MAX(0.0f, MIN(1.0f, 1.0f - _pageScrollView.contentOffset.x / (pageWidth / 2.0f)));
+        }
+
+        bool shown = _firstPageMarkOnScreen && _currentPage == 0;
+        if (shown != _firstPageMarkShown) {
+            _firstPageMarkShown = shown;
+
+            CALayer *layer = _firstPageMarkContainer.layer.presentationLayer;
+            float opacity = layer != nil ? layer.opacity : _firstPageMarkContainer.layer.opacity;
+            _firstPageMarkWritePending = shown && opacity * _firstPageMarkView.alpha < 0.01f;
+
+            CGFloat alpha = shown ? 1.0f : 0.0f;
+            if (animated) {
+                [UIView animateWithDuration:shown ? 0.24 : 0.3 delay:0.0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveLinear animations:^{
+                    _firstPageMarkContainer.alpha = alpha;
+                } completion:nil];
+            } else {
+                // At once, with no fade left running into its next appearance.
+                [_firstPageMarkContainer.layer removeAllAnimations];
+                _firstPageMarkContainer.alpha = alpha;
+            }
+        }
+
+        if (_firstPageMarkWritePending && _firstPageMarkView.alpha > 0.0f) {
+            _firstPageMarkWritePending = false;
+            if (_firstPageMarkAppeared != nil) {
+                _firstPageMarkAppeared();
+            }
+        }
+    }
+
+    - (void)setTopInset:(CGFloat)topInset
+    {
+        if (_topInset != topInset) {
+            _topInset = topInset;
+            [self.viewIfLoaded setNeedsLayout];
+        }
+    }
+
+    + (CGSize)firstPageMarkSize
+    {
+        CGFloat side = PlumaIntroMarkSide();
+        return CGSizeMake(side, side);
+    }
+""")
+
+# The host: the mark's node, given to the intro, and the top inset.
+INTRO_SPLASH_EDITS = (
+    ("import RMIntro\n", "import ManagedAnimationNode\n"),
+    ("    private let controller: RMIntroViewController\n", src(" " * 4, """
+        // pluma: the mark of the intro's first page.
+        private let markNode: IntroMarkNode
+    """)),
+    ("suggestedLocalizationSignal: localizationSignal)\n", src(" " * 8, """
+        self.markNode = IntroMarkNode(size: RMIntroViewController.firstPageMarkSize, dark: theme.overallDarkAppearance)
+    """)),
+    ("            return self?.startButton.view\n        }\n", "        \n" + src(" " * 8, """
+        // pluma: the intro shows the mark on its first page and asks it to write
+        // itself whenever the page appears.
+        self.controller.firstPageMarkView = self.markNode.view
+        self.controller.firstPageMarkAppeared = { [weak self] in
+            self?.markNode.write()
+        }
+    """)),
+    ("        self.controller.defaultFrame = controllerFrame\n", src(" " * 8, """
+        // pluma: the intro's pages start where the app's screens start under the
+        // status bar: the layout's status bar height and top safe inset, both
+        // from Display's DeviceMetrics rather than UIKit's safe area.
+        self.controller.topInset = max(layout.safeInsets.top, layout.statusBarHeight ?? 0.0)
+    """)),
+    ("            self.nextPressed?(strings)\n        }\n    }\n}\n", "\n" + src("", """
+    // pluma: the mark of the intro's first page writing itself, as on Pluma's
+    // site: pluma_mark_write.json (brand/mark_write.py), the ring drawn in 1.05 s
+    // with the feathers riding the nib, then one breath of the feathers; at rest
+    // from frame 127 of 132. Dark themes take the dark appearance of the app
+    // icon (brand/render.sh): the ring, then the feathers from the nib outwards;
+    // the middle feather's grey is the same in both.
+    private final class IntroMarkNode: ManagedAnimationNode {
+        private let writeItem: ManagedAnimationItem
+        private let restItem: ManagedAnimationItem
+
+        init(size: CGSize, dark: Bool) {
+            let source = ManagedAnimationSource.local("pluma_mark_write")
+            let replaceColors: [UInt32: UInt32]? = dark ? [0x111111: 0xe8ece8, 0x4a4a4a: 0xbdbdbd, 0xbdbdbd: 0x6b6f6b] : nil
+            self.writeItem = ManagedAnimationItem(source: source, replaceColors: replaceColors)
+            self.restItem = ManagedAnimationItem(source: source, replaceColors: replaceColors, frames: .still(.end), duration: 0.01)
+
+            super.init(size: size)
+
+            // Until it first writes itself: the pen alone, at the start of the ring.
+            self.trackTo(item: ManagedAnimationItem(source: source, replaceColors: replaceColors, frames: .still(.start), duration: 0.01))
+        }
+
+        // From its start, at the file's own 60 frames a second; with Reduce
+        // Motion the finished mark at once, as the site shows it.
+        func write() {
+            self.trackTo(item: UIAccessibility.isReduceMotionEnabled ? self.restItem : self.writeItem, immediately: true)
+        }
+
+        // The writing ends on its last frame, the mark at rest, also when a late
+        // tick of the display link takes it past the end before that frame.
+        override func advanceState() {
+            if self.trackStack.isEmpty, let state = self.state, state.item.frames == nil {
+                self.trackStack.append(self.restItem)
+            }
+            super.advanceState()
+        }
+    }
+""")),
+)
+
+
+def patch_intro_mark(tree):
+    """The first page of the intro: the mark writing itself where the disc was,
+    and the pages laid out around it."""
+    # The blank sphere hides the next page's speedometer: upstream's lines it
+    # relies on, which nothing here edits.
+    for rel, s in INTRO_SPHERE_MASK:
+        tree.expect(rel, s)
+    tree.replace(INTRO_HEADER, INTRO_HEADER_ANCHOR, INTRO_HEADER_ANCHOR + INTRO_HEADER_MARK)
+    tree.replace(INTRO_CONTROLLER, INTRO_DEVICE_SCREEN, INTRO_DEVICE_SCREEN + INTRO_LAYOUT_CONSTANTS)
+    tree.replace(INTRO_CONTROLLER, INTRO_IVARS_ANCHOR, INTRO_IVARS)
+    for line, added in INTRO_ANIMATE_IN:
+        tree.replace(INTRO_CONTROLLER, line, line + added)
+    tree.replace(INTRO_CONTROLLER, INTRO_GL_ADD_OLD, INTRO_GL_ADD)
+    tree.replace(INTRO_CONTROLLER, INTRO_LOAD_ANCHOR, INTRO_LOAD_ANCHOR[:-len("}\n")] + INTRO_LOAD_MARK + "}\n")
+    tree.replace(INTRO_CONTROLLER, INTRO_SNAPSHOT_ANCHOR, INTRO_SNAPSHOT_ANCHOR + INTRO_SNAPSHOT)
+    tree.replace_lines(INTRO_CONTROLLER, INTRO_LAYOUT_OLD, INTRO_LAYOUT)
+    tree.replace(INTRO_CONTROLLER, INTRO_APPEAR_OLD, INTRO_APPEAR)
+    tree.replace(INTRO_CONTROLLER, INTRO_SCROLL_ANCHOR, INTRO_SCROLL)
+    tree.replace(INTRO_CONTROLLER, INTRO_METHODS_ANCHOR, INTRO_METHODS + INTRO_METHODS_ANCHOR)
+    for anchor, added in INTRO_SPLASH_EDITS:
+        tree.replace(INTRO_SPLASH, anchor, anchor + added)
+
+
+def verify_intro_mark(tree):
+    header, controller, splash = (tree.read(rel) for rel in (INTRO_HEADER, INTRO_CONTROLLER, INTRO_SPLASH))
+    if header.count("@property (nonatomic, strong) UIView *firstPageMarkView;\n") != 1:
+        raise PatchError(f"{INTRO_HEADER}: the intro takes no mark for its first page")
+    if (controller.count(INTRO_LAYOUT_CONSTANTS) != 1 or controller.count(INTRO_LAYOUT) != 1 or "isVertical" in controller
+            or controller.count("[self updateFirstPageMarkAnimated:") != 3):
+        raise PatchError(f"{INTRO_CONTROLLER}: the intro's pages are not laid out around the first page's mark")
+    if "[self.view addSubview:_glkView];" in controller or controller.count("[self.view insertSubview:_glkView atIndex:0];\n") != 1:
+        raise PatchError(f"{INTRO_CONTROLLER}: the GL view can come back over the pages and the mark")
+    name = pathlib.PurePath(INTRO_MARK).stem
+    if (splash.count("self.controller.firstPageMarkView = self.markNode.view\n") != 1
+            or splash.count(f'ManagedAnimationSource.local("{name}")') != 1):
+        raise PatchError(f"{INTRO_SPLASH}: the intro's first page has no mark")
 
 
 # --- birthdays ---------------------------------------------------------------
@@ -1945,6 +2523,7 @@ def verify(tree, c):
         raise PatchError(f"{BACKUP}: backup addresses are not off")
 
     verify_brand(tree)
+    verify_intro_mark(tree)
     verify_names(tree, c)
     verify_scheme(tree, c)
     verify_client_links(tree)

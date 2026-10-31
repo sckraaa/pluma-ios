@@ -16,6 +16,8 @@
 #   pluma-devices.tgs      the laptop of Settings > Devices: upstream's
 #                          Devices.tgs in the palette, the mark in place of
 #                          the plane on the lid and in the QR code.
+# The Lottie animations are written by tgs.py (still marks) and mark_write.py
+# (the mark writing itself).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -197,24 +199,24 @@ python3 -I tgs.py pluma-mark-mono.svg "$out/Telegram/Telegram-iOS/Resources/Plan
 # The laptop animation of Settings > Devices.
 cp pluma-devices.tgs "$out/Telegram/Telegram-iOS/Resources/Devices.tgs"
 
-# The first page of the intro, as in the Android app: the mark on a white
-# disc in place of Telegram's blue sphere, and no paper plane flying around
-# it (a transparent texture of the same size; the intro needs the file). The
-# disc fills the texture, as upstream's sphere does. The mark takes the share
-# of the disc it takes on Android, where pluma-android's brand/render.py
-# draws it with the centre of the 512 grid on the centre of the 150 dp disc,
-# 0.98 * min(41 / reach_x, 37 / reach_y) dp per unit of the grid: the reach
-# is how far the mark, strokes included, goes from the grid's centre, 177.09
-# across and 156.05 down in pluma-mark.svg. Here the disc is 148 pt, 2 px
-# per pt.
-sphere_mark=$(awk 'BEGIN {
-	s = 0.98 * (41 / 177.09 < 37 / 156.05 ? 41 / 177.09 : 37 / 156.05) * 148 / 150 * 2
-	printf "<g transform=\"translate(%.4f %.4f) scale(%.6f)\">", 148 - 256 * s, 148 - 256 * s, s
-}')
-svg sphere 296 296 "<circle cx=\"148\" cy=\"148\" r=\"148\" fill=\"#FFFFFF\"/>$sphere_mark$mark</g>"
+# The first page of the intro shows the mark writing itself, a view of its
+# own over the intro's OpenGL animation (the animation below): no picture of
+# that animation, neither Telegram's sphere nor the paper plane flying around
+# it. Their textures are transparent, of the same sizes (the intro needs the
+# files). The intro fills the sphere's texture with its background colour
+# before it draws the image on it (texture_helper.m), so the sphere is a square
+# of that colour: it still hides the speedometer of the next page, which the
+# animation draws under it, and fades it in and out as the page changes.
+svg sphere 296 296 ""
 png "$tmp/sphere.svg" 296 296 "$out/Telegram/Telegram-iOS/Resources/intro/telegram_sphere@2x.png"
 svg plane 164 148 ""
 png "$tmp/plane.svg" 164 148 "$out/Telegram/Telegram-iOS/Resources/intro/telegram_plane1@2x.png"
+# The mark writing itself, as Pluma's site draws it (writeMark of its
+# components/mark.ts): a Lottie animation of the kit's mark on the 512 grid,
+# which the app plays with its own player and recolours for dark themes. With
+# --site the script also checks its figures against the site's sources, which
+# this repository does not hold.
+python3 -I mark_write.py pluma-mark.svg "$out/Telegram/Telegram-iOS/Resources/intro/pluma_mark_write.json"
 
 # The title of that page, as in the Android app: the wordmark, a black mask
 # that the intro tints with the colour of its text. Android draws the glyphs
@@ -222,9 +224,10 @@ png "$tmp/plane.svg" 164 148 "$out/Telegram/Telegram-iOS/Resources/intro/telegra
 # 26.33 pt, centred across a 106 x 27 pt image. The glyphs of
 # pluma-wordmark.svg span x 24.1 to 957.2 and y 21.5 to 255.25, the baseline
 # at y 214, 22 pt from the top of the image: the intro sets it on the
-# baseline of the title. These figures, and the mark's reach above, are
-# measured on the kit's files, which ci/patch_test.py pins: a new file means
-# measuring them again.
+# baseline of the title. These figures are measured on the kit's files, which
+# ci/patch_test.py pins with the mark's (the intro lays the mark out by the
+# box of its ink that mark_write.py prints): a new file means measuring them
+# again.
 word=$(paths pluma-wordmark.svg)
 black_word=${word//#111111/#000000}
 wordmark=$(awk 'BEGIN {
