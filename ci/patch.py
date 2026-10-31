@@ -993,36 +993,58 @@ BIRTHDAY_OPEN_OLD = src(" " * 24, """
 """)
 BIRTHDAY_OPEN = src(" " * 24, """
     case let .birthdayPremiumGift(peers, _):
-        // pluma: no Premium gifts. The chat with the contact; with several, a
-        // list of them to choose the chat from, as the live location panel
-        // lists its chats. The list goes by name, the same on every launch:
-        // peers come in the order of a dictionary.
+        // pluma: no Premium gifts; the chat with the contact (openBirthdayChats).
+        self.openBirthdayChats(peers)
+""")
+# The list of several contacts is a method of its own: the notice's action is
+# a closure inside one long expression (the panels of updateNavigationBar),
+# which the Swift compiler could not type-check in time with it inside.
+BIRTHDAY_METHOD_ANCHOR = ("    private func updateNavigationBar(layout: ContainerViewLayout, deferScrollApplication: Bool, "
+                          "transition: ComponentTransition) -> (navigationHeight: CGFloat, storiesInset: CGFloat) {\n")
+BIRTHDAY_METHOD = src(" " * 4, """
+    // pluma: the chat with a contact whose birthday is today; with several,
+    // a list of them to choose the chat from, as the live location panel
+    // lists its chats. The list goes by name, the same on every launch: the
+    // notice's peers come in the order of a dictionary.
+    private func openBirthdayChats(_ peers: [EnginePeer]) {
         if peers.count == 1, let peer = peers.first {
             self.effectiveContainerNode.peerSelected?(peer, nil, true, true, nil)
-        } else if !peers.isEmpty, let controller = self.controller {
-            let actionSheet = ActionSheetController(presentationData: self.presentationData)
-            let dismissAction: () -> Void = { [weak actionSheet] in
-                actionSheet?.dismissAnimated()
-            }
-            var items: [ActionSheetItem] = []
-            items.append(ActionSheetTextItem(title: self.presentationData.strings.ChatList_BirthdayMultipleTitle(Int32(peers.count))))
-            let strings = self.presentationData.strings
-            let nameDisplayOrder = self.presentationData.nameDisplayOrder
-            let named = peers.map { ($0, $0.displayTitle(strings: strings, displayOrder: nameDisplayOrder)) }.sorted(by: { lhs, rhs in
-                lhs.1 == rhs.1 ? lhs.0.id < rhs.0.id : lhs.1.localizedCaseInsensitiveCompare(rhs.1) == .orderedAscending
-            })
-            for (peer, title) in named {
-                items.append(ActionSheetButtonItem(title: title, action: { [weak self] in
-                    dismissAction()
-                    self?.effectiveContainerNode.peerSelected?(peer, nil, true, true, nil)
-                }))
-            }
-            actionSheet.setItemGroups([
-                ActionSheetItemGroup(items: items),
-                ActionSheetItemGroup(items: [ActionSheetButtonItem(title: self.presentationData.strings.Common_Cancel, action: { dismissAction() })])
-            ])
-            controller.present(actionSheet, in: .window(.root))
+            return
         }
+        guard !peers.isEmpty, let controller = self.controller else {
+            return
+        }
+        let strings = self.presentationData.strings
+        let nameDisplayOrder = self.presentationData.nameDisplayOrder
+        var named: [(peer: EnginePeer, title: String)] = []
+        for peer in peers {
+            named.append((peer: peer, title: peer.displayTitle(strings: strings, displayOrder: nameDisplayOrder)))
+        }
+        named.sort(by: { (lhs: (peer: EnginePeer, title: String), rhs: (peer: EnginePeer, title: String)) -> Bool in
+            if lhs.title == rhs.title {
+                return lhs.peer.id < rhs.peer.id
+            }
+            return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+        })
+        let actionSheet = ActionSheetController(presentationData: self.presentationData)
+        let dismissAction: () -> Void = { [weak actionSheet] in
+            actionSheet?.dismissAnimated()
+        }
+        var items: [ActionSheetItem] = []
+        items.append(ActionSheetTextItem(title: strings.ChatList_BirthdayMultipleTitle(Int32(peers.count))))
+        for (peer, title) in named {
+            items.append(ActionSheetButtonItem(title: title, action: { [weak self] in
+                dismissAction()
+                self?.effectiveContainerNode.peerSelected?(peer, nil, true, true, nil)
+            }))
+        }
+        actionSheet.setItemGroups([
+            ActionSheetItemGroup(items: items),
+            ActionSheetItemGroup(items: [ActionSheetButtonItem(title: strings.Common_Cancel, action: { dismissAction() })])
+        ])
+        controller.present(actionSheet, in: .window(.root))
+    }
+
 """)
 
 BIRTHDAY_TEXT_OLD = src(" " * 12, """
@@ -1098,6 +1120,7 @@ def patch_birthdays(tree):
     birthday row of the contact's profile."""
     tree.expect(STRINGS, BIRTHDAY_TEXT_KEY)
     tree.replace(CHAT_LIST, BIRTHDAY_OPEN_OLD, BIRTHDAY_OPEN)
+    tree.replace(CHAT_LIST, BIRTHDAY_METHOD_ANCHOR, BIRTHDAY_METHOD + BIRTHDAY_METHOD_ANCHOR)
     tree.replace(CHAT_LIST_NOTICE, BIRTHDAY_TEXT_OLD, BIRTHDAY_TEXT)
     tree.replace(CHAT_LIST_PANELS, BIRTHDAY_CLOSE_OLD, BIRTHDAY_CLOSE)
     for old, new in BIRTHDAY_PROFILE:
@@ -1117,7 +1140,9 @@ def birthday_case(tree, rel, head, tail):
 
 def verify_birthdays(tree):
     opened, text, closed = (birthday_case(tree, *case) for case in BIRTHDAY_CASES)
-    if "openPremiumGift(" in opened or opened.count(".peerSelected?(peer, nil, true, true, nil)") != 2:
+    chat_list = tree.read(CHAT_LIST)
+    if ("openPremiumGift(" in opened or "self.openBirthdayChats(peers)\n" not in opened
+            or chat_list.count(BIRTHDAY_METHOD) != 1 or BIRTHDAY_METHOD.count(".peerSelected?(peer, nil, true, true, nil)") != 2):
         raise PatchError(f"{CHAT_LIST}: the birthday notice does not open the chat")
     if ("ChatList_BirthdaySingleText" in text or "ChatList_BirthdayMultipleText" in text
             or text.count("text = item.strings.ContactList_Context_SendMessage\n") != 2):

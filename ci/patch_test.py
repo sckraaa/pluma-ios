@@ -370,7 +370,8 @@ class ClientLinksTest(unittest.TestCase):
 class BirthdayTest(unittest.TestCase):
     # The birthday notice of the chat list, each place with the case after it:
     # what a tap does (ChatListControllerNode.swift)...
-    TAP = ('                        case let .birthdayPremiumGift(peers, birthdays):\n'
+    TAP = (patch.BIRTHDAY_METHOD_ANCHOR
+           + '                        case let .birthdayPremiumGift(peers, birthdays):\n'
            '                            self.effectiveContainerNode.currentItemNode.interaction?.openPremiumGift(peers, birthdays)\n'
            '                        case .reviewLogin:\n'
            '                            break\n')
@@ -436,17 +437,21 @@ class BirthdayTest(unittest.TestCase):
         tap = self.tree.read(patch.CHAT_LIST)
         self.assertNotIn("openPremiumGift", tap)
         self.assertTrue(tap.endswith("                        case .reviewLogin:\n                            break\n"))
-        for line in ("                        case let .birthdayPremiumGift(peers, _):\n",
-                     "                            if peers.count == 1, let peer = peers.first {\n"
-                     "                                self.effectiveContainerNode.peerSelected?(peer, nil, true, true, nil)\n",
-                     "                                items.append(ActionSheetTextItem(title: "
-                     "self.presentationData.strings.ChatList_BirthdayMultipleTitle(Int32(peers.count))))\n",
-                     "lhs.1 == rhs.1 ? lhs.0.id < rhs.0.id : "
-                     "lhs.1.localizedCaseInsensitiveCompare(rhs.1) == .orderedAscending\n",
-                     "                                for (peer, title) in named {\n"
-                     "                                    items.append(ActionSheetButtonItem(title: title, action: { [weak self] in\n",
-                     "                                        self?.effectiveContainerNode.peerSelected?(peer, nil, true, true, nil)\n",
-                     "ActionSheetButtonItem(title: self.presentationData.strings.Common_Cancel, action: { dismissAction() })"):
+        self.assertIn("                        case let .birthdayPremiumGift(peers, _):\n"
+                      "                            // pluma: no Premium gifts; the chat with the contact (openBirthdayChats).\n"
+                      "                            self.openBirthdayChats(peers)\n"
+                      "                        case .reviewLogin:\n", tap)
+        # The list is a method of its own, before updateNavigationBar.
+        self.assertTrue(tap.startswith(patch.BIRTHDAY_METHOD + patch.BIRTHDAY_METHOD_ANCHOR))
+        for line in ("    private func openBirthdayChats(_ peers: [EnginePeer]) {\n",
+                     "        if peers.count == 1, let peer = peers.first {\n"
+                     "            self.effectiveContainerNode.peerSelected?(peer, nil, true, true, nil)\n",
+                     "        items.append(ActionSheetTextItem(title: strings.ChatList_BirthdayMultipleTitle(Int32(peers.count))))\n",
+                     "            return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending\n",
+                     "        for (peer, title) in named {\n"
+                     "            items.append(ActionSheetButtonItem(title: title, action: { [weak self] in\n",
+                     "                self?.effectiveContainerNode.peerSelected?(peer, nil, true, true, nil)\n",
+                     "ActionSheetButtonItem(title: strings.Common_Cancel, action: { dismissAction() })"):
             self.assertIn(line, tap)
         # The text offers no gift; the rest of the notice is as it was.
         self.assertEqual(self.tree.read(patch.CHAT_LIST_NOTICE), self.TEXT
@@ -468,9 +473,9 @@ class BirthdayTest(unittest.TestCase):
         # Each part of the result is checked on its own.
         for rel, old, new in (
             (patch.CHAT_LIST, "self?.effectiveContainerNode.peerSelected?(peer, nil, true, true, nil)", "dismissAction()"),
-            (patch.CHAT_LIST, "                            if peers.count == 1, let peer = peers.first {\n",
+            (patch.CHAT_LIST, "                            self.openBirthdayChats(peers)\n",
              "                            self.effectiveContainerNode.currentItemNode.interaction?.openPremiumGift(peers, [:])\n"
-             "                            if peers.count == 1, let peer = peers.first {\n"),
+             "                            self.openBirthdayChats(peers)\n"),
             (patch.CHAT_LIST_NOTICE, "text = item.strings.ContactList_Context_SendMessage\n                } else {",
              "text = item.strings.ChatList_BirthdaySingleText\n                } else {"),
             (patch.CHAT_LIST_PANELS, "dismissServerProvidedSuggestion(suggestion: ServerProvidedSuggestion.todayBirthdays.id)",
@@ -795,6 +800,7 @@ class UpstreamTest(unittest.TestCase):
         # offers a gift; closing it still dismisses it.
         chat_list = tree.read(patch.CHAT_LIST)
         self.assertIn(patch.BIRTHDAY_OPEN, chat_list)
+        self.assertIn(patch.BIRTHDAY_METHOD + patch.BIRTHDAY_METHOD_ANCHOR, chat_list)
         self.assertEqual(chat_list.count("for (peer, title) in named {\n"), 1)
         self.assertNotIn("openPremiumGift(peers, birthdays)", chat_list)
         self.assertIn("openPremiumGift([], nil)", chat_list)  # the Christmas notice's, kept
