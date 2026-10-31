@@ -1478,8 +1478,9 @@ def verify_palette(tree):
 # - letter avatars: a gradient each, the same in light and dark themes, as
 #   (bottom, top), since AvatarNode draws the pair from the top with the
 #   locations [1, 0]. AvatarNode.gradientColors, and copies of it for the
-#   avatars of notifications, the widget, Siri's suggestions and the
-#   reactions of a live stream. Upstream's avatars of colours 7 to 13 take
+#   avatars of notifications, the widget, the chat picker of the widget's
+#   settings (the SiriIntents extension) and the reactions of a live
+#   stream. Upstream's avatars of colours 7 to 13 take
 #   the gradient of their number % 7, and of the others the one their hue
 #   falls on (calculateAvatarColors), so a blue one among them is sage too.
 #   That hue is the one of the light name colour, so a colour above 13 the
@@ -1493,7 +1494,8 @@ def verify_palette(tree):
 #   colours for dark themes, which show the light ones
 #   (PeerNameColors.get(_:dark:)). Pluma's cyan and blue get dark colours of
 #   their own: the dark name colour of the palette for blue, and for cyan the
-#   colour Telegram shows in dark themes, which they keep. The fallback of
+#   teal Telegram's Android app shows at night (this app's one cyan, which
+#   it shows in dark themes too, leans to blue). The fallback of
 #   get and getChatFolderTag, for a colour the app has none for, is blue's
 #   light colour in any theme; Telegram's blue reads on dark backgrounds, the
 #   palette's light sage does not, so it takes blue's dark one in dark themes.
@@ -1524,7 +1526,7 @@ TELEGRAM_IDENTITY = (
 # (bottom, top), the name colour, the name colour of dark themes or None for
 # Telegram's).
 IDENTITY_COLOURS = {
-    4: ("teal", (0x2c9c98, 0x5bcbc4), 0x1f8a80, None),
+    4: ("teal", (0x2c9c98, 0x5bcbc4), 0x1f8a80, 0x53ccc6),
     5: ("sage", (0x5b7a5e, 0x7fa082), 0x4f6e52, 0x9dbb9f),
 }
 

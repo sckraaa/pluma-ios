@@ -627,7 +627,7 @@ class IdentityTest(unittest.TestCase):
         colours, dark = patch.identity_colours()
         self.assertEqual(colours[5], ((0x5b7a5e, 0x7fa082), 0x4f6e52))
         self.assertEqual(colours[4], ((0x2c9c98, 0x5bcbc4), 0x1f8a80))
-        self.assertEqual(dark, {4: 0x309eba, 5: 0x9dbb9f})
+        self.assertEqual(dark, {4: 0x53ccc6, 5: 0x9dbb9f})
         self.assertEqual([c for i, c in enumerate(colours) if i not in (4, 5)],
                          [c for i, c in enumerate(patch.TELEGRAM_IDENTITY) if i not in (4, 5)])
 
@@ -660,7 +660,7 @@ class IdentityTest(unittest.TestCase):
             "            darkColors: [:],\n",
             "            // pluma: Pluma's cyan and blue have colours of their own in dark themes.\n"
             "            darkColors: [\n"
-            "                4: Colors(main: UIColor(rgb: 0x309eba)),\n"
+            "                4: Colors(main: UIColor(rgb: 0x53ccc6)),\n"
             "                5: Colors(main: UIColor(rgb: 0x9dbb9f))\n"
             "            ],\n").replace(
             "            return PeerNameColors.defaultSingleColors[5]!\n",
@@ -670,7 +670,7 @@ class IdentityTest(unittest.TestCase):
         updates = self.tree.read(patch.PEER_COLOR_UPDATES)
         for line in ("                        0x40a920,\n                        0x1f8a80, // pluma: teal\n"
                      "                        0x4f6e52, // pluma: sage\n                        0xc7508b\n",
-                     "                    let staticDarkMap: [Int32: UInt32] = [4: 0x309eba, 5: 0x9dbb9f]\n",
+                     "                    let staticDarkMap: [Int32: UInt32] = [4: 0x53ccc6, 5: 0x9dbb9f]\n",
                      "                    let defaultDarkColors = staticDarkMap[colorId].map { darkColor -> "
                      "EngineAvailableColorOptions.ColorOption in\n",
                      "ColorOptionPack(light: defaultColors, dark: defaultDarkColors, isHidden: isHidden,"):
@@ -1053,14 +1053,14 @@ class UpstreamTest(unittest.TestCase):
         names = tree.read(patch.PEER_NAME_COLORS)
         self.assertIn("            5: Colors(main: UIColor(rgb: 0x4f6e52)), // pluma: sage\n", names)
         self.assertIn("            3: Colors(main: UIColor(rgb: 0x40a920)),\n", names)
-        self.assertIn("            darkColors: [\n                4: Colors(main: UIColor(rgb: 0x309eba)),\n"
+        self.assertIn("            darkColors: [\n                4: Colors(main: UIColor(rgb: 0x53ccc6)),\n"
                       "                5: Colors(main: UIColor(rgb: 0x9dbb9f))\n            ],\n", names)
         self.assertEqual(names.count("            return dark ? (PeerNameColors.defaultValue.darkColors[5] ?? "
                                      "PeerNameColors.defaultSingleColors[5]!) : PeerNameColors.defaultSingleColors[5]!\n"), 2)
         self.assertNotIn("            return PeerNameColors.defaultSingleColors[5]!\n", names)
         updates = tree.read(patch.PEER_COLOR_UPDATES)
         self.assertIn("                        0x4f6e52, // pluma: sage\n", updates)
-        self.assertIn("                    let staticDarkMap: [Int32: UInt32] = [4: 0x309eba, 5: 0x9dbb9f]\n", updates)
+        self.assertIn("                    let staticDarkMap: [Int32: UInt32] = [4: 0x53ccc6, 5: 0x9dbb9f]\n", updates)
         # No support section.
         self.assertNotIn("Settings_Support", tree.read(patch.SETTINGS_ITEMS))
         self.assertNotIn("let helpItems = ", tree.read(patch.SETTINGS_SEARCH))
