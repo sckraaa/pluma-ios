@@ -84,6 +84,7 @@ CALLS = "submodules/TelegramVoip/Sources/OngoingCallContext.swift"
 APP_BUILD = "Telegram/BUILD"
 APP_DELEGATE = "submodules/TelegramUI/Sources/AppDelegate.swift"
 INTRO_ANIMATIONS = "submodules/RMIntro/Sources/core/animations.c"
+INTRO_CONTROLLER = "submodules/RMIntro/Sources/platform/ios/RMIntroViewController.m"
 DAY_THEME = "submodules/TelegramPresentationData/Sources/DefaultDayPresentationTheme.swift"
 DARK_THEME = "submodules/TelegramPresentationData/Sources/DefaultDarkPresentationTheme.swift"
 PRESENTATION_DATA = "submodules/TelegramPresentationData/Sources/PresentationData.swift"
@@ -120,6 +121,7 @@ PLUMA_BAZELRC = "pluma.bazelrc"
 # commit.
 BRAND = pathlib.Path(__file__).resolve().parent.parent / "brand" / "ios"
 APP_ICON = "Telegram/Telegram-iOS/Telegram.icon"
+INTRO_RESOURCES = "Telegram/Telegram-iOS/Resources/intro"
 BRAND_REPLACED = {
     # The app icon (Icon Composer) and the alternate icon the app counts as
     # its default one.
@@ -149,11 +151,14 @@ BRAND_REPLACED = {
     # code is the mark.
     "Telegram/Telegram-iOS/Resources/Devices.tgs": "9abb2d5dbd4ac7d2a83722b4871b6be03f76605d1594bcb5b17204ec8e4285fe",
     # The first page of the intro: the sphere and the plane around it.
-    "Telegram/Telegram-iOS/Resources/intro/telegram_sphere@2x.png": "621831c454689762c79c80083f797352aa420c488c19ba924da006ab533dd0bb",
-    "Telegram/Telegram-iOS/Resources/intro/telegram_plane1@2x.png": "c28d4e5438f3a10fa1df725764b4bc897af475983070aaf08df1b631334a10a1",
+    f"{INTRO_RESOURCES}/telegram_sphere@2x.png": "621831c454689762c79c80083f797352aa420c488c19ba924da006ab533dd0bb",
+    f"{INTRO_RESOURCES}/telegram_plane1@2x.png": "c28d4e5438f3a10fa1df725764b4bc897af475983070aaf08df1b631334a10a1",
 }
-# The layers of Pluma's app icon, and those of Telegram's that go.
-BRAND_ADDED = tuple(f"{APP_ICON}/Assets/{n}.png" for n in ("Feather1", "Feather2", "Feather3", "Ring"))
+# Pluma's files that upstream does not have: the layers of the app icon and
+# the title of the intro's first page, the wordmark. Then the layers of
+# Telegram's icon that go.
+BRAND_ADDED = (tuple(f"{APP_ICON}/Assets/{n}.png" for n in ("Feather1", "Feather2", "Feather3", "Ring"))
+               + tuple(f"{INTRO_RESOURCES}/pluma_wordmark@{s}x.png" for s in (2, 3)))
 BRAND_REMOVED = {
     f"{APP_ICON}/Assets/Oval.svg": "30b7245c9edef107ea7520cdd958246fcc771fa0872bb2f6cd13ab2dc11cfffd",
     f"{APP_ICON}/Assets/Plane.svg": "f4da98d58f274a9d95d491badd14afafa378f335a0bd2b496db83836e21f15e8",
@@ -290,8 +295,9 @@ CLIENT_SITES = re.compile(r"(?:get)?desktop\.telegram\.org|web\.telegram\.org")
 # Everything the patch reads, edits or checks: the check job fetches only
 # these (ci/fetch-upstream.sh sparse).
 UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_DIRS
-                  + (APP_ICON,) + tuple(sorted(r for r in BRAND_REPLACED if not r.startswith(APP_ICON + "/")))
-                  + (APP_DELEGATE, INTRO_ANIMATIONS, STRINGS)
+                  + (APP_ICON, INTRO_RESOURCES)
+                  + tuple(sorted(r for r in BRAND_REPLACED if not r.startswith((APP_ICON + "/", INTRO_RESOURCES + "/"))))
+                  + (APP_DELEGATE, INTRO_ANIMATIONS, INTRO_CONTROLLER, STRINGS)
                   + tuple(INFOPLIST_STRINGS.format(lang) for lang in INFOPLIST_NAMES)
                   + tuple(sorted({rel for rel, _, _ in CODE_NAMES}))
                   + tuple(sorted({rel for rel, _, _ in SCHEME_LINKS})) + (URL_HANDLING,)
@@ -930,6 +936,44 @@ APP_ICONS_OLD = src(" " * 16, """
     return icons
 """)
 
+# The intro's pages, made in viewDidLoad of RMIntroViewController. The first
+# one's title is Tour.Title1, the name ("Pluma" after the renaming); the
+# Android app shows the wordmark there instead (IntroActivity: an ImageSpan of
+# R.drawable.telegram_logo over Page1Title, tinted with the colour of action
+# bar titles at 90%), and so does this one, in the colour of the intro's text
+# at 90%. The label stays and only its text changes, so animateIn, which moves
+# it, and the text snapshot work as before. The other pages keep their titles.
+INTRO_PAGES = ("        [_pageScrollView addSubview:p];\n"
+               "    }\n")
+INTRO_PAGE_ZERO = "    [_pageScrollView setPage:0];\n"
+INTRO_WORDMARK = src(" " * 4, """
+    // pluma: the title of the first page is the wordmark, as in the Android
+    // app: in the colour of the text at 90%, its baseline on the title's (5 pt
+    // above the bottom of the image, brand/render.sh). VoiceOver reads the name.
+    UIImage *wordmarkMask = [UIImage imageNamed:@"pluma_wordmark.png"];
+    if (wordmarkMask != nil) {
+        UIColor *wordmarkColor = [_primaryColor colorWithAlphaComponent:0.9];
+        UIGraphicsImageRendererFormat *wordmarkFormat = [UIGraphicsImageRendererFormat preferredFormat];
+        wordmarkFormat.scale = wordmarkMask.scale;
+        UIImage *wordmark = [[[UIGraphicsImageRenderer alloc] initWithSize:wordmarkMask.size format:wordmarkFormat] imageWithActions:^(__unused UIGraphicsImageRendererContext *context) {
+            CGRect rect = CGRectMake(0.0, 0.0, wordmarkMask.size.width, wordmarkMask.size.height);
+            [wordmarkMask drawInRect:rect];
+            [wordmarkColor setFill];
+            UIRectFillUsingBlendMode(rect, kCGBlendModeSourceIn);
+        }];
+        NSTextAttachment *attachment = [[NSTextAttachment alloc] init];
+        attachment.image = [wordmark imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+        attachment.bounds = CGRectMake(0.0, -5.0, wordmark.size.width, wordmark.size.height);
+        RMIntroPageView *firstPage = _pageViews.firstObject;
+        NSMutableParagraphStyle *titleStyle = [[NSMutableParagraphStyle alloc] init];
+        titleStyle.alignment = NSTextAlignmentCenter;
+        NSMutableAttributedString *title = [[NSMutableAttributedString alloc] initWithAttributedString:[NSAttributedString attributedStringWithAttachment:attachment]];
+        [title addAttributes:@{NSFontAttributeName: firstPage.headerLabel.font, NSParagraphStyleAttributeName: titleStyle} range:NSMakeRange(0, title.length)];
+        firstPage.headerLabel.attributedText = title;
+        firstPage.headerLabel.accessibilityLabel = _headlines.firstObject;
+    }
+""")
+
 
 def brand_files():
     """The files of brand/ios, as paths relative to it."""
@@ -942,7 +986,8 @@ def brand_files():
 def patch_brand(tree):
     """Pluma's images in place of Telegram's: the app icon and the alternate
     one, the logos of the quick action, the context menu, calls and QR codes,
-    the laptop of Settings > Devices and the first page of the intro."""
+    the laptop of Settings > Devices and the first page of the intro (its disc
+    and mark, the wordmark as its title)."""
     want = sorted(set(BRAND_REPLACED) | set(BRAND_ADDED))
     if brand_files() != want:
         raise PatchError(f"brand/ios holds {brand_files()}, the patch expects {want}; "
@@ -970,8 +1015,11 @@ def patch_brand(tree):
         ]
     """))
 
-    # The intro: sage instead of Telegram's blues behind the pages "Powerful"
-    # (#4F6E52) and "Cloud-Based" (#6F8F72).
+    # The intro: the wordmark as the title of its first page, the page of the
+    # name (Tour.Title1); sage instead of Telegram's blues behind the pages
+    # "Powerful" (#4F6E52) and "Cloud-Based" (#6F8F72).
+    tree.expect(INTRO_CONTROLLER, '_headlines = @[ _englishStrings[@"Tour.Title1"], ')
+    tree.replace(INTRO_CONTROLLER, INTRO_PAGES + INTRO_PAGE_ZERO, INTRO_PAGES + INTRO_WORDMARK + INTRO_PAGE_ZERO)
     tree.replace(INTRO_ANIMATIONS, "    vec4 powerful_bg_color = {47/255., 90/255., 131/255., 1};\n",
                  "    vec4 powerful_bg_color = {79/255., 110/255., 82/255., 1}; // pluma: #4F6E52\n")
     tree.replace(INTRO_ANIMATIONS, "    vec4 cloud_color = {42/255., 180/255., 247/255., 1};\n",
@@ -1802,6 +1850,8 @@ def verify_brand(tree):
         raise PatchError(f"{APP_BUILD}: alternate icons other than Pluma's")
     if tree.read(APP_DELEGATE).count("PresentationAppIcon(") != 1:
         raise PatchError(f"{APP_DELEGATE}: the icon picker offers Telegram's icons")
+    if tree.read(INTRO_CONTROLLER).count('[UIImage imageNamed:@"pluma_wordmark.png"]') != 1:
+        raise PatchError(f"{INTRO_CONTROLLER}: the first page of the intro has no wordmark")
 
 
 IPV4 = re.compile(r"(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])")

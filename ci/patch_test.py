@@ -5,11 +5,14 @@ import io
 import json
 import os
 import pathlib
+import re
+import struct
 import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
+import zlib
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import patch  # noqa: E402
@@ -257,6 +260,49 @@ class RenameTest(unittest.TestCase):
                               '"AppUpgrade.Running" = "Optimizing Pluma...\nPlease keep Pluma open.";\n')
 
 
+def png_header(path):
+    """Width, height, bit depth and colour type of a PNG."""
+    data = pathlib.Path(path).read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+        raise ValueError(f"{path}: not a PNG")
+    return struct.unpack(">IIBB", data[16:26])
+
+
+def png_rgba(path):
+    """The rows of an 8-bit RGBA PNG without interlacing, each as bytes
+    R, G, B, A per pixel: (width, height, rows)."""
+    data = pathlib.Path(path).read_bytes()
+    width, height, depth, colour = png_header(path)
+    if (depth, colour, data[28]) != (8, 6, 0):
+        raise ValueError(f"{path}: not 8-bit RGBA without interlacing")
+    pos, idat = 8, b""
+    while pos < len(data):
+        length, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        if kind == b"IDAT":
+            idat += data[pos + 8:pos + 8 + length]
+        pos += 12 + length
+    raw, stride = zlib.decompress(idat), width * 4
+    rows, prev = [], bytes(stride)
+    for y in range(height):
+        start = y * (stride + 1)
+        kind, line = raw[start], bytearray(raw[start + 1:start + 1 + stride])
+        for i in range(stride):
+            a, b = line[i - 4] if i >= 4 else 0, prev[i]
+            c = prev[i - 4] if i >= 4 else 0
+            if kind == 1:
+                line[i] = (line[i] + a) & 0xFF
+            elif kind == 2:
+                line[i] = (line[i] + b) & 0xFF
+            elif kind == 3:
+                line[i] = (line[i] + (a + b) // 2) & 0xFF
+            elif kind == 4:
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 0xFF
+        rows.append(bytes(line))
+        prev = line
+    return width, height, rows
+
+
 class BrandTest(unittest.TestCase):
     def test_brand_files_are_the_patch_list(self):
         # brand/render.sh writes exactly the files the patch copies.
@@ -269,6 +315,52 @@ class BrandTest(unittest.TestCase):
         paths = patch.UPSTREAM_PATHS
         for rel in list(patch.BRAND_REPLACED) + list(patch.BRAND_REMOVED) + list(patch.BRAND_ADDED):
             self.assertTrue(any(rel == p or rel.startswith(p + "/") for p in paths), rel)
+
+    def test_intro(self):
+        # The textures of the first page keep upstream's sizes; the sphere is
+        # 8-bit RGBA, as upstream's is (the intro draws it into an 8-bit RGBA
+        # bitmap in the image's own colour space, texture_helper.m).
+        intro = patch.BRAND / patch.INTRO_RESOURCES
+        self.assertEqual(png_header(intro / "telegram_sphere@2x.png"), (296, 296, 8, 6))
+        self.assertEqual(png_header(intro / "telegram_plane1@2x.png")[:2], (164, 148))
+        # brand/render.sh places the mark on the sphere and the glyphs of the
+        # wordmark by figures measured on these files of the kit.
+        for name, sha in (("pluma-mark.svg", "34b88ecfd7831685b326f4a2ea47a90c4d4913940cf8591931b2604ea9aa78e8"),
+                          ("pluma-wordmark.svg", "33b097ac94f2ab54423a089ee81dcbcad7397b2f9464131240f31241558a6eb2")):
+            with self.subTest(svg=name):
+                self.assertEqual(hashlib.sha256((ROOT / "brand" / name).read_bytes()).hexdigest(), sha,
+                                 "a new file of the kit: measure render.sh's figures for the intro again")
+        # Its title, the wordmark: a black mask of 106 x 27 pt, the glyphs
+        # 105.1 x 26.33 pt (as the Android app draws them) centred across it
+        # and whole (no edge of the image is more than half covered), the
+        # baseline 22 pt from the top.
+        size, baseline = (106, 27), 22
+        for scale in (2, 3):
+            with self.subTest(scale=scale):
+                width, height, rows = png_rgba(intro / f"pluma_wordmark@{scale}x.png")
+                self.assertEqual((width, height), (size[0] * scale, size[1] * scale))
+                self.assertFalse(any(row[i] for row in rows for i in range(len(row)) if i % 4 != 3), "not black")
+                ink = [(x, y) for y, row in enumerate(rows) for x in range(width) if row[4 * x + 3]]
+                xs, ys = [x for x, _ in ink], [y for _, y in ink]
+                self.assertLessEqual(abs(min(xs) - (width - 1 - max(xs))), 1, "not centred")
+                self.assertAlmostEqual((max(xs) + 1 - min(xs)) / scale, 105.1, delta=1)
+                self.assertAlmostEqual((max(ys) + 1 - min(ys)) / scale, 26.33, delta=1)
+                edges = (rows[0][3::4], rows[-1][3::4], bytes(row[3] for row in rows), bytes(row[-1] for row in rows))
+                self.assertLess(max(max(edge) for edge in edges), 128, "clipped")
+                # 1 pt above the baseline the glyphs span the image; 1 pt
+                # below it only the stem of the "p" is left.
+                self.assertGreater(max(x for x, y in ink if y == (baseline - 1) * scale), 100 * scale)
+                self.assertLess(max(x for x, y in ink if y >= (baseline + 1) * scale), 7 * scale)
+        # The intro sets that baseline on the title's: the image reaches below
+        # the title's baseline by the rest of its height.
+        bounds = re.search(r"CGRectMake\(0\.0, (-?[\d.]+), wordmark\.size\.width", patch.INTRO_WORDMARK)
+        self.assertIsNotNone(bounds)
+        self.assertEqual(-float(bounds.group(1)), size[1] - baseline)
+        # The intro loads the mask by that name.
+        names = {re.sub(r"@[23]x\.png$", ".png", pathlib.PurePath(rel).name)
+                 for rel in patch.BRAND_ADDED if rel.startswith(patch.INTRO_RESOURCES + "/")}
+        self.assertEqual(names, {"pluma_wordmark.png"})
+        self.assertIn('[UIImage imageNamed:@"pluma_wordmark.png"]', patch.INTRO_WORDMARK)
 
     def test_devices_animation(self):
         # brand/render.sh copies the source as it is; a sticker-sized Lottie
@@ -800,6 +892,9 @@ DAMAGE = (
     (APP_DELEGATE, 'PresentationAppIcon(name: "New2", imageName: "New2"),', 'PresentationAppIcon(name: "New3", imageName: "New3"),'),
     (INTRO, "cloud_color = {42/255., 180/255., 247/255., 1};", "cloud_color = {42/255., 181/255., 247/255., 1};"),
     (INTRO, "powerful_bg_color = {47/255., 90/255., 131/255., 1};", "powerful_bg_color = {47/255., 90/255., 132/255., 1};"),
+    (patch.INTRO_CONTROLLER, "    [_pageScrollView setPage:0];\n", "    [_pageScrollView setPage:1];\n"),
+    (patch.INTRO_CONTROLLER, '_headlines = @[ _englishStrings[@"Tour.Title1"], _englishStrings[@"Tour.Title2"],',
+     '_headlines = @[ _englishStrings[@"Tour.Title2"], _englishStrings[@"Tour.Title1"],'),
     (patch.APP_ICON + "/icon.json", '"image-name" : "Plane.svg"', '"image-name" : "Plane2.svg"'),
     # The names.
     (patch.STRINGS, '"Watch.AppName" = "Telegram";\n', '"Watch.AppName" = "Watch";\n'),
@@ -994,6 +1089,11 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn('alternate_icon_folders = [\n    "BlueIcon",\n]\n', build)
         self.assertEqual(tree.read(APP_DELEGATE).count("PresentationAppIcon("), 1)
         self.assertIn("vec4 cloud_color = {111/255., 143/255., 114/255., 1};", tree.read(INTRO))
+        # The wordmark as the title of the intro's first page.
+        intro = tree.read(patch.INTRO_CONTROLLER)
+        self.assertIn(patch.INTRO_PAGES + patch.INTRO_WORDMARK + patch.INTRO_PAGE_ZERO, intro)
+        self.assertEqual(intro.count("firstPage.headerLabel.attributedText = title;\n"), 1)
+        self.assertEqual(intro.count("firstPage.headerLabel.accessibilityLabel = _headlines.firstObject;\n"), 1)
         # The names.
         strings = tree.read(patch.STRINGS)
         for entry in ('"Application.Name" = "Pluma";', '"Tour.Title1" = "Pluma";', '"Settings.FAQ" = "Pluma FAQ";',
@@ -1103,7 +1203,7 @@ class UpstreamTest(unittest.TestCase):
     def test_damaged_images(self):
         # A changed or missing upstream image stops the patch too.
         for rel in ("Telegram/Telegram-iOS/BlueIcon.alticon/BlueIcon@3x.png", "Telegram/Telegram-iOS/Resources/PlaneLogo.tgs",
-                    "Telegram/Telegram-iOS/Resources/Devices.tgs",
+                    "Telegram/Telegram-iOS/Resources/Devices.tgs", patch.INTRO_RESOURCES + "/telegram_sphere@2x.png",
                     "submodules/TelegramUI/Images.xcassets/Chat/Context Menu/Telegram.imageset/tlogo_24.pdf",
                     patch.APP_ICON + "/Assets/Oval.svg"):
             for damage in ("byte", "missing"):
@@ -1119,14 +1219,25 @@ class UpstreamTest(unittest.TestCase):
                     with self.assertRaises(patch.PatchError) as e:
                         self.run_patch()
                     self.assertIn(rel, str(e.exception))
-        # A file of Pluma's icon that upstream has already.
-        self.tearDown()
-        rel = patch.BRAND_ADDED[0]
-        self.written.add(rel)
-        (self.root / rel).write_bytes(b"\x89PNG")
+        # A file of Pluma's that upstream has already: a layer of the icon,
+        # the wordmark of the intro.
+        for rel in (patch.BRAND_ADDED[0], patch.INTRO_RESOURCES + "/pluma_wordmark@2x.png"):
+            with self.subTest(rel=rel, damage="exists"):
+                self.tearDown()
+                self.written.add(rel)
+                (self.root / rel).write_bytes(b"\x89PNG")
+                with self.assertRaises(patch.PatchError) as e:
+                    self.run_patch()
+                self.assertIn(rel, str(e.exception))
+
+    def test_intro_without_wordmark(self):
+        # The check after the edits finds a first page of the intro without
+        # the wordmark.
+        tree, c = self.run_patch()
+        (self.root / patch.INTRO_CONTROLLER).write_bytes(self.files[patch.INTRO_CONTROLLER])
         with self.assertRaises(patch.PatchError) as e:
-            self.run_patch()
-        self.assertIn(rel, str(e.exception))
+            patch.verify(tree, c)
+        self.assertIn(patch.INTRO_CONTROLLER, str(e.exception))
 
     def test_damage(self):
         for rel, old, new in DAMAGE:

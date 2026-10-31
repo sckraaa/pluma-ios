@@ -10,7 +10,8 @@
 #   pluma-icon-square.svg  the app icon, full bleed (iOS masks the corners);
 #   pluma-mark.svg         the mark: the ring #111111, the feathers #4A4A4A,
 #                          #8A8A8A, #BDBDBD;
-#   pluma-mark-mono.svg    the mark in black, for template images.
+#   pluma-mark-mono.svg    the mark in black, for template images;
+#   pluma-wordmark.svg     the word "pluma", one path #111111.
 # One file is copied as it is, not drawn:
 #   pluma-devices.tgs      the laptop of Settings > Devices: upstream's
 #                          Devices.tgs in the palette, the mark in place of
@@ -25,7 +26,6 @@ trap 'rm -rf "$tmp"' EXIT
 export SOURCE_DATE_EPOCH=0
 
 graphite=111111
-light_border=E3EAE2
 
 # The <path> elements of an SVG of the kit, one per line, in the 512 grid of
 # pluma-icon-square.svg.
@@ -197,12 +197,42 @@ python3 -I tgs.py pluma-mark-mono.svg "$out/Telegram/Telegram-iOS/Resources/Plan
 # The laptop animation of Settings > Devices.
 cp pluma-devices.tgs "$out/Telegram/Telegram-iOS/Resources/Devices.tgs"
 
-# The first page of the intro: the mark on a white disc in place of
-# Telegram's blue sphere, and no paper plane flying around it (a transparent
-# texture of the same size; the intro needs the file).
-svg sphere 296 296 "<circle cx=\"148\" cy=\"148\" r=\"146.5\" fill=\"#FFFFFF\" stroke=\"#$light_border\" stroke-width=\"3\"/>$(mark_at 148 148 172 "$mark")"
+# The first page of the intro, as in the Android app: the mark on a white
+# disc in place of Telegram's blue sphere, and no paper plane flying around
+# it (a transparent texture of the same size; the intro needs the file). The
+# disc fills the texture, as upstream's sphere does. The mark takes the share
+# of the disc it takes on Android, where pluma-android's brand/render.py
+# draws it with the centre of the 512 grid on the centre of the 150 dp disc,
+# 0.98 * min(41 / reach_x, 37 / reach_y) dp per unit of the grid: the reach
+# is how far the mark, strokes included, goes from the grid's centre, 177.09
+# across and 156.05 down in pluma-mark.svg. Here the disc is 148 pt, 2 px
+# per pt.
+sphere_mark=$(awk 'BEGIN {
+	s = 0.98 * (41 / 177.09 < 37 / 156.05 ? 41 / 177.09 : 37 / 156.05) * 148 / 150 * 2
+	printf "<g transform=\"translate(%.4f %.4f) scale(%.6f)\">", 148 - 256 * s, 148 - 256 * s, s
+}')
+svg sphere 296 296 "<circle cx=\"148\" cy=\"148\" r=\"148\" fill=\"#FFFFFF\"/>$sphere_mark$mark</g>"
 png "$tmp/sphere.svg" 296 296 "$out/Telegram/Telegram-iOS/Resources/intro/telegram_sphere@2x.png"
 svg plane 164 148 ""
 png "$tmp/plane.svg" 164 148 "$out/Telegram/Telegram-iOS/Resources/intro/telegram_plane1@2x.png"
+
+# The title of that page, as in the Android app: the wordmark, a black mask
+# that the intro tints with the colour of its text. Android draws the glyphs
+# 26.33 dp high (the bounds 8.666 to 35 dp of its title's image), so here
+# 26.33 pt, centred across a 106 x 27 pt image. The glyphs of
+# pluma-wordmark.svg span x 24.1 to 957.2 and y 21.5 to 255.25, the baseline
+# at y 214, 22 pt from the top of the image: the intro sets it on the
+# baseline of the title. These figures, and the mark's reach above, are
+# measured on the kit's files, which ci/patch_test.py pins: a new file means
+# measuring them again.
+word=$(paths pluma-wordmark.svg)
+black_word=${word//#111111/#000000}
+wordmark=$(awk 'BEGIN {
+	s = 26.334 / (255.25 - 21.5)
+	printf "<g transform=\"translate(%.4f %.4f) scale(%.6f)\">", 53 - (24.1 + 957.2) / 2 * s, 22 - 214 * s, s
+}')
+svg wordmark 106 27 "$wordmark$black_word</g>"
+png "$tmp/wordmark.svg" 212 54 "$out/Telegram/Telegram-iOS/Resources/intro/pluma_wordmark@2x.png"
+png "$tmp/wordmark.svg" 318 81 "$out/Telegram/Telegram-iOS/Resources/intro/pluma_wordmark@3x.png"
 
 echo "render: $(find "$out" -type f | wc -l | tr -d ' ') files in brand/$out"
