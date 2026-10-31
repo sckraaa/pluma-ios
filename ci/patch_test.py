@@ -520,6 +520,237 @@ class BirthdayTest(unittest.TestCase):
                          [patch.CHAT_LIST, patch.CHAT_LIST_NOTICE, patch.CHAT_LIST_PANELS])
 
 
+class IdentityTest(unittest.TestCase):
+    # The letter avatars of AvatarNode.swift, with the Saved Messages avatar
+    # after them...
+    AVATARS = ('    public static let gradientColors: [[UIColor]] = [\n'
+               '        [UIColor(rgb: 0xff516a), UIColor(rgb: 0xff885e)],\n'
+               '        [UIColor(rgb: 0xffa85c), UIColor(rgb: 0xffcd6a)],\n'
+               '        [UIColor(rgb: 0x665fff), UIColor(rgb: 0x82b1ff)],\n'
+               '        [UIColor(rgb: 0x54cb68), UIColor(rgb: 0xa0de7e)],\n'
+               '        [UIColor(rgb: 0x4acccd), UIColor(rgb: 0x00fcfd)],\n'
+               '        [UIColor(rgb: 0x2a9ef1), UIColor(rgb: 0x72d5fd)],\n'
+               '        [UIColor(rgb: 0xd669ed), UIColor(rgb: 0xe0a2f3)],\n'
+               '    ]\n'
+               '    \n'
+               '    static let savedMessagesColors: [UIColor] = [\n'
+               '        UIColor(rgb: 0x2a9ef1), UIColor(rgb: 0x72d5fd)\n'
+               '    ]\n')
+    # ... their copies in the extensions...
+    COPY = ('private let gradientColors: [NSArray] = [\n'
+            '    [UIColor(rgb: 0xff516a).cgColor, UIColor(rgb: 0xff885e).cgColor],\n'
+            '    [UIColor(rgb: 0xffa85c).cgColor, UIColor(rgb: 0xffcd6a).cgColor],\n'
+            '    [UIColor(rgb: 0x665fff).cgColor, UIColor(rgb: 0x82b1ff).cgColor],\n'
+            '    [UIColor(rgb: 0x54cb68).cgColor, UIColor(rgb: 0xa0de7e).cgColor],\n'
+            '    [UIColor(rgb: 0x4acccd).cgColor, UIColor(rgb: 0x00fcfd).cgColor],\n'
+            '    [UIColor(rgb: 0x2a9ef1).cgColor, UIColor(rgb: 0x72d5fd).cgColor],\n'
+            '    [UIColor(rgb: 0xd669ed).cgColor, UIColor(rgb: 0xe0a2f3).cgColor],\n'
+            ']\n')
+    # ... the name colours (PeerNameColors.swift), with get and
+    # getChatFolderTag, which fall back on blue...
+    GET = ('    public func get(_ color: PeerNameColor, dark: Bool = false) -> Colors {\n'
+           '        if dark, let colors = self.darkColors[color.rawValue] {\n'
+           '            return colors\n'
+           '        } else if let colors = self.colors[color.rawValue] {\n'
+           '            return colors\n'
+           '        } else {\n'
+           '            return PeerNameColors.defaultSingleColors[5]!\n'
+           '        }\n'
+           '    }\n'
+           '    \n')
+    NAMES = ('    public static var defaultSingleColors: [Int32: Colors] {\n'
+             '        return [\n'
+             '            0: Colors(main: UIColor(rgb: 0xcc5049)),\n'
+             '            1: Colors(main: UIColor(rgb: 0xd67722)),\n'
+             '            2: Colors(main: UIColor(rgb: 0x955cdb)),\n'
+             '            3: Colors(main: UIColor(rgb: 0x40a920)),\n'
+             '            4: Colors(main: UIColor(rgb: 0x309eba)),\n'
+             '            5: Colors(main: UIColor(rgb: 0x368ad1)),\n'
+             '            6: Colors(main: UIColor(rgb: 0xc7508b))\n'
+             '        ]\n'
+             '    }\n'
+             '    \n'
+             '    public static var defaultValue: PeerNameColors {\n'
+             '        return PeerNameColors(\n'
+             '            colors: defaultSingleColors,\n'
+             '            darkColors: [:],\n'
+             '            displayOrder: [5, 3, 1, 0, 2, 4, 6],\n'
+             + GET + GET.replace("func get(", "func getChatFolderTag("))
+    # ... and those TelegramCore takes for the server's colours 0-6 without
+    # values (ManagedPeerColorUpdates.swift).
+    STATIC = ('                } else if colorId >= 0 && colorId <= 6 {\n'
+              '                    let staticMap: [UInt32] = [\n'
+              '                        0xcc5049,\n'
+              '                        0xd67722,\n'
+              '                        0x955cdb,\n'
+              '                        0x40a920,\n'
+              '                        0x309eba,\n'
+              '                        0x368ad1,\n'
+              '                        0xc7508b\n'
+              '                    ]\n'
+              '                    let colorPack = MultiColorPack(colors: [staticMap[Int(colorId)]])\n'
+              '                    let defaultColors = EngineAvailableColorOptions.ColorOption(palette: colorPack, '
+              'background: colorPack, stories: nil)\n'
+              '                    mappedOptions.append(Option(key: colorId, value: ColorOptionPack(light: defaultColors, '
+              'dark: nil, isHidden: isHidden, requiredChannelMinBoostLevel: requiredChannelMinBoostLevel, '
+              'requiredGroupMinBoostLevel: requiredGroupMinBoostLevel)))\n'
+              '                }\n')
+    COPIES = (patch.NOTIFICATION_AVATARS, patch.WIDGET_AVATARS, patch.INTENT_AVATARS, patch.LIVE_STREAM_AVATARS)
+
+    def upstream(self):
+        files = {patch.AVATAR_NODE: self.AVATARS, patch.PEER_NAME_COLORS: self.NAMES, patch.PEER_COLOR_UPDATES: self.STATIC}
+        files.update({rel: self.COPY for rel in self.COPIES})
+        return files
+
+    def write(self, over=None):
+        files = self.upstream()
+        files.update(over or {})
+        for rel, text in files.items():
+            self.tree.write(rel, text)
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.dir.name)
+        (root / "Telegram").mkdir()
+        (root / "Telegram/BUILD").write_text("")
+        (root / "versions.json").write_text("{}")
+        self.tree = patch.Tree(root)
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_owner_colours(self):
+        # Blue is the palette's sage and cyan a teal: the letter avatar as
+        # (bottom, top), so #7FA082 to #5B7A5E from its top for blue and
+        # #5BCBC4 to #2C9C98 for cyan, the name colour, the one of dark
+        # themes, where cyan keeps Telegram's. The other five are Telegram's.
+        colours, dark = patch.identity_colours()
+        self.assertEqual(colours[5], ((0x5b7a5e, 0x7fa082), 0x4f6e52))
+        self.assertEqual(colours[4], ((0x2c9c98, 0x5bcbc4), 0x1f8a80))
+        self.assertEqual(dark, {4: 0x309eba, 5: 0x9dbb9f})
+        self.assertEqual([c for i, c in enumerate(colours) if i not in (4, 5)],
+                         [c for i, c in enumerate(patch.TELEGRAM_IDENTITY) if i not in (4, 5)])
+
+    def test_colours(self):
+        self.write()
+        with self.assertRaises(patch.PatchError):
+            patch.verify_identity(self.tree)
+        patch.patch_identity(self.tree)
+        patch.verify_identity(self.tree)
+        # Two rows of each table; the Saved Messages avatar is the palette's
+        # (patch_palette).
+        self.assertEqual(self.tree.read(patch.AVATAR_NODE), self.AVATARS.replace(
+            "        [UIColor(rgb: 0x4acccd), UIColor(rgb: 0x00fcfd)],\n",
+            "        [UIColor(rgb: 0x2c9c98), UIColor(rgb: 0x5bcbc4)], // pluma: teal\n").replace(
+            "        [UIColor(rgb: 0x2a9ef1), UIColor(rgb: 0x72d5fd)],\n",
+            "        [UIColor(rgb: 0x5b7a5e), UIColor(rgb: 0x7fa082)], // pluma: sage\n"))
+        for rel in self.COPIES:
+            self.assertEqual(self.tree.read(rel), self.COPY.replace(
+                "    [UIColor(rgb: 0x4acccd).cgColor, UIColor(rgb: 0x00fcfd).cgColor],\n",
+                "    [UIColor(rgb: 0x2c9c98).cgColor, UIColor(rgb: 0x5bcbc4).cgColor], // pluma: teal\n").replace(
+                "    [UIColor(rgb: 0x2a9ef1).cgColor, UIColor(rgb: 0x72d5fd).cgColor],\n",
+                "    [UIColor(rgb: 0x5b7a5e).cgColor, UIColor(rgb: 0x7fa082).cgColor], // pluma: sage\n"))
+        # The name colours, those of dark themes, and the fallback, which
+        # takes blue's dark one in dark themes.
+        self.assertEqual(self.tree.read(patch.PEER_NAME_COLORS), self.NAMES.replace(
+            "            4: Colors(main: UIColor(rgb: 0x309eba)),\n",
+            "            4: Colors(main: UIColor(rgb: 0x1f8a80)), // pluma: teal\n").replace(
+            "            5: Colors(main: UIColor(rgb: 0x368ad1)),\n",
+            "            5: Colors(main: UIColor(rgb: 0x4f6e52)), // pluma: sage\n").replace(
+            "            darkColors: [:],\n",
+            "            // pluma: Pluma's cyan and blue have colours of their own in dark themes.\n"
+            "            darkColors: [\n"
+            "                4: Colors(main: UIColor(rgb: 0x309eba)),\n"
+            "                5: Colors(main: UIColor(rgb: 0x9dbb9f))\n"
+            "            ],\n").replace(
+            "            return PeerNameColors.defaultSingleColors[5]!\n",
+            "            // pluma: dark themes take blue's dark colour (Pluma's sage has one).\n"
+            "            return dark ? (PeerNameColors.defaultValue.darkColors[5] ?? PeerNameColors.defaultSingleColors[5]!) "
+            ": PeerNameColors.defaultSingleColors[5]!\n"))
+        updates = self.tree.read(patch.PEER_COLOR_UPDATES)
+        for line in ("                        0x40a920,\n                        0x1f8a80, // pluma: teal\n"
+                     "                        0x4f6e52, // pluma: sage\n                        0xc7508b\n",
+                     "                    let staticDarkMap: [Int32: UInt32] = [4: 0x309eba, 5: 0x9dbb9f]\n",
+                     "                    let defaultDarkColors = staticDarkMap[colorId].map { darkColor -> "
+                     "EngineAvailableColorOptions.ColorOption in\n",
+                     "ColorOptionPack(light: defaultColors, dark: defaultDarkColors, isHidden: isHidden,"):
+            self.assertIn(line, updates)
+        self.assertTrue(updates.endswith("requiredGroupMinBoostLevel: requiredGroupMinBoostLevel)))\n                }\n"))
+
+    def test_upstream_changed(self):
+        # Every table must hold Telegram's seven, in order.
+        for rel, old, new in (
+            (patch.AVATAR_NODE, "0x00fcfd", "0x00fcfe"),                                      # cyan
+            (patch.AVATAR_NODE, "0xff516a", "0xff516b"),                                      # one of the other five
+            (patch.WIDGET_AVATARS, "]\n", "    [UIColor(rgb: 0x8e8e93).cgColor, UIColor(rgb: 0xb1b1b1).cgColor],\n]\n"),
+            (patch.LIVE_STREAM_AVATARS, "private let gradientColors: [NSArray]", "private let avatarColors: [NSArray]"),
+            (patch.PEER_NAME_COLORS, "0x368ad1", "0x3d72ed"),                                 # blue
+            (patch.PEER_NAME_COLORS, "darkColors: [:],", "darkColors: defaultDarkColors,"),   # dark colours of its own
+            (patch.PEER_COLOR_UPDATES, "0x309eba", "0x309ebb"),
+            (patch.PEER_COLOR_UPDATES, "dark: nil,", "dark: defaultColors,"),
+        ):
+            with self.subTest(rel=rel, new=new[:40]):
+                text = self.upstream()[rel]
+                self.assertEqual(text.count(old), 1)
+                self.write({rel: text.replace(old, new)})
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.patch_identity(self.tree)
+                self.assertIn(rel, str(e.exception))
+
+    def test_verify(self):
+        # Each table and both dark ones are checked on their own.
+        for rel, old, new in (
+            (patch.AVATAR_NODE, "[UIColor(rgb: 0x5b7a5e), UIColor(rgb: 0x7fa082)]", "[UIColor(rgb: 0x2a9ef1), UIColor(rgb: 0x72d5fd)]"),
+            (patch.INTENT_AVATARS, "[UIColor(rgb: 0x5b7a5e).cgColor, UIColor(rgb: 0x7fa082).cgColor]",
+             "[UIColor(rgb: 0x7fa082).cgColor, UIColor(rgb: 0x5b7a5e).cgColor]"),          # upside down
+            (patch.NOTIFICATION_AVATARS, "UIColor(rgb: 0x5bcbc4).cgColor", "UIColor(rgb: 0x00fcfd).cgColor"),
+            (patch.PEER_NAME_COLORS, "5: Colors(main: UIColor(rgb: 0x4f6e52))", "5: Colors(main: UIColor(rgb: 0x368ad1))"),
+            (patch.PEER_NAME_COLORS, "                5: Colors(main: UIColor(rgb: 0x9dbb9f))\n", ""),
+            (patch.PEER_COLOR_UPDATES, "0x1f8a80, // pluma: teal", "0x309eba,"),
+            (patch.PEER_COLOR_UPDATES, "dark: defaultDarkColors,", "dark: nil,"),
+        ):
+            with self.subTest(rel=rel, old=old[:40]):
+                self.write()
+                patch.patch_identity(self.tree)
+                text = self.tree.read(rel)
+                self.assertEqual(text.count(old), 1)
+                self.tree.write(rel, text.replace(old, new))
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify_identity(self.tree)
+                self.assertIn(rel, str(e.exception))
+
+    def test_fallback(self):
+        # get and getChatFolderTag fall back on blue alike: upstream must have
+        # both, and both must take its dark colour after the patch.
+        light = "            return PeerNameColors.defaultSingleColors[5]!\n"
+        other = "            return PeerNameColors.defaultSingleColors[3]!\n"
+        self.write({patch.PEER_NAME_COLORS: self.NAMES.replace(light, other, 1)})
+        with self.assertRaises(patch.PatchError) as e:
+            patch.patch_identity(self.tree)
+        self.assertIn(patch.PEER_NAME_COLORS, str(e.exception))
+        self.write()
+        patch.patch_identity(self.tree)
+        names = self.tree.read(patch.PEER_NAME_COLORS)
+        self.assertNotIn(light, names)
+        # Either of them as upstream's.
+        for func in ("func get(", "func getChatFolderTag("):
+            with self.subTest(func=func):
+                at = names.index(patch.NAME_FALLBACK, names.index(func))
+                self.tree.write(patch.PEER_NAME_COLORS, names[:at] + light + names[at + len(patch.NAME_FALLBACK):])
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify_identity(self.tree)
+                self.assertIn(patch.PEER_NAME_COLORS, str(e.exception))
+
+    def test_table(self):
+        self.assertEqual(len(patch.TELEGRAM_IDENTITY), 7)
+        self.assertLessEqual(set(patch.IDENTITY_COLOURS), set(range(7)))
+        for rel, head, row, tail, _ in patch.IDENTITY_TABLES:
+            with self.subTest(rel=rel):
+                self.assertTrue(any(rel == p or rel.startswith(p + "/") for p in patch.UPSTREAM_PATHS))
+                self.assertIn(row.count("{bottom}") + row.count("{top}") + row.count("{colour}"), (1, 2))
+                self.assertTrue(head.endswith("[\n") and tail.endswith("\n"))
+
+
 # --- the patch on the pinned upstream ------------------------------------------
 
 NETWORK, ACCOUNT, AUTH_KEYS, ENCRYPTION = patch.NETWORK, patch.ACCOUNT, patch.AUTH_KEYS, patch.ENCRYPTION
@@ -593,6 +824,24 @@ DAMAGE = (
     (patch.LEGACY_COLORS, "TGColorWithHex(0x0088ff)", "TGColorWithHex(0x0089ff)"),
     (patch.AVATAR_NODE, "UIColor(rgb: 0x2a9ef1), UIColor(rgb: 0x72d5fd)\n    ]", "UIColor(rgb: 0x2a9ef1), UIColor(rgb: 0x72d5fe)\n    ]"),
     (patch.AVATAR_NODE, "UIColor(rgb: 0x3DA1FD), UIColor(rgb: 0x34C76F)", "UIColor(rgb: 0x3DA1FD), UIColor(rgb: 0x34C76E)"),
+    # People's identity colours: each table holds Telegram's seven.
+    (patch.AVATAR_NODE, "[UIColor(rgb: 0x4acccd), UIColor(rgb: 0x00fcfd)],", "[UIColor(rgb: 0x4acccd), UIColor(rgb: 0x00fcfe)],"),
+    (patch.NOTIFICATION_AVATARS, "[UIColor(rgb: 0xff516a).cgColor, UIColor(rgb: 0xff885e).cgColor],",
+     "[UIColor(rgb: 0xff516b).cgColor, UIColor(rgb: 0xff885e).cgColor],"),
+    (patch.WIDGET_AVATARS, "[UIColor(rgb: 0x2a9ef1).cgColor, UIColor(rgb: 0x72d5fd).cgColor],",
+     "[UIColor(rgb: 0x2a9ef2).cgColor, UIColor(rgb: 0x72d5fd).cgColor],"),
+    (patch.INTENT_AVATARS, "    [UIColor(rgb: 0xd669ed).cgColor, UIColor(rgb: 0xe0a2f3).cgColor],\n]\n",
+     "    [UIColor(rgb: 0xd669ed).cgColor, UIColor(rgb: 0xe0a2f3).cgColor],\n"
+     "    [UIColor(rgb: 0x8e8e93).cgColor, UIColor(rgb: 0xb1b1b1).cgColor],\n]\n"),
+    (patch.LIVE_STREAM_AVATARS, "[UIColor(rgb: 0x4acccd).cgColor, UIColor(rgb: 0x00fcfd).cgColor],",
+     "[UIColor(rgb: 0x4acccd).cgColor, UIColor(rgb: 0x00fcfe).cgColor],"),
+    (patch.PEER_NAME_COLORS, "5: Colors(main: UIColor(rgb: 0x368ad1)),", "5: Colors(main: UIColor(rgb: 0x3d72ed)),"),
+    (patch.PEER_NAME_COLORS, "            darkColors: [:],\n            displayOrder:",
+     "            darkColors: defaultDarkColors,\n            displayOrder:"),
+    (patch.PEER_NAME_COLORS, "            return PeerNameColors.defaultSingleColors[5]!\n",
+     "            return PeerNameColors.defaultSingleColors[3]!\n"),
+    (patch.PEER_COLOR_UPDATES, "                        0x309eba,\n", "                        0x309ebb,\n"),
+    (patch.PEER_COLOR_UPDATES, "ColorOptionPack(light: defaultColors, dark: nil,", "ColorOptionPack(light: defaultColors, dark: defaultColors,"),
     # Telegram's support.
     (patch.SETTINGS_ITEMS, "interaction.openSettings(.faq)", "interaction.openSettings(.faqPage)"),
     (patch.SETTINGS_SEARCH, "        allItems.append(contentsOf: helpItems)\n", "        allItems += helpItems\n"),
@@ -792,7 +1041,26 @@ class UpstreamTest(unittest.TestCase):
                       "        UIColor(rgb: 0x5b7a5e), UIColor(rgb: 0x9dbb9f) // pluma: sage\n", avatars)
         self.assertIn("    static let repostColors: [UIColor] = [\n"
                       "        UIColor(rgb: 0x4f6e52), UIColor(rgb: 0x9dbb9f) // pluma: sage\n", avatars)
-        self.assertIn("[UIColor(rgb: 0x2a9ef1), UIColor(rgb: 0x72d5fd)],", avatars)  # a peer colour, kept
+        # People's identity colours: blue is sage and cyan a teal, in the
+        # letter avatars of the app and its extensions, the names and, in dark
+        # themes, names of their own, which the fallback of the names takes
+        # too; the other five are Telegram's.
+        self.assertIn("        [UIColor(rgb: 0x5b7a5e), UIColor(rgb: 0x7fa082)], // pluma: sage\n", avatars)
+        self.assertIn("        [UIColor(rgb: 0x2c9c98), UIColor(rgb: 0x5bcbc4)], // pluma: teal\n", avatars)
+        self.assertIn("        [UIColor(rgb: 0xff516a), UIColor(rgb: 0xff885e)],\n", avatars)
+        for rel in (patch.NOTIFICATION_AVATARS, patch.WIDGET_AVATARS, patch.INTENT_AVATARS, patch.LIVE_STREAM_AVATARS):
+            self.assertIn("    [UIColor(rgb: 0x5b7a5e).cgColor, UIColor(rgb: 0x7fa082).cgColor], // pluma: sage\n", tree.read(rel))
+        names = tree.read(patch.PEER_NAME_COLORS)
+        self.assertIn("            5: Colors(main: UIColor(rgb: 0x4f6e52)), // pluma: sage\n", names)
+        self.assertIn("            3: Colors(main: UIColor(rgb: 0x40a920)),\n", names)
+        self.assertIn("            darkColors: [\n                4: Colors(main: UIColor(rgb: 0x309eba)),\n"
+                      "                5: Colors(main: UIColor(rgb: 0x9dbb9f))\n            ],\n", names)
+        self.assertEqual(names.count("            return dark ? (PeerNameColors.defaultValue.darkColors[5] ?? "
+                                     "PeerNameColors.defaultSingleColors[5]!) : PeerNameColors.defaultSingleColors[5]!\n"), 2)
+        self.assertNotIn("            return PeerNameColors.defaultSingleColors[5]!\n", names)
+        updates = tree.read(patch.PEER_COLOR_UPDATES)
+        self.assertIn("                        0x4f6e52, // pluma: sage\n", updates)
+        self.assertIn("                    let staticDarkMap: [Int32: UInt32] = [4: 0x309eba, 5: 0x9dbb9f]\n", updates)
         # No support section.
         self.assertNotIn("Settings_Support", tree.read(patch.SETTINGS_ITEMS))
         self.assertNotIn("let helpItems = ", tree.read(patch.SETTINGS_SEARCH))

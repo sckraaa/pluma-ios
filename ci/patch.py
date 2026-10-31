@@ -18,8 +18,9 @@ texts the user sees say Pluma where they said Telegram (the counts of the
 pinned commit are part of the patch). The app's links use its own scheme,
 plm://, not Telegram's tg://, and Settings > Devices links to Pluma's site
 and web client, not to Telegram's clients. The default themes take the
-palette "graphite and sage" instead of Telegram's blue. Settings no longer
-lead to Telegram's support, FAQ and feature channel.
+palette "graphite and sage" instead of Telegram's blue; of the seven colours
+Telegram gives users and chats by their id, blue is sage and cyan a teal.
+Settings no longer lead to Telegram's support, FAQ and feature channel.
 
 The chat list's notice about contacts' birthdays opens the chat with the
 contact instead of offering a Premium gift, which Pluma does not sell.
@@ -89,6 +90,14 @@ PRESENTATION_DATA = "submodules/TelegramPresentationData/Sources/PresentationDat
 THEME_SETTINGS = "submodules/TelegramUIPreferences/Sources/PresentationThemeSettings.swift"
 LEGACY_COLORS = "submodules/LegacyComponents/Sources/TGColor.m"
 AVATAR_NODE = "submodules/AvatarNode/Sources/AvatarNode.swift"
+# People's identity colours: the name colours, those TelegramCore takes for
+# the server's colours 0-6, and the copies of the letter avatars' gradients.
+PEER_NAME_COLORS = "submodules/AccountContext/Sources/PeerNameColors.swift"
+PEER_COLOR_UPDATES = "submodules/TelegramCore/Sources/State/ManagedPeerColorUpdates.swift"
+NOTIFICATION_AVATARS = "Telegram/NotificationService/Sources/NotificationService.swift"
+WIDGET_AVATARS = "Telegram/WidgetKitWidget/PeerNode.swift"
+INTENT_AVATARS = "Telegram/SiriIntents/IntentHandler.swift"
+LIVE_STREAM_AVATARS = "submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/LiveChatReactionStreamView.swift"
 SETTINGS_ITEMS = "submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoSettingsItems.swift"
 SETTINGS_SEARCH = "submodules/SettingsUI/Sources/Search/SettingsSearchableItems.swift"
 # The birthday notice of the chat list: what a tap does, its text, its close.
@@ -288,6 +297,7 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + tuple(sorted({rel for rel, _, _ in SCHEME_LINKS})) + (URL_HANDLING,)
                   + tuple(sorted({rel for rel, _, _, _, _ in CLIENT_LINKS}))
                   + (DAY_THEME, DARK_THEME, PRESENTATION_DATA, THEME_SETTINGS, LEGACY_COLORS, AVATAR_NODE)
+                  + (PEER_NAME_COLORS, NOTIFICATION_AVATARS, WIDGET_AVATARS, LIVE_STREAM_AVATARS)
                   + (SETTINGS_ITEMS, SETTINGS_SEARCH)
                   + (CHAT_LIST, CHAT_LIST_NOTICE, CHAT_LIST_PANELS, PROFILE_ITEMS))
 
@@ -861,6 +871,7 @@ def patch(tree, c):
     patch_scheme(tree, c)
     patch_client_links(tree)
     patch_palette(tree)
+    patch_identity(tree)
     patch_support(tree)
     patch_birthdays(tree)
 
@@ -1441,12 +1452,213 @@ def verify_palette(tree):
                 raise PatchError(f"{rel}: Telegram's blue {blue} is still there")
     if "PresentationThemeAccentColor(baseColor: .blue)" in tree.read(PRESENTATION_DATA):
         raise PatchError(f"{PRESENTATION_DATA}: Night still gets the blue accent")
-    # The other avatar colours stay: they are the peer colours, one per user.
+    # The other avatar colours are the peer colours, one per user
+    # (verify_identity).
     avatars = tree.read(AVATAR_NODE)
     for name in ("savedMessagesColors", "repostColors"):
         found = re.search(r"    static let %s: \[UIColor\] = \[\n(.*)\n" % name, avatars)
         if not found or any(blue.lower() in found.group(1).lower() for blue in TELEGRAM_BLUES):
             raise PatchError(f"{AVATAR_NODE}: {name} is not sage")
+
+
+# --- people's identity colours -----------------------------------------------
+#
+# Telegram gives every user and chat one of seven colours: its own, or the
+# one of its id, id % 7 (nameColor, PeerUtils.swift). 0 red, 1 orange,
+# 2 violet, 3 green, 4 cyan, 5 blue, 6 pink. It is the letter avatar, the
+# name in groups, the bar and title of replies and link previews
+# (PeerNameColors.get in ChatMessageBubbleItemNode, ChatMessageReplyInfoNode,
+# ChatMessageAttachedContentNode) and, chosen by the user, the tag of a chat
+# folder (getChatFolderTag in ChatListItem.swift). Blue becomes the palette's
+# sage and cyan a teal without Telegram's blue; the other five stay
+# Telegram's (the owner's decision, as in the Android client). Colours 7 and
+# above are the server's (help.getPeerColors) and stay as they come.
+#
+# The app keeps the seven in tables of its own, by number:
+# - letter avatars: a gradient each, the same in light and dark themes, as
+#   (bottom, top), since AvatarNode draws the pair from the top with the
+#   locations [1, 0]. AvatarNode.gradientColors, and copies of it for the
+#   avatars of notifications, the widget, Siri's suggestions and the
+#   reactions of a live stream. Upstream's avatars of colours 7 to 13 take
+#   the gradient of their number % 7, and of the others the one their hue
+#   falls on (calculateAvatarColors), so a blue one among them is sage too.
+#   That hue is the one of the light name colour, so a colour above 13 the
+#   app has none for, whose name colour is the fallback (below), falls on
+#   green: the hue of sage is green's;
+# - names, bars and folder tags: one colour each. defaultSingleColors
+#   (PeerNameColors.swift), which the app takes while the server lists no
+#   colours (PeerNameColors.with), and the map TelegramCore takes for colours
+#   0-6 that the server lists without values (ManagedPeerColorUpdates.swift);
+#   colours the server lists with values are the server's. Neither table has
+#   colours for dark themes, which show the light ones
+#   (PeerNameColors.get(_:dark:)). Pluma's cyan and blue get dark colours of
+#   their own: the dark name colour of the palette for blue, and for cyan the
+#   colour Telegram shows in dark themes, which they keep. The fallback of
+#   get and getChatFolderTag, for a colour the app has none for, is blue's
+#   light colour in any theme; Telegram's blue reads on dark backgrounds, the
+#   palette's light sage does not, so it takes blue's dark one in dark themes.
+#   Callers that do not pass dark (the quote of a channel in the text input,
+#   ChatTextInputPanelNode and AttachmentTextInputPanelNode) get the light
+#   colours in any theme, as upstream.
+# The places that take the blue slot as a plain blue take it from these
+# tables: the name colour of an author the app has none for and of the theme
+# previews (.blue, also the fallback of PeerNameColors.get), and the icons
+# generateAvatarImage draws in AvatarBackgroundColor.blue: the "Contacts" and
+# "Read" chats of a folder (ChatListFilterPresetController.swift), the
+# contacts among the recipients of business messages, Saved Messages in the
+# menu of a profile (PeerInfoScreen.swift; upstream's Saved Messages avatar
+# is the same blue, Pluma's is the palette's sage, AVATAR_SAVED_MESSAGES).
+
+# Telegram's seven colours, by number: the letter avatar's gradient as
+# (bottom, top), and the name colour.
+TELEGRAM_IDENTITY = (
+    ((0xff516a, 0xff885e), 0xcc5049),  # 0 red
+    ((0xffa85c, 0xffcd6a), 0xd67722),  # 1 orange
+    ((0x665fff, 0x82b1ff), 0x955cdb),  # 2 violet
+    ((0x54cb68, 0xa0de7e), 0x40a920),  # 3 green
+    ((0x4acccd, 0x00fcfd), 0x309eba),  # 4 cyan
+    ((0x2a9ef1, 0x72d5fd), 0x368ad1),  # 5 blue
+    ((0xd669ed, 0xe0a2f3), 0xc7508b),  # 6 pink
+)
+# Pluma's, where they differ: number -> (name, the letter avatar's gradient as
+# (bottom, top), the name colour, the name colour of dark themes or None for
+# Telegram's).
+IDENTITY_COLOURS = {
+    4: ("teal", (0x2c9c98, 0x5bcbc4), 0x1f8a80, None),
+    5: ("sage", (0x5b7a5e, 0x7fa082), 0x4f6e52, 0x9dbb9f),
+}
+
+# The tables of the seven: (file, the line that opens the table, a row, the
+# line that closes it, whether the last row has a comma). A row takes {bottom}
+# and {top}, a letter avatar, or {id} and {colour}, a name colour.
+_AVATAR_COPY = ("private let gradientColors: [NSArray] = [\n",
+                "    [UIColor(rgb: {bottom}).cgColor, UIColor(rgb: {top}).cgColor]", "]\n", True)
+IDENTITY_TABLES = (
+    (AVATAR_NODE, "    public static let gradientColors: [[UIColor]] = [\n",
+     "        [UIColor(rgb: {bottom}), UIColor(rgb: {top})]", "    ]\n", True),
+    (NOTIFICATION_AVATARS, *_AVATAR_COPY),
+    (WIDGET_AVATARS, *_AVATAR_COPY),
+    (INTENT_AVATARS, *_AVATAR_COPY),
+    (LIVE_STREAM_AVATARS, *_AVATAR_COPY),
+    (PEER_NAME_COLORS, "    public static var defaultSingleColors: [Int32: Colors] {\n        return [\n",
+     "            {id}: Colors(main: UIColor(rgb: {colour}))", "        ]\n    }\n", False),
+    (PEER_COLOR_UPDATES, "                    let staticMap: [UInt32] = [\n",
+     "                        {colour}", "                    ]\n", False),
+)
+
+# Where the dark name colours go: the default colours of PeerNameColors, and
+# the options TelegramCore makes of its map.
+NAME_DARK_OLD = "            colors: defaultSingleColors,\n            darkColors: [:],\n"
+STATIC_DARK_OLD = src(" " * 20, """
+    let colorPack = MultiColorPack(colors: [staticMap[Int(colorId)]])
+    let defaultColors = EngineAvailableColorOptions.ColorOption(palette: colorPack, background: colorPack, stories: nil)
+    mappedOptions.append(Option(key: colorId, value: ColorOptionPack(light: defaultColors, dark: nil, isHidden: isHidden, requiredChannelMinBoostLevel: requiredChannelMinBoostLevel, requiredGroupMinBoostLevel: requiredGroupMinBoostLevel)))
+""")
+# The fallback of PeerNameColors.get and getChatFolderTag, the same line in
+# both: blue, its light colour in any theme.
+NAME_FALLBACK_OLD = "            return PeerNameColors.defaultSingleColors[5]!\n"
+NAME_FALLBACK = ("            // pluma: dark themes take blue's dark colour (Pluma's sage has one).\n"
+                 "            return dark ? (PeerNameColors.defaultValue.darkColors[5] ?? PeerNameColors.defaultSingleColors[5]!) "
+                 ": PeerNameColors.defaultSingleColors[5]!\n")
+
+
+def identity_colours():
+    """The seven colours of the patched app, [(letter avatar, name colour)],
+    and the name colours of dark themes, {number: colour}."""
+    colours, dark = [], {}
+    for i, (avatar, name) in enumerate(TELEGRAM_IDENTITY):
+        if i in IDENTITY_COLOURS:
+            _, avatar, light, dark_name = IDENTITY_COLOURS[i]
+            colours.append((avatar, light))
+            dark[i] = name if dark_name is None else dark_name
+        else:
+            colours.append((avatar, name))
+    return colours, dark
+
+
+def identity_table(table, colours, marks):
+    """The text of one of IDENTITY_TABLES with these colours; marks names
+    Pluma's in a comment after their rows."""
+    _, head, row, tail, last_comma = table
+    out = head
+    for i, ((bottom, top), name) in enumerate(colours):
+        line = row.format(id=i, bottom=f"0x{bottom:06x}", top=f"0x{top:06x}", colour=f"0x{name:06x}")
+        if last_comma or i < len(colours) - 1:
+            line += ","
+        if i in marks:
+            line += f" // pluma: {marks[i]}"
+        out += line + "\n"
+    return out + tail
+
+
+def name_dark(dark):
+    """The colours of PeerNameColors.defaultValue, with the dark name colours."""
+    rows = ",\n".join(f"                {i}: Colors(main: UIColor(rgb: 0x{c:06x}))" for i, c in sorted(dark.items()))
+    return ("            colors: defaultSingleColors,\n"
+            "            // pluma: Pluma's cyan and blue have colours of their own in dark themes.\n"
+            f"            darkColors: [\n{rows}\n            ],\n")
+
+
+def static_dark(dark):
+    """TelegramCore's options for the colours 0-6 the server lists without
+    values, with the dark name colours."""
+    entries = ", ".join(f"{i}: 0x{c:06x}" for i, c in sorted(dark.items()))
+    return src(" " * 20, f"""
+        let colorPack = MultiColorPack(colors: [staticMap[Int(colorId)]])
+        let defaultColors = EngineAvailableColorOptions.ColorOption(palette: colorPack, background: colorPack, stories: nil)
+        // pluma: Pluma's cyan and blue have colours of their own in dark themes,
+        // as in PeerNameColors.defaultValue.
+        let staticDarkMap: [Int32: UInt32] = [{entries}]
+        let defaultDarkColors = staticDarkMap[colorId].map {{ darkColor -> EngineAvailableColorOptions.ColorOption in
+            let darkColorPack = MultiColorPack(colors: [darkColor])
+            return EngineAvailableColorOptions.ColorOption(palette: darkColorPack, background: darkColorPack, stories: nil)
+        }}
+        mappedOptions.append(Option(key: colorId, value: ColorOptionPack(light: defaultColors, dark: defaultDarkColors, isHidden: isHidden, requiredChannelMinBoostLevel: requiredChannelMinBoostLevel, requiredGroupMinBoostLevel: requiredGroupMinBoostLevel)))
+    """)
+
+
+def patch_identity(tree):
+    """Sage for blue and teal for cyan in every table of the seven colours
+    (each one must hold Telegram's seven, in order), and dark name colours of
+    their own for both; the fallback of the name colours, blue, takes its dark
+    one in dark themes."""
+    colours, dark = identity_colours()
+    marks = {i: c[0] for i, c in IDENTITY_COLOURS.items()}
+    for table in IDENTITY_TABLES:
+        tree.replace(table[0], identity_table(table, TELEGRAM_IDENTITY, {}), identity_table(table, colours, marks))
+    tree.replace(PEER_NAME_COLORS, NAME_DARK_OLD, name_dark(dark))
+    tree.replace(PEER_NAME_COLORS, NAME_FALLBACK_OLD, NAME_FALLBACK, count=2)
+    tree.replace(PEER_COLOR_UPDATES, STATIC_DARK_OLD, static_dark(dark))
+
+
+def table_colours(tree, table):
+    """The colours of one of IDENTITY_TABLES as the file has them, in order."""
+    rel, head, _, tail, _ = table
+    text = tree.read(rel)
+    if text.count(head) != 1:
+        raise PatchError(f"{rel}: {text.count(head)} tables {head.strip()!r}, expected 1")
+    start = text.index(head) + len(head)
+    end = text.find(tail, start)
+    if end < 0:
+        raise PatchError(f"{rel}: no {tail.strip()!r} after {head.strip()!r}")
+    return [int(c, 16) for c in re.findall(r"\b0x([0-9A-Fa-f]{6})\b", text[start:end])]
+
+
+def verify_identity(tree):
+    colours, dark = identity_colours()
+    for table in IDENTITY_TABLES:
+        avatars = "{bottom}" in table[2]
+        want = [c for avatar, name in colours for c in (avatar if avatars else (name,))]
+        if table_colours(tree, table) != want:
+            raise PatchError(f"{table[0]}: the seven {'letter avatars' if avatars else 'name colours'} are not Pluma's")
+    names = tree.read(PEER_NAME_COLORS)
+    if name_dark(dark) not in names:
+        raise PatchError(f"{PEER_NAME_COLORS}: no dark name colours of Pluma's")
+    if names.count(NAME_FALLBACK) != 2 or NAME_FALLBACK_OLD in names:
+        raise PatchError(f"{PEER_NAME_COLORS}: the fallback name colour is the light one in dark themes")
+    updates = tree.read(PEER_COLOR_UPDATES)
+    if static_dark(dark) not in updates or "ColorOptionPack(light: defaultColors, dark: nil," in updates:
+        raise PatchError(f"{PEER_COLOR_UPDATES}: no dark name colours of Pluma's")
 
 
 # An entry of a .strings file, "key" = "value";, where the value may span
@@ -1673,6 +1885,7 @@ def verify(tree, c):
     verify_scheme(tree, c)
     verify_client_links(tree)
     verify_palette(tree)
+    verify_identity(tree)
     verify_support(tree)
     verify_birthdays(tree)
 
