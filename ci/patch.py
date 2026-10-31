@@ -946,6 +946,15 @@ APP_ICONS_OLD = src(" " * 16, """
 INTRO_PAGES = ("        [_pageScrollView addSubview:p];\n"
                "    }\n")
 INTRO_PAGE_ZERO = "    [_pageScrollView setPage:0];\n"
+# The intro's animations, the disc and the mark of the first page among them,
+# are an OpenGL ES view that loadGL makes; upstream returns from it at once in
+# an arm64 simulator build, with no reason given, and the page shows nothing
+# there. Pluma's simulator builds are arm64 only and are where the intro is
+# checked, so they make the view as devices do. Device builds compile the
+# same code either way.
+INTRO_GL_OLD = ("- (void)loadGL\n{\n#if TARGET_OS_SIMULATOR && defined(__aarch64__)\n"
+                "    return;\n#endif\n")
+INTRO_GL = "- (void)loadGL\n{\n    // pluma: the GL view in the arm64 simulator too, as on devices.\n"
 INTRO_WORDMARK = src(" " * 4, """
     // pluma: the title of the first page is the wordmark, as in the Android
     // app: in the colour of the text at 90%, its baseline on the title's (5 pt
@@ -1020,6 +1029,7 @@ def patch_brand(tree):
     # "Powerful" (#4F6E52) and "Cloud-Based" (#6F8F72).
     tree.expect(INTRO_CONTROLLER, '_headlines = @[ _englishStrings[@"Tour.Title1"], ')
     tree.replace(INTRO_CONTROLLER, INTRO_PAGES + INTRO_PAGE_ZERO, INTRO_PAGES + INTRO_WORDMARK + INTRO_PAGE_ZERO)
+    tree.replace(INTRO_CONTROLLER, INTRO_GL_OLD, INTRO_GL)
     tree.replace(INTRO_ANIMATIONS, "    vec4 powerful_bg_color = {47/255., 90/255., 131/255., 1};\n",
                  "    vec4 powerful_bg_color = {79/255., 110/255., 82/255., 1}; // pluma: #4F6E52\n")
     tree.replace(INTRO_ANIMATIONS, "    vec4 cloud_color = {42/255., 180/255., 247/255., 1};\n",
@@ -1852,6 +1862,8 @@ def verify_brand(tree):
         raise PatchError(f"{APP_DELEGATE}: the icon picker offers Telegram's icons")
     if tree.read(INTRO_CONTROLLER).count('[UIImage imageNamed:@"pluma_wordmark.png"]') != 1:
         raise PatchError(f"{INTRO_CONTROLLER}: the first page of the intro has no wordmark")
+    if "TARGET_OS_SIMULATOR" in tree.read(INTRO_CONTROLLER):
+        raise PatchError(f"{INTRO_CONTROLLER}: the intro's animations are off in the simulator")
 
 
 IPV4 = re.compile(r"(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])")

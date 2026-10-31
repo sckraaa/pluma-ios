@@ -893,6 +893,7 @@ DAMAGE = (
     (INTRO, "cloud_color = {42/255., 180/255., 247/255., 1};", "cloud_color = {42/255., 181/255., 247/255., 1};"),
     (INTRO, "powerful_bg_color = {47/255., 90/255., 131/255., 1};", "powerful_bg_color = {47/255., 90/255., 132/255., 1};"),
     (patch.INTRO_CONTROLLER, "    [_pageScrollView setPage:0];\n", "    [_pageScrollView setPage:1];\n"),
+    (patch.INTRO_CONTROLLER, "#if TARGET_OS_SIMULATOR && defined(__aarch64__)\n", "#if TARGET_OS_SIMULATOR && defined(__arm64__)\n"),
     (patch.INTRO_CONTROLLER, '_headlines = @[ _englishStrings[@"Tour.Title1"], _englishStrings[@"Tour.Title2"],',
      '_headlines = @[ _englishStrings[@"Tour.Title2"], _englishStrings[@"Tour.Title1"],'),
     (patch.APP_ICON + "/icon.json", '"image-name" : "Plane.svg"', '"image-name" : "Plane2.svg"'),
@@ -1094,6 +1095,9 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn(patch.INTRO_PAGES + patch.INTRO_WORDMARK + patch.INTRO_PAGE_ZERO, intro)
         self.assertEqual(intro.count("firstPage.headerLabel.attributedText = title;\n"), 1)
         self.assertEqual(intro.count("firstPage.headerLabel.accessibilityLabel = _headlines.firstObject;\n"), 1)
+        # Its animations in the arm64 simulator build too.
+        self.assertIn(patch.INTRO_GL, intro)
+        self.assertNotIn("TARGET_OS_SIMULATOR", intro)
         # The names.
         strings = tree.read(patch.STRINGS)
         for entry in ('"Application.Name" = "Pluma";', '"Tour.Title1" = "Pluma";', '"Settings.FAQ" = "Pluma FAQ";',
