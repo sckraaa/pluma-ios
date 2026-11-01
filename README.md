@@ -24,7 +24,6 @@ The repository holds no copy of the app's code. CI fetches the upstream release 
   - its close button dismisses it as before (`help.dismissSuggestion` with `BIRTHDAY_CONTACTS_TODAY`), but without the toast that sends the user to Settings to gift Premium: with Premium purchases blocked (`premium_purchase_blocked`) and no Stars, Settings offer no gifts.
   - the birthday row of the contact's profile, two taps away, offers a gift (by a tap and by its gift icon) only while Premium can be bought, as the chat already does.
 - **App Store requirements.** What App Store Connect warns about on upload (its notes on build 20):
-  - the app and its extensions target iOS 15, as uploads must from April 2027 (ITMS-90068);
   - the Info.plist names the purpose of background location (`NSLocationAlwaysAndWhenInUseUsageDescription`, ITMS-90683), in English the text every language's `InfoPlist.strings` already translates;
   - no Apple font in the bundle (ITMS-91198, refused from 1 October 2027): SF Camera, the face of the camera's controls, is gone, and the camera uses the system font of the same weight, as it already does when the font cannot be loaded;
   - Siri gets an example phrase for each of the five system intents of the Intents extension in each of the app's 19 languages (ITMS-90626), naming Pluma; upstream gives one for sending a message only, naming Telegram, in English for most languages.
@@ -33,6 +32,7 @@ The repository holds no copy of the app's code. CI fetches the upstream release 
 After the edits, the result is checked again. MtProtoKit, TelegramCore and TelegramVoip may hold no address in Telegram's published ranges, and their only RSA keys must be the server's. The check also covers the layer (`currentLayer()` is 228), the versions of `versions.json`, and the `Make.py` options and targets the build relies on.
 
 What the patch leaves, and why:
+- **iOS 13 as the minimum.** App Store Connect wants iOS 15 from April 2027 (ITMS-90068). The pinned release targets 13.0 and compiles most of its modules with `-warnings-as-errors`; at 15.0 every unguarded API deprecated in iOS 14 or 15 (`UIApplication.windows` in `AppDelegate.swift` and others) turns into a build error. Telegram has to raise the target itself before then; the update of the pinned release brings it.
 - **Links** to `t.me`, `telegram.org` and `fragment.com` in the interface: share links, the terms, the privacy policy. There are about 120 of them in the code and 54 in the strings, and each opens only when tapped. The rebranding leaves URLs as they are, except the links to Telegram's desktop and web clients in Settings → Devices and in its QR scanner ([Branding](#branding)).
 - **The reflector benchmark** of TelegramUI's `AppDelegate` measures a call server of Telegram's. It runs only in internal builds or behind a hidden debug switch; this is a public build.
 - **Connection probing.** MtProtoKit pings `google.com` or `8.8.8.8` (ICMP) when a proxy the user set up stops answering.

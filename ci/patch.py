@@ -24,9 +24,9 @@ The first page of the intro shows the mark writing itself, and the intro's
 pages are laid out around it.
 Settings no longer lead to Telegram's support, FAQ and feature channel.
 
-What App Store Connect warns about on upload is settled too: the app targets
-iOS 15, names the purpose of background location, carries no Apple font, and
-gives Siri an example phrase for every intent in every language.
+What App Store Connect warns about on upload is settled too: the app names
+the purpose of background location, carries no Apple font, and gives Siri an
+example phrase for every intent in every language.
 
 The chat list's notice about contacts' birthdays opens the chat with the
 contact instead of offering a Premium gift, which Pluma does not sell.
@@ -309,9 +309,12 @@ CLIENT_TEXTS = (
 CLIENT_SITES = re.compile(r"(?:get)?desktop\.telegram\.org|web\.telegram\.org")
 
 # What App Store Connect asks of every upload (its notes on Pluma's build 20,
-# 2026-11-01). ITMS-90068: from April 2027 an app must target iOS 15 or later.
-MINIMUM_OS_OLD = 'minimum_os_version = "13.0"\n'
-MINIMUM_OS = "15.0"
+# 2026-11-01). Not here: ITMS-90068, iOS 15 at least from April 2027. The
+# pinned release targets 13.0 and compiles 673 of its modules with
+# -warnings-as-errors; with a target of 15.0 every unguarded API deprecated in
+# iOS 14 or 15 (UIApplication.windows, used in AppDelegate.swift and others)
+# becomes a warning, so a build error. Telegram has to raise the target itself
+# before then, and the update of the pinned release brings it.
 # ITMS-90683: the main Info.plist must name the purpose of every location
 # permission the code can ask for, NSLocationAlwaysAndWhenInUseUsageDescription
 # too. Every language's InfoPlist.strings translates that key already; the
@@ -2291,13 +2294,9 @@ def siri_vocabulary(phrases, name):
 
 
 def patch_store(tree, c):
-    """What App Store Connect warns about on upload: iOS 15 at least, the
-    purpose of background location, no Apple font in the bundle, and Siri
-    phrases for every intent in every language."""
-    tree.replace(APP_BUILD, MINIMUM_OS_OLD,
-                 "# pluma: iOS 15 at least, as App Store Connect requires from April 2027 (ITMS-90068).\n"
-                 f'minimum_os_version = "{MINIMUM_OS}"\n')
-
+    """What App Store Connect warns about on upload: the purpose of
+    background location, no Apple font in the bundle, and Siri phrases for
+    every intent in every language."""
     purpose = infoplist_value(tree, INFOPLIST_STRINGS.format("en"), LOCATION_KEY)
     tree.replace(APP_BUILD, LOCATION_ANCHOR,
                  f"    <key>{LOCATION_KEY}</key>\n    <string>{xml_text(purpose)}</string>\n" + LOCATION_ANCHOR)
@@ -2316,8 +2315,6 @@ def patch_store(tree, c):
 
 def verify_store(tree, c):
     build = tree.read(APP_BUILD)
-    if f'minimum_os_version = "{MINIMUM_OS}"\n' not in build or MINIMUM_OS_OLD in build:
-        raise PatchError(f"{APP_BUILD}: the app does not target iOS {MINIMUM_OS}")
     if f"<key>{LOCATION_KEY}</key>" not in build:
         raise PatchError(f"{APP_BUILD}: no purpose of background location ({LOCATION_KEY})")
     if "AremacFS" in build or any(tree.sha256(rel) for rel in CAMERA_FONTS):

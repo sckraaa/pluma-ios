@@ -997,7 +997,6 @@ DAMAGE = (
     (patch.INTRO_CONTROLLER, "@implementation TGAvailableLocalization\n", "@implementation TGAvailableLocalizationInfo\n"),
     (patch.INTRO_SPLASH, "import RMIntro\n", "import RMIntroUI\n"),
     # What App Store Connect asks.
-    (patch.APP_BUILD, 'minimum_os_version = "13.0"', 'minimum_os_version = "14.0"'),
     (patch.APP_BUILD, "        <string>AremacFS-Semibold.otf</string>\n", ""),
     (patch.APP_BUILD, "                <string>INSearchCallHistoryIntent</string>\n",
      "                <string>INSearchCallHistoryIntent</string>\n                <string>INAnswerCallIntent</string>\n"),
@@ -1350,9 +1349,8 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn("let canGiftOnBirthday = isBirthdayToday && !PremiumConfiguration.with(", profile)
         self.assertIn("} else if canGiftOnBirthday && cachedData.disallowedGifts != TelegramDisallowedGifts.All {", profile)
         self.assertIn("icon: canGiftOnBirthday ? .premiumGift : nil, action: birthdayAction,", profile)
-        # What App Store Connect asks: iOS 15, the purpose of background
-        # location, no SF Camera, Siri phrases for every intent.
-        self.assertIn('\nminimum_os_version = "15.0"\n', build)
+        # What App Store Connect asks: the purpose of background location,
+        # no SF Camera, Siri phrases for every intent.
         self.assertIn("    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>\n"
                       "    <string>When you choose to share your Live Location with friends in a chat, Pluma needs "
                       "background access to your location to keep them updated for the duration of the live sharing."
