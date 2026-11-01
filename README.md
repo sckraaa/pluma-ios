@@ -23,6 +23,11 @@ The repository holds no copy of the app's code. CI fetches the upstream release 
   - a tap opens the chat with the contact; with several contacts, it lists them in an action sheet, as the live location panel above the chat list lists its chats, and opens the chat of the one chosen. The list is in the order of their names, the same on every launch (the notice's own order may change);
   - its close button dismisses it as before (`help.dismissSuggestion` with `BIRTHDAY_CONTACTS_TODAY`), but without the toast that sends the user to Settings to gift Premium: with Premium purchases blocked (`premium_purchase_blocked`) and no Stars, Settings offer no gifts.
   - the birthday row of the contact's profile, two taps away, offers a gift (by a tap and by its gift icon) only while Premium can be bought, as the chat already does.
+- **App Store requirements.** What App Store Connect warns about on upload (its notes on build 20):
+  - the app and its extensions target iOS 15, as uploads must from April 2027 (ITMS-90068);
+  - the Info.plist names the purpose of background location (`NSLocationAlwaysAndWhenInUseUsageDescription`, ITMS-90683), in English the text every language's `InfoPlist.strings` already translates;
+  - no Apple font in the bundle (ITMS-91198, refused from 1 October 2027): SF Camera, the face of the camera's controls, is gone, and the camera uses the system font of the same weight, as it already does when the font cannot be loaded;
+  - Siri gets an example phrase for each of the five system intents of the Intents extension in each of the app's 19 languages (ITMS-90626), naming Pluma; upstream gives one for sending a message only, naming Telegram, in English for most languages.
 - **Build flags.** The upstream `.bazelrc` imports `pluma.bazelrc`, which [`ci/build.sh`](ci/build.sh) writes: the cache locations, and no provisioning profiles for a simulator build.
 
 After the edits, the result is checked again. MtProtoKit, TelegramCore and TelegramVoip may hold no address in Telegram's published ranges, and their only RSA keys must be the server's. The check also covers the layer (`currentLayer()` is 228), the versions of `versions.json`, and the `Make.py` options and targets the build relies on.

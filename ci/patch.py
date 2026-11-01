@@ -24,6 +24,10 @@ The first page of the intro shows the mark writing itself, and the intro's
 pages are laid out around it.
 Settings no longer lead to Telegram's support, FAQ and feature channel.
 
+What App Store Connect warns about on upload is settled too: the app targets
+iOS 15, names the purpose of background location, carries no Apple font, and
+gives Siri an example phrase for every intent in every language.
+
 The chat list's notice about contacts' birthdays opens the chat with the
 contact instead of offering a Premium gift, which Pluma does not sell.
 
@@ -304,6 +308,182 @@ CLIENT_TEXTS = (
 # Telegram's client sites, which none of those files may open after the edits.
 CLIENT_SITES = re.compile(r"(?:get)?desktop\.telegram\.org|web\.telegram\.org")
 
+# What App Store Connect asks of every upload (its notes on Pluma's build 20,
+# 2026-11-01). ITMS-90068: from April 2027 an app must target iOS 15 or later.
+MINIMUM_OS_OLD = 'minimum_os_version = "13.0"\n'
+MINIMUM_OS = "15.0"
+# ITMS-90683: the main Info.plist must name the purpose of every location
+# permission the code can ask for, NSLocationAlwaysAndWhenInUseUsageDescription
+# too. Every language's InfoPlist.strings translates that key already; the
+# English one (en.lproj) is the text of the Info.plist.
+LOCATION_ANCHOR = "    <key>NSLocationWhenInUseUsageDescription</key>\n"
+LOCATION_KEY = "NSLocationAlwaysAndWhenInUseUsageDescription"
+# ITMS-91198: no Apple font in the bundle (from 1 October 2027 such uploads are
+# refused). SF Camera, in TelegramUI's resources and registered by the
+# Info.plist, is the face of the camera's controls. Without it the camera
+# falls back to the system font of the same weight, as Font.with already
+# does when the font cannot be loaded.
+FONT = "submodules/Display/Source/Font.swift"
+CAMERA_FONTS = {
+    "submodules/TelegramUI/Resources/Fonts/AremacFS-Regular.otf":
+        "1a78b533ec78aacd654dc70fbad6984e72e6c265d334771d18b4773c7271f389",
+    "submodules/TelegramUI/Resources/Fonts/AremacFS-Semibold.otf":
+        "28eab504072291f09a095d75891dc5da01d18e5154552c9e2e60df4e9818108e",
+}
+CAMERA_FONTS_PLIST = ("    <key>UIAppFonts</key>\n"
+                      "    <array>\n"
+                      "        <string>AremacFS-Regular.otf</string>\n"
+                      "        <string>AremacFS-Semibold.otf</string>\n"
+                      "    </array>\n")
+CAMERA_FONT_FALLBACKS = (
+    'font = UIFont(name: encodeText(string: "TGDbnfsb.Tfnjcpme", key: -1), size: size) '
+    '?? UIFont.systemFont(ofSize: size, weight: weight.weight)',
+    'font = UIFont(name: encodeText(string: "TGDbnfsb.Sfhvmbs", key: -1), size: size) '
+    '?? UIFont.systemFont(ofSize: size, weight: weight.weight)',
+)
+# ITMS-90626: an example phrase for every system intent the Siri extension
+# supports, in every language the app bundles. Upstream gives one for sending
+# a message only, naming Telegram, and in English for most languages. Each
+# AppIntentVocabulary.plist is replaced, checked by its SHA-256 first, with
+# phrases in its own language for all five; {name} is the app's name.
+SIRI_VOCABULARY = "Telegram/Telegram-iOS/{}.lproj/AppIntentVocabulary.plist"
+SIRI_EXTENSION_INTENTS = ("            <key>IntentsSupported</key>\n"
+                          "            <array>\n"
+                          "                <string>INSendMessageIntent</string>\n"
+                          "                <string>INStartAudioCallIntent</string>\n"
+                          "                <string>INSearchForMessagesIntent</string>\n"
+                          "                <string>INSetMessageAttributeIntent</string>\n"
+                          "                <string>INSearchCallHistoryIntent</string>\n"
+                          "                <string>SelectFriendsIntent</string>\n"
+                          "                <string>SelectAvatarFriendsIntent</string>\n"
+                          "            </array>\n")
+# The order of the phrases below; SelectFriendsIntent and
+# SelectAvatarFriendsIntent are the app's own intents (the widget's
+# configuration), which take no phrases.
+SIRI_INTENTS = ("INSendMessageIntent", "INStartAudioCallIntent", "INSearchCallHistoryIntent",
+                "INSearchForMessagesIntent", "INSetMessageAttributeIntent")
+_SIRI_ENGLISH = "eb529c93435643cd60ca9bcdb6dc23069bd7c59fb024e884dec78d348807f595"
+SIRI_UPSTREAM = {
+    "ar": "7c27690db9289004832e281f1033f590a2df67958258fdb9c16661a403bd70ba",
+    "be": _SIRI_ENGLISH,
+    "ca": _SIRI_ENGLISH,
+    "de": "4d86522e9f9bd761d1d894ad1794a98620583dce0ef4238f0efed938866d2e0d",
+    "en": _SIRI_ENGLISH,
+    "es": "9c1bb458ee1ab0b323004a987d8baa7a200212bf17222e3c16c4ed1a0d7ee3ec",
+    "fa": _SIRI_ENGLISH,
+    "fr": _SIRI_ENGLISH,
+    "id": _SIRI_ENGLISH,
+    "it": "c2de0830034196c81ae8aabcd217d8d21f04b7afae272dd1b7a39776c7158571",
+    "ko": "a3c3623d6a298e670f707ad36ab27f1105b3bd1fccff7047d5d3650e349c1718",
+    "ms": _SIRI_ENGLISH,
+    "nl": "dc20304adee4e138d0ee7ff25e11c5e9693817dbef60b82bd63c25778d387647",
+    "pl": _SIRI_ENGLISH,
+    "pt": "e8110641eab0da3a89e3c8ce245b9c0d1b68bbf8c2c3cbfb9643b534c63ccfc9",
+    "ru": "58da17b3c6370489ca498af4765a221592b8ccb6d1bcb1539739138b746c0f90",
+    "tr": _SIRI_ENGLISH,
+    "uk": _SIRI_ENGLISH,
+    "uz": _SIRI_ENGLISH,
+}
+# Where upstream has a phrase of its own language (ar, de, es, it, ko, nl, pt,
+# ru), the message phrase is upstream's with the app's name.
+SIRI_PHRASES = {
+    "ar": ("أرسل رسالة لخالد عبر {name} وأخبره أن هديته وصلت إلى المنزل",
+           "اتصل بخالد عبر {name}",
+           "اعرض المكالمات الفائتة في {name}",
+           "ابحث عن رسائل خالد في {name}",
+           "علّم رسائل خالد في {name} كمقروءة"),
+    "be": ("Адправіць Алесю паведамленне ў {name}: буду праз 10 хвілін",
+           "Патэлефанаваць Алесю ў {name}",
+           "Паказаць прапушчаныя званкі ў {name}",
+           "Знайсці паведамленні ад Алеся ў {name}",
+           "Пазначыць паведамленні ад Алеся ў {name} як прачытаныя"),
+    "ca": ("Envia un missatge de {name} a l'Anna dient que hi seré en 10 minuts",
+           "Truca a l'Anna amb {name}",
+           "Mostra les meves trucades perdudes a {name}",
+           "Cerca missatges de l'Anna a {name}",
+           "Marca com a llegits els missatges de l'Anna a {name}"),
+    "de": ("Sende Lisa eine {name}-Nachricht, dass ich in 15 Minuten da bin.",
+           "Ruf Lisa über {name} an",
+           "Zeig meine verpassten Anrufe in {name}",
+           "Such in {name} nach Nachrichten von Lisa",
+           "Markiere die {name}-Nachrichten von Lisa als gelesen"),
+    "en": ("Send a {name} message to Alex saying I'll be there in 10 minutes",
+           "Call Alex on {name}",
+           "Show my missed calls in {name}",
+           "Search {name} for messages from Alex",
+           "Mark my {name} messages from Alex as read"),
+    "es": ("Envía un mensaje de {name} a Alicia diciéndole que estarás allí en 15 minutos",
+           "Llama a Alicia por {name}",
+           "Muestra mis llamadas perdidas en {name}",
+           "Busca mensajes de Alicia en {name}",
+           "Marca como leídos los mensajes de Alicia en {name}"),
+    "fa": ("با {name} به علی پیام بده که ۱۰ دقیقه دیگر می‌رسم",
+           "با {name} به علی زنگ بزن",
+           "تماس‌های بی‌پاسخ من در {name} را نشان بده",
+           "پیام‌های علی را در {name} جستجو کن",
+           "پیام‌های علی در {name} را خوانده‌شده علامت بزن"),
+    "fr": ("Envoie un message {name} à Alex pour dire que j'arrive dans 10 minutes",
+           "Appelle Alex sur {name}",
+           "Affiche mes appels manqués sur {name}",
+           "Cherche les messages d'Alex sur {name}",
+           "Marque les messages d'Alex sur {name} comme lus"),
+    "id": ("Kirim pesan {name} ke Andi bilang aku sampai dalam 10 menit",
+           "Telepon Andi lewat {name}",
+           "Tampilkan panggilan tak terjawab di {name}",
+           "Cari pesan dari Andi di {name}",
+           "Tandai pesan dari Andi di {name} sebagai sudah dibaca"),
+    "it": ("Invia un messaggio su {name} ad Alex dicendo che sarò lì tra 10 minuti",
+           "Chiama Alex su {name}",
+           "Mostra le chiamate perse su {name}",
+           "Cerca i messaggi di Alex su {name}",
+           "Segna come letti i messaggi di Alex su {name}"),
+    "ko": ("앨리스에게 나 15분 안에 도착한다고 {name} 메시지 보내줘",
+           "{name}로 앨리스에게 전화 걸어줘",
+           "{name} 부재중 통화 보여줘",
+           "{name}에서 앨리스가 보낸 메시지 찾아줘",
+           "{name}에서 앨리스가 보낸 메시지를 읽음으로 표시해줘"),
+    "ms": ("Hantar mesej {name} kepada Ali mengatakan saya akan sampai dalam 10 minit",
+           "Panggil Ali melalui {name}",
+           "Tunjukkan panggilan tidak dijawab saya dalam {name}",
+           "Cari mesej daripada Ali dalam {name}",
+           "Tandakan mesej daripada Ali dalam {name} sebagai sudah dibaca"),
+    "nl": ("Stuur een {name}-bericht naar Maartje met ik ben er over 15 minuten.",
+           "Bel Maartje via {name}",
+           "Toon mijn gemiste oproepen in {name}",
+           "Zoek berichten van Maartje in {name}",
+           "Markeer de berichten van Maartje in {name} als gelezen"),
+    "pl": ("Wyślij wiadomość w {name} do Ani: będę za 10 minut",
+           "Zadzwoń do Ani przez {name}",
+           "Pokaż nieodebrane połączenia w {name}",
+           "Wyszukaj wiadomości od Ani w {name}",
+           "Oznacz wiadomości od Ani w {name} jako przeczytane"),
+    "pt": ("Enviar uma mensagem no {name} para a Alice dizendo que eu chegarei lá em 15 minutos",
+           "Ligar para a Alice pelo {name}",
+           "Mostrar minhas chamadas perdidas no {name}",
+           "Procurar mensagens da Alice no {name}",
+           "Marcar como lidas as mensagens da Alice no {name}"),
+    "ru": ("Отправить Алисе сообщение в {name}: я буду через 10 минут",
+           "Позвонить Алисе в {name}",
+           "Показать пропущенные звонки в {name}",
+           "Найти сообщения от Алисы в {name}",
+           "Отметить сообщения от Алисы в {name} как прочитанные"),
+    "tr": ("{name}'dan Ali'ye 10 dakika içinde orada olacağım diye mesaj gönder",
+           "{name}'dan Ali'yi ara",
+           "{name}'daki cevapsız aramalarımı göster",
+           "{name}'da Ali'den gelen mesajları ara",
+           "{name}'da Ali'den gelen mesajları okundu olarak işaretle"),
+    "uk": ("Надіслати Олені повідомлення в {name}: буду за 10 хвилин",
+           "Зателефонувати Олені в {name}",
+           "Показати пропущені дзвінки в {name}",
+           "Знайти повідомлення від Олени в {name}",
+           "Позначити повідомлення від Олени в {name} як прочитані"),
+    "uz": ("{name} orqali Aliga xabar yubor: 10 daqiqada yetib boraman",
+           "{name} orqali Aliga qo‘ng‘iroq qil",
+           "{name}dagi javobsiz qo‘ng‘iroqlarimni ko‘rsat",
+           "{name}da Alidan kelgan xabarlarni qidir",
+           "{name}da Alidan kelgan xabarlarni o‘qilgan deb belgila"),
+}
+
 # Everything the patch reads, edits or checks: the check job fetches only
 # these (ci/fetch-upstream.sh sparse).
 UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_DIRS
@@ -317,7 +497,8 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + (DAY_THEME, DARK_THEME, PRESENTATION_DATA, THEME_SETTINGS, LEGACY_COLORS, AVATAR_NODE)
                   + (PEER_NAME_COLORS, NOTIFICATION_AVATARS, WIDGET_AVATARS, LIVE_STREAM_AVATARS)
                   + (SETTINGS_ITEMS, SETTINGS_SEARCH)
-                  + (CHAT_LIST, CHAT_LIST_NOTICE, CHAT_LIST_PANELS, PROFILE_ITEMS))
+                  + (CHAT_LIST, CHAT_LIST_NOTICE, CHAT_LIST_PANELS, PROFILE_ITEMS)
+                  + (FONT,) + tuple(CAMERA_FONTS) + tuple(SIRI_VOCABULARY.format(lang) for lang in SIRI_PHRASES))
 
 
 class PatchError(Exception):
@@ -893,6 +1074,7 @@ def patch(tree, c):
     patch_identity(tree)
     patch_support(tree)
     patch_birthdays(tree)
+    patch_store(tree, c)
 
     # The build configuration of Make.py, with exactly the keys it reads.
     conf = c.build_configuration()
@@ -2073,6 +2255,80 @@ def verify_support(tree):
         raise PatchError(f"{SETTINGS_SEARCH}: the settings search still leads to Telegram's support")
 
 
+# --- App Store ---------------------------------------------------------------
+
+
+def infoplist_value(tree, rel, key):
+    """The value of key in an InfoPlist.strings, unescaped."""
+    m = re.search(r'^"' + re.escape(key) + r'" = "((?:[^"\\]|\\.)*)";$', tree.read(rel), re.M)
+    if not m:
+        raise PatchError(f"{rel}: no {key}; upstream changed it")
+    return re.sub(r"\\(.)", r"\1", m.group(1))
+
+
+def xml_text(s):
+    return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace('"', "&quot;").replace("'", "&apos;"))
+
+
+def siri_vocabulary(phrases, name):
+    """An AppIntentVocabulary.plist with one example phrase per intent, laid
+    out as upstream's."""
+    entries = "".join(
+        "\t\t<dict>\n"
+        "\t\t\t<key>IntentName</key>\n"
+        f"\t\t\t<string>{intent}</string>\n"
+        "\t\t\t<key>IntentExamples</key>\n"
+        "\t\t\t<array>\n"
+        f"\t\t\t\t<string>{xml_text(phrase.format(name=name))}</string>\n"
+        "\t\t\t</array>\n"
+        "\t\t</dict>\n"
+        for intent, phrase in zip(SIRI_INTENTS, phrases))
+    return ('<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+            '<plist version="1.0">\n<dict>\n\t<key>IntentPhrases</key>\n\t<array>\n'
+            + entries + "\t</array>\n</dict>\n</plist>\n")
+
+
+def patch_store(tree, c):
+    """What App Store Connect warns about on upload: iOS 15 at least, the
+    purpose of background location, no Apple font in the bundle, and Siri
+    phrases for every intent in every language."""
+    tree.replace(APP_BUILD, MINIMUM_OS_OLD,
+                 "# pluma: iOS 15 at least, as App Store Connect requires from April 2027 (ITMS-90068).\n"
+                 f'minimum_os_version = "{MINIMUM_OS}"\n')
+
+    purpose = infoplist_value(tree, INFOPLIST_STRINGS.format("en"), LOCATION_KEY)
+    tree.replace(APP_BUILD, LOCATION_ANCHOR,
+                 f"    <key>{LOCATION_KEY}</key>\n    <string>{xml_text(purpose)}</string>\n" + LOCATION_ANCHOR)
+
+    for fallback in CAMERA_FONT_FALLBACKS:
+        tree.expect(FONT, fallback)
+    tree.replace(APP_BUILD, CAMERA_FONTS_PLIST, "")
+    for rel, sha256 in CAMERA_FONTS.items():
+        tree.remove_file(rel, sha256)
+
+    tree.expect(APP_BUILD, SIRI_EXTENSION_INTENTS)
+    for lang, phrases in SIRI_PHRASES.items():
+        tree.replace_file(SIRI_VOCABULARY.format(lang), SIRI_UPSTREAM[lang],
+                          siri_vocabulary(phrases, c.app_name).encode("utf-8"))
+
+
+def verify_store(tree, c):
+    build = tree.read(APP_BUILD)
+    if f'minimum_os_version = "{MINIMUM_OS}"\n' not in build or MINIMUM_OS_OLD in build:
+        raise PatchError(f"{APP_BUILD}: the app does not target iOS {MINIMUM_OS}")
+    if f"<key>{LOCATION_KEY}</key>" not in build:
+        raise PatchError(f"{APP_BUILD}: no purpose of background location ({LOCATION_KEY})")
+    if "AremacFS" in build or any(tree.sha256(rel) for rel in CAMERA_FONTS):
+        raise PatchError(f"{APP_BUILD}: the bundle still carries SF Camera, an Apple font")
+    for lang, phrases in SIRI_PHRASES.items():
+        rel = SIRI_VOCABULARY.format(lang)
+        text = tree.read(rel)
+        if TELEGRAM_WORD.search(text) or any(f"<string>{i}</string>" not in text for i in SIRI_INTENTS):
+            raise PatchError(f"{rel}: not a phrase in {c.app_name}'s name for every Siri intent")
+
+
 def patch_palette(tree):
     for rel, old, new, count in PALETTE_EDITS:
         tree.replace(rel, old, new, count=count)
@@ -2531,6 +2787,7 @@ def verify(tree, c):
     verify_identity(tree)
     verify_support(tree)
     verify_birthdays(tree)
+    verify_store(tree, c)
 
     build = tree.read(APP_BUILD)
     if "<string>Telegram</string>" in build or "<string>telegram</string>" in build:

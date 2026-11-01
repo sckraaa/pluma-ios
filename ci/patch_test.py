@@ -6,6 +6,7 @@ import io
 import json
 import os
 import pathlib
+import plistlib
 import re
 import struct
 import subprocess
@@ -995,6 +996,15 @@ DAMAGE = (
     (patch.INTRO_CONTROLLER, "    [_pageControl setCurrentPage:_currentPage];\n}", "    _pageControl.currentPage = _currentPage;\n}"),
     (patch.INTRO_CONTROLLER, "@implementation TGAvailableLocalization\n", "@implementation TGAvailableLocalizationInfo\n"),
     (patch.INTRO_SPLASH, "import RMIntro\n", "import RMIntroUI\n"),
+    # What App Store Connect asks.
+    (patch.APP_BUILD, 'minimum_os_version = "13.0"', 'minimum_os_version = "14.0"'),
+    (patch.APP_BUILD, "        <string>AremacFS-Semibold.otf</string>\n", ""),
+    (patch.APP_BUILD, "                <string>INSearchCallHistoryIntent</string>\n",
+     "                <string>INSearchCallHistoryIntent</string>\n                <string>INAnswerCallIntent</string>\n"),
+    (patch.FONT, 'UIFont(name: encodeText(string: "TGDbnfsb.Sfhvmbs", key: -1), size: size) ?? UIFont.systemFont(ofSize: size, weight: weight.weight)',
+     'UIFont(name: encodeText(string: "TGDbnfsb.Sfhvmbs", key: -1), size: size)!'),
+    (patch.INFOPLIST_STRINGS.format("en"), '"NSLocationAlwaysAndWhenInUseUsageDescription"', '"NSLocationAlwaysAndWhenInUse"'),
+    (patch.SIRI_VOCABULARY.format("ru"), "\u0410\u043b\u0438\u0441\u0435", "\u0410\u043b\u0435\u043a\u0441\u0443"),
     (patch.INTRO_SPLASH, "    private let controller: RMIntroViewController\n", "    private let controller: RMIntroViewController?\n"),
     (patch.INTRO_SPLASH, "suggestedLocalizationSignal: localizationSignal)", "suggestedLocalizationSignal: localizationSignal, animated: true)"),
     (patch.INTRO_SPLASH, "            return self?.startButton.view\n", "            return self?.startButton.view ?? UIView()\n"),
@@ -1340,6 +1350,28 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn("let canGiftOnBirthday = isBirthdayToday && !PremiumConfiguration.with(", profile)
         self.assertIn("} else if canGiftOnBirthday && cachedData.disallowedGifts != TelegramDisallowedGifts.All {", profile)
         self.assertIn("icon: canGiftOnBirthday ? .premiumGift : nil, action: birthdayAction,", profile)
+        # What App Store Connect asks: iOS 15, the purpose of background
+        # location, no SF Camera, Siri phrases for every intent.
+        self.assertIn('\nminimum_os_version = "15.0"\n', build)
+        self.assertIn("    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>\n"
+                      "    <string>When you choose to share your Live Location with friends in a chat, Pluma needs "
+                      "background access to your location to keep them updated for the duration of the live sharing."
+                      "</string>\n    <key>NSLocationWhenInUseUsageDescription</key>\n", build)
+        self.assertNotIn("UIAppFonts", build)
+        for rel in patch.CAMERA_FONTS:
+            self.assertFalse((self.root / rel).exists(), rel)
+        self.assertEqual(set(patch.SIRI_PHRASES), set(patch.SIRI_UPSTREAM))
+        en = tree.read(patch.SIRI_VOCABULARY.format("en"))
+        self.assertIn("<string>Send a Pluma message to Alex saying I&apos;ll be there in 10 minutes</string>", en)
+        self.assertIn("<string>INSearchCallHistoryIntent</string>\n\t\t\t<key>IntentExamples</key>\n"
+                      "\t\t\t<array>\n\t\t\t\t<string>Show my missed calls in Pluma</string>", en)
+        for lang, phrases in patch.SIRI_PHRASES.items():
+            with self.subTest(lang=lang):
+                self.assertEqual(len(phrases), len(patch.SIRI_INTENTS))
+                vocabulary = tree.read(patch.SIRI_VOCABULARY.format(lang))
+                self.assertEqual(vocabulary.count("Pluma"), len(patch.SIRI_INTENTS))
+                self.assertNotIn("{name}", vocabulary)
+                plistlib.loads(vocabulary.encode("utf-8"))
 
     def test_dev_server(self):
         dev = patch.load_env(ROOT / "config/dev/server.env")
