@@ -239,6 +239,15 @@ jobs:
         with:
           path: ~/pluma-bazel
           key: bazel-ipa-${{ hashFiles('upstream.env', 'config/**', 'ci/patch.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Hand the IPA to the install service
+        env:
+          PLUMA_INSTALL_URL: ${{ vars.PLUMA_INSTALL_URL || 'https://pluma.chat' }}
+          IOSINSTALL_UPLOAD_TOKEN: ${{ secrets.IOSINSTALL_UPLOAD_TOKEN }}
+        run: |
+          shopt -s nullglob
+          ipas=(out/pluma-ios-*.ipa)
+          [ ${#ipas[@]} = 1 ] || { echo "::error::expected one IPA in out/, found ${#ipas[@]}"; exit 1; }
+          ci/install-upload.sh "${ipas[0]}"
       - name: Encrypt the IPA
         env:
           PLUMA_AGE_RECIPIENT: ${{ vars.PLUMA_AGE_RECIPIENT }}

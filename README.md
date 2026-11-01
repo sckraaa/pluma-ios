@@ -88,6 +88,7 @@ Set these in the repository's *Settings → Secrets and variables → Actions �
 | `PLUMA_TEAM_ID` | The Apple Team ID (10 characters, *Membership details* in the Apple Developer account). Setting it turns on signed builds. |
 | `PLUMA_AGE_RECIPIENT` | The owner's [age](https://age-encryption.org) public key (`age1...`); see [Signing](#signing). |
 | `PLUMA_ASC_APP_ID` | Optional. The Apple ID of the app record in App Store Connect (digits), for uploads to [TestFlight](#testflight). |
+| `PLUMA_INSTALL_URL` | Optional. The site whose install service re-signs the ad hoc IPA for iPhones that install Pluma from it; `https://pluma.chat` by default. See [Installing from the site](#installing-from-the-site). |
 | `PLUMA_BAZEL_CACHE_GB` | Optional. The size the Bazel disk cache is trimmed to before it is saved, in GB; 12 by default (a full simulator cache is about 9 GB, about 3 GB compressed in the Actions cache). |
 
 None of these values is a secret: every IPA carries them. The server variables have the same names as in `pluma-android`.
@@ -182,9 +183,13 @@ for f in pluma-ios-*.ipa.age; do age -d -i pluma-ipa.agekey -o "${f%.age}" "$f";
 shasum -a 256 -c pluma-ios-*.ipa.sha256
 ```
 
-Install it with Apple Configurator or Finder on a registered device. Publishing to the server for installation over the air is a later step.
+Install it with Apple Configurator or Finder on a registered device, or from the site (below).
 
 A signing failure after a good preflight (say, a keychain problem) is fixed with *Re-run failed jobs*. The compiled code is in the cache, so the build mostly repeats the signing.
+
+### Installing from the site
+
+The signed ad hoc IPA also goes to the server's install service (`ci/install-upload.sh`, before the IPA is encrypted): with it go the version, the build number and, for the app and each extension, the bundle ID and the entitlements it was signed with. The service registers every iPhone that asks on the site, issues the ad hoc profiles anew for the team's devices and re-signs this IPA with them, so a new iPhone needs no new build (server repository: `docs/ops/ios-install.md`). It authenticates with the secret `IOSINSTALL_UPLOAD_TOKEN` of the environment `release`, which the server's `put-secrets.sh` sets; without it the step passes and says the service is not set up.
 
 ### TestFlight
 
