@@ -82,6 +82,7 @@ Set these in the repository's *Settings → Secrets and variables → Actions �
 | `PLUMA_RSA_PUBLIC_KEY` | The server key as a PKCS#1 PEM: `openssl rsa -in server_pkcs1.key -RSAPublicKey_out` |
 | `PLUMA_TEAM_ID` | The Apple Team ID (10 characters, *Membership details* in the Apple Developer account). Setting it turns on signed builds. |
 | `PLUMA_AGE_RECIPIENT` | The owner's [age](https://age-encryption.org) public key (`age1...`); see [Signing](#signing). |
+| `PLUMA_ASC_APP_ID` | Optional. The Apple ID of the app record in App Store Connect (digits), for uploads to [TestFlight](#testflight). |
 | `PLUMA_BAZEL_CACHE_GB` | Optional. The size the Bazel disk cache is trimmed to before it is saved, in GB; 12 by default (a full simulator cache is about 9 GB, about 3 GB compressed in the Actions cache). |
 
 None of these values is a secret: every IPA carries them. The server variables have the same names as in `pluma-android`.
@@ -180,18 +181,72 @@ Install it with Apple Configurator or Finder on a registered device. Publishing 
 
 A signing failure after a good preflight (say, a keychain problem) is fixed with *Re-run failed jobs*. The compiled code is in the cache, so the build mostly repeats the signing.
 
+### TestFlight
+
+Next to the ad hoc IPA, a manual run of `main` with *testflight* ticked builds the same app signed with App Store profiles and uploads it to App Store Connect, where it becomes a TestFlight build. Testers install it with the TestFlight app on any iPhone; it needs no registered devices. The certificate is the same Apple Distribution certificate; only the profiles differ, so the build reads the compiled code from the ad hoc IPA's Bazel cache and saves no cache of its own. The build number is the run number, which App Store Connect needs to grow from build to build.
+
+The `preflight-testflight` job checks first, in the `release` environment, and fails within a minute when something is wrong. It requires the following:
+- the certificate as for the ad hoc IPA;
+- there is one App Store profile for each of the seven App IDs, of the team, valid for at least 14 more days, holding that certificate and listing no devices;
+- every profile has the App Group, and the app's profile has push (`aps-environment` = `production`);
+- the API key, its issuer and `PLUMA_ASC_APP_ID` are set, and the key is a private key.
+
+The `build-testflight` job checks again on its runner, builds, uploads with `xcrun altool --upload-package` and an App Store Connect API key (`ci/testflight.sh`), and keeps the IPA encrypted as the `pluma-ios-appstore` artifact of the run for 30 days, also when the upload fails. The app declares no non-exempt encryption (`ITSAppUsesNonExemptEncryption` in upstream's `Telegram/BUILD`), so a build does not wait for the export compliance question.
+
+Set it up once, after [the ad hoc IPA](#in-the-apple-developer-account):
+
+1. **App record.** In App Store Connect, *Apps → + → New App*: platform iOS, the name, the primary language, the bundle ID `chat.pluma.app` and any SKU, such as `pluma-ios`. *App Information → Apple ID* of the new app is the variable `PLUMA_ASC_APP_ID`.
+2. **Profiles.** In *Certificates, Identifiers & Profiles → Profiles*: one profile of the App Store distribution type for each App ID of the table above, each with the Apple Distribution certificate. They list no devices and need no regenerating when a device is added.
+3. **API key.** In App Store Connect, *Users and Access → Integrations → App Store Connect API → Team Keys*: generate a key with the *App Manager* role. The page shows its key ID and the issuer ID; the `.p8` file downloads only once.
+4. **Secrets and the variable.**
+   ```sh
+   asprofile() { base64 -i "$2" | gh secret set "PLUMA_APPSTORE_PROFILE_$1" -R sckraaa/pluma-ios --env release; }
+   asprofile MAIN Pluma_App_Store.mobileprovision            # the file names are whatever you saved
+   asprofile SHARE Pluma_Share_App_Store.mobileprovision
+   asprofile NOTIFICATION_SERVICE Pluma_NotificationService_App_Store.mobileprovision
+   asprofile NOTIFICATION_CONTENT Pluma_NotificationContent_App_Store.mobileprovision
+   asprofile WIDGET Pluma_Widget_App_Store.mobileprovision
+   asprofile SIRI_INTENTS Pluma_SiriIntents_App_Store.mobileprovision
+   asprofile BROADCAST_UPLOAD Pluma_BroadcastUpload_App_Store.mobileprovision
+   gh secret set PLUMA_ASC_KEY_ID -R sckraaa/pluma-ios --env release          # asks for the value
+   gh secret set PLUMA_ASC_ISSUER_ID -R sckraaa/pluma-ios --env release
+   base64 -i AuthKey_<key ID>.p8 | gh secret set PLUMA_ASC_KEY_P8_B64 -R sckraaa/pluma-ios --env release
+   gh variable set PLUMA_ASC_APP_ID -R sckraaa/pluma-ios --body <Apple ID of the app>
+   ```
+   Keep the `.p8` off-line afterwards, or revoke the key and make a new one when it is lost.
+
+To release, run *Actions → ios → Run workflow* on `main` with *testflight* ticked (untick *ipa* when the ad hoc IPA is not wanted), or:
+
+```sh
+gh workflow run ios -R sckraaa/pluma-ios --ref main -f testflight=true -f ipa=false
+```
+
+The run waits for your approval of `preflight-testflight` and `build-testflight`. The build appears in App Store Connect under *TestFlight* once Apple has processed it:
+- **internal testers**, up to 100 members of the team in App Store Connect, get it without review;
+- **external testers**, invited by email or through a public link, get it after Beta App Review; the first build needs a beta app description and review information, and builds added to an external group go to review automatically.
+
+To fetch the uploaded IPA:
+
+```sh
+gh run download <run id> -R sckraaa/pluma-ios -n pluma-ios-appstore
+for f in pluma-ios-*.ipa.age; do age -d -i pluma-ipa.agekey -o "${f%.age}" "$f"; done
+shasum -a 256 -c pluma-ios-*.ipa.sha256
+```
+
+An upload that fails after a good build (say, a network error) is repeated with *Re-run failed jobs*: the run number stays, and App Store Connect accepts it as long as the first attempt did not get through.
+
 ## When it builds
 
-| Trigger | Simulator app | Signed IPA |
-|---|---|---|
-| Push to `main` | yes, artifact `simulator` (7 days) | yes, if `PLUMA_TEAM_ID` is set |
-| Manual run (*Actions → ios → Run workflow*) | yes | yes, if `PLUMA_TEAM_ID` is set and *ipa* is ticked |
-| Pull request | yes, no artifact | no |
-| Weekly canary | the pinned upstream on a fresh runner image | no |
+| Trigger | Simulator app | Signed IPA | TestFlight |
+|---|---|---|---|
+| Push to `main` | yes, artifact `simulator` (7 days) | yes, if `PLUMA_TEAM_ID` is set | no |
+| Manual run (*Actions → ios → Run workflow*) | yes | yes, if `PLUMA_TEAM_ID` is set and *ipa* is ticked | on `main`, if `PLUMA_TEAM_ID` is set and *testflight* is ticked |
+| Pull request | yes, no artifact | no | no |
+| Weekly canary | the pinned upstream on a fresh runner image | no | no |
 
 The jobs run on GitHub's `macos-26` runners with Xcode 26.2 selected explicitly, the version `versions.json` asks for. The setup removes the image's other Xcode versions when the disk is short, and downloads the Metal toolchain when it is missing.
 
-The Bazel disk cache and Bazel's downloads are kept in the GitHub Actions cache, one entry for the simulator app and one for the IPA:
+The Bazel disk cache and Bazel's downloads are kept in the GitHub Actions cache, one entry for the simulator app and one for the IPA (the TestFlight build reads the IPA's and saves none):
 - the entry is saved even when a build fails, so a re-run continues from where it stopped;
 - before saving, the disk cache is trimmed to 12 GB (`PLUMA_BAZEL_CACHE_GB`), least recently used entries first;
 - older entries of each kind are deleted after the run, so the two kinds fit in the repository's 10 GB together.

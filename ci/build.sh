@@ -9,7 +9,12 @@
 #   build.sh ipa  the ad hoc IPA (release_arm64), signed inside the build with
 #                 the profiles in $PLUMA_CODESIGNING_DIR/profiles and the
 #                 identity in the keychain (ci/keychain.sh):
-#                 out/pluma-ios-<version>-<build>.ipa.
+#                 out/pluma-ios-<version>-<build>.ipa;
+#   build.sh appstore  the same build signed with the App Store profiles in
+#                 $PLUMA_CODESIGNING_DIR/profiles, for TestFlight
+#                 (ci/testflight.sh): out/pluma-ios-<version>-<build>-appstore.ipa.
+#                 Only the profiles differ, so it shares the compiled code,
+#                 and the Bazel cache, with the ad hoc IPA.
 # Each file comes with its SHA-256.
 #
 # The Bazel disk and repository caches live in $PLUMA_BAZEL_DIR (default
@@ -19,7 +24,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 . ./upstream.env
 . ./config/app.env
-target=${1:?usage: build.sh sim|ipa}
+target=${1:?usage: build.sh sim|ipa|appstore}
 root=$PWD
 dir=$(cd "${UPSTREAM_DIR:-upstream}" && pwd)
 cache=${PLUMA_BAZEL_DIR:-$HOME/pluma-bazel}
@@ -50,13 +55,13 @@ sim)
 	configuration=$PLUMA_SIM_CONFIGURATION
 	signing=(--xcodeManagedCodesigning)
 	;;
-ipa)
+ipa | appstore)
 	configuration=release_arm64
 	: "${PLUMA_CODESIGNING_DIR:?PLUMA_CODESIGNING_DIR is not set (ci/preflight_sign.py --out-dir)}"
 	signing=(--codesigningInformationPath="$PLUMA_CODESIGNING_DIR")
 	;;
 *)
-	echo "usage: build.sh sim|ipa" >&2
+	echo "usage: build.sh sim|ipa|appstore" >&2
 	exit 2
 	;;
 esac
@@ -117,7 +122,7 @@ sim)
 	ditto -c -k --keepParent "$work/Pluma.app" "out/$name.zip"
 	file=$name.zip
 	;;
-ipa)
+ipa | appstore)
 	# Every bundle carries its profile and a valid signature.
 	for bundle in "$app" "$app"/PlugIns/*.appex; do
 		if [ ! -f "$bundle/embedded.mobileprovision" ]; then
@@ -128,6 +133,9 @@ ipa)
 	codesign --verify --deep --strict "$app"
 	codesign -dvv "$app" 2>&1 | grep -E '^(Authority|TeamIdentifier)=' | head -n 2
 	name="pluma-ios-$version-$build_number"
+	if [ "$target" = appstore ]; then
+		name="$name-appstore"
+	fi
 	cp "$ipa" "out/$name.ipa"
 	file=$name.ipa
 	;;

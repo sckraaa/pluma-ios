@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
-"""Checks the signing material of the ad hoc IPA before anything is built.
+"""Checks the signing material of a signed IPA before anything is built.
 
-A profile that has expired, belongs to another team or App ID, lacks the
-App Group, push or a device, or does not hold the distribution certificate
-stops the release here, seconds into the run, instead of at the end of an
-hour of compilation. The certificate must be a distribution one of the team,
-valid, and the key in the .p12 must be its key.
+A profile that has expired, belongs to another team or App ID, is of the
+wrong kind, lacks the App Group, push or a device, or does not hold the
+distribution certificate stops the release here, seconds into the run,
+instead of at the end of an hour of compilation. The certificate must be a
+distribution one of the team, valid, and the key in the .p12 must be its key.
+
+--kind adhoc (the default) checks the ad hoc IPA, --kind appstore the one
+for TestFlight, which also needs the App Store Connect API key it is
+uploaded with.
 
 The material comes from the environment (the secrets of the "release"
 environment, README):
   PLUMA_DIST_P12_B64        the distribution certificate with its key (.p12),
-                            base64;
+                            base64; the same for both kinds;
   PLUMA_DIST_P12_PASSWORD   the password of the .p12;
   PLUMA_PROFILE_<TARGET>    the ad hoc profile of each target, base64; TARGET
-                            is MAIN, SHARE, ... (TARGETS of ci/patch.py).
+                            is MAIN, SHARE, ... (TARGETS of ci/patch.py);
+  PLUMA_APPSTORE_PROFILE_<TARGET>
+                            the App Store profile of each target, base64;
+  PLUMA_ASC_KEY_ID, PLUMA_ASC_ISSUER_ID, PLUMA_ASC_KEY_P8_B64
+                            appstore: the App Store Connect API key (its
+                            .p8 base64), and PLUMA_ASC_APP_ID, the Apple ID
+                            of the app record (ci/testflight.sh).
 With --out-dir it is written where Make.py and ci/keychain.sh read it:
 <dir>/profiles/<name>.mobileprovision and <dir>/identity.p12.
 
@@ -38,6 +48,17 @@ import patch  # noqa: E402
 P12_B64 = "PLUMA_DIST_P12_B64"
 P12_PASSWORD = "PLUMA_DIST_P12_PASSWORD"
 PROFILE_PREFIX = "PLUMA_PROFILE_"
+
+ASC_KEY_ID = "PLUMA_ASC_KEY_ID"
+ASC_ISSUER_ID = "PLUMA_ASC_ISSUER_ID"
+ASC_KEY_P8_B64 = "PLUMA_ASC_KEY_P8_B64"
+ASC_APP_ID = "PLUMA_ASC_APP_ID"
+
+# The secret prefix of each kind of profile, and its name in messages.
+KINDS = {
+    "adhoc": (PROFILE_PREFIX, "ad hoc"),
+    "appstore": ("PLUMA_APPSTORE_PROFILE_", "App Store"),
+}
 
 DISTRIBUTION_NAMES = ("Apple Distribution: ", "iPhone Distribution: ")
 
@@ -156,8 +177,9 @@ def decode_profile(der):
         raise CheckError("not a provisioning profile")
 
 
-def check(profiles, p12, password, team, bundle, now, min_days):
+def check(profiles, p12, password, team, bundle, now, min_days, kind="adhoc"):
     """Checks the material; returns (report lines, errors)."""
+    prefix, label = KINDS[kind]
     report, errors = [], []
     horizon = now + datetime.timedelta(days=min_days)
 
@@ -179,7 +201,7 @@ def check(profiles, p12, password, team, bundle, now, min_days):
 
     devices = {}
     for suffix, name, secret in patch.TARGETS:
-        var = PROFILE_PREFIX + secret
+        var = prefix + secret
         app_id = f"{team}.{bundle}{suffix}"
         try:
             p = decode_profile(profiles[secret])
@@ -200,26 +222,32 @@ def check(profiles, p12, password, team, bundle, now, min_days):
         elif expires <= horizon:
             problems.append(f"expires on {expires:%Y-%m-%d}, in less than {min_days} days; renew it")
         udids = p.get("ProvisionedDevices") or []
-        if not udids or p.get("ProvisionsAllDevices") or ent.get("get-task-allow") is not False:
-            problems.append("is not an ad hoc profile (devices listed, no debugging)")
+        debuggable = ent.get("get-task-allow") is not False
+        if kind == "adhoc":
+            if not udids or p.get("ProvisionsAllDevices") or debuggable:
+                problems.append("is not an ad hoc profile (devices listed, no debugging)")
+        elif udids or p.get("ProvisionsAllDevices") or debuggable:
+            # Devices make it ad hoc or development, all devices enterprise.
+            problems.append("is not an App Store profile (no devices, no debugging)")
         if "iOS" not in p.get("Platform", []):
             problems.append(f"is for {p.get('Platform')}, not iOS")
         group = f"group.{bundle}"
         if group not in ent.get("com.apple.security.application-groups", []):
             problems.append(f"lacks the App Group {group}")
         if suffix == "" and ent.get("aps-environment") != "production":
-            problems.append(f"has push {ent.get('aps-environment')!r}, an ad hoc build needs 'production'")
+            problems.append(f"has push {ent.get('aps-environment')!r}, an {label} build needs 'production'")
         if cert and cert.der not in p.get("DeveloperCertificates", []):
             problems.append(f"does not hold the certificate {cert.name!r}")
         for problem in problems:
             errors.append(f"{var}: the profile {p.get('Name')!r} {problem}")
         devices[name] = set(udids)
         until = f"{expires:%Y-%m-%d}" if isinstance(expires, datetime.datetime) else "?"
+        scope = f"{len(udids)} devices" if kind == "adhoc" else label
         report.append(f"profile {name}: {ent.get('application-identifier')}, {p.get('Name')!r}, "
-                      f"{len(udids)} devices, until {until}")
+                      f"{scope}, until {until}")
 
     # A device missing from any profile cannot install the app at all.
-    if devices and len({frozenset(d) for d in devices.values()}) > 1:
+    if kind == "adhoc" and devices and len({frozenset(d) for d in devices.values()}) > 1:
         main = devices.get("Telegram", set())
         for name, d in devices.items():
             if d != main:
@@ -240,11 +268,35 @@ def read_secret(env, var, errors):
         return None
 
 
+def check_app_store_connect(env, key):
+    """Checks the App Store Connect API key and the app record the IPA is
+    uploaded to (ci/testflight.sh); returns errors. key is the decoded .p8."""
+    errors = []
+    if not re.fullmatch(r"[A-Z0-9]{10}", env.get(ASC_KEY_ID, "")):
+        errors.append(f"{ASC_KEY_ID} is not set or not an API key ID (10 characters)")
+    if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                        env.get(ASC_ISSUER_ID, "").lower()):
+        errors.append(f"{ASC_ISSUER_ID} is not set or not an issuer ID (a UUID)")
+    if not re.fullmatch(r"[0-9]+", env.get(ASC_APP_ID, "")):
+        errors.append(f"{ASC_APP_ID} is not set or not the Apple ID of the app (digits, App Information)")
+    if key is not None:
+        if b"-----BEGIN PRIVATE KEY-----" not in key:
+            errors.append(f"{ASC_KEY_P8_B64}: not the .p8 file of an API key")
+        else:
+            try:
+                openssl(["pkey", "-noout"], key)
+            except CheckError:
+                errors.append(f"{ASC_KEY_P8_B64}: the private key does not parse")
+    return errors
+
+
 def main(argv=None, env=None):
     env = os.environ if env is None else env
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--app", required=True, help="config/app.env")
     ap.add_argument("--team-id", required=True)
+    ap.add_argument("--kind", choices=sorted(KINDS), default="adhoc",
+                    help="adhoc: the ad hoc IPA; appstore: the IPA for TestFlight")
     ap.add_argument("--out-dir", help="where to write the profiles and the .p12 for the build")
     ap.add_argument("--min-days", type=int, default=14, help="the certificate and profiles must stay valid this long")
     a = ap.parse_args(argv)
@@ -257,11 +309,16 @@ def main(argv=None, env=None):
     password = env.get(P12_PASSWORD)
     if password is None:
         errors.append(f"{P12_PASSWORD} is not set")
-    profiles = {secret: read_secret(env, PROFILE_PREFIX + secret, errors) for _, _, secret in patch.TARGETS}
+    prefix, _ = KINDS[a.kind]
+    profiles = {secret: read_secret(env, prefix + secret, errors) for _, _, secret in patch.TARGETS}
+    if a.kind == "appstore":
+        key = read_secret(env, ASC_KEY_P8_B64, errors)
+        errors += check_app_store_connect(env, key)
+        del key
     report = []
     if not errors:
         now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-        report, errors = check(profiles, p12, password, a.team_id, bundle, now, a.min_days)
+        report, errors = check(profiles, p12, password, a.team_id, bundle, now, a.min_days, a.kind)
     for line in report:
         print(f"preflight: {line}")
     if errors:
@@ -278,7 +335,7 @@ def main(argv=None, env=None):
         identity = out / "identity.p12"
         identity.touch(mode=0o600)
         identity.write_bytes(p12)
-    print(f"preflight: the signing material of {bundle} (team {a.team_id}) is good")
+    print(f"preflight: the {KINDS[a.kind][1]} signing material of {bundle} (team {a.team_id}) is good")
     return 0
 
 

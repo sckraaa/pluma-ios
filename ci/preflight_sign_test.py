@@ -68,7 +68,9 @@ def profile_plist(suffix, cert_der, **over):
     return {k: v for k, v in p.items() if v is not None}
 
 
-class PreflightTest(unittest.TestCase):
+class SigningMaterialTest(unittest.TestCase):
+    """The identity and the good ad hoc profiles the tests start from."""
+
     @classmethod
     def setUpClass(cls):
         cls.dir = tempfile.TemporaryDirectory()
@@ -85,6 +87,11 @@ class PreflightTest(unittest.TestCase):
         return run("smime", "-sign", "-signer", str(cls.cert), "-inkey", str(cls.key), "-nodetach", "-binary",
                    "-outform", "der", data=plistlib.dumps(plist))
 
+    def assert_error(self, errors, *parts):
+        self.assertTrue(any(all(p in e for p in parts) for e in errors), f"no error with {parts} in {errors}")
+
+
+class PreflightTest(SigningMaterialTest):
     def check(self, profiles=None, p12=None, password=PASSWORD):
         return preflight_sign.check(profiles or self.good, p12 or self.p12, password, TEAM, BUNDLE, NOW, 14)
 
@@ -92,9 +99,6 @@ class PreflightTest(unittest.TestCase):
         profiles = dict(self.good)
         profiles[secret] = self.sign(plist)
         return profiles
-
-    def assert_error(self, errors, *parts):
-        self.assertTrue(any(all(p in e for p in parts) for e in errors), f"no error with {parts} in {errors}")
 
     def test_good(self):
         report, errors = self.check()
@@ -169,6 +173,133 @@ class PreflightTest(unittest.TestCase):
         del missing[preflight_sign.PROFILE_PREFIX + "WIDGET"]
         missing[preflight_sign.P12_B64] = "not base64!"
         self.assertEqual(preflight_sign.main(args, env=missing), 1)
+
+
+def app_store_plist(suffix, cert_der, **over):
+    """An App Store profile: no devices, and the beta entitlement App Store
+    Connect adds for TestFlight."""
+    over = dict(over)
+    over["entitlements"] = {"beta-reports-active": True, **over.get("entitlements", {})}
+    over.setdefault("Name", f"Pluma{suffix} App Store")
+    over.setdefault("ProvisionedDevices", None)
+    p = profile_plist(suffix, cert_der, **over)
+    p["Entitlements"] = {k: v for k, v in p["Entitlements"].items() if v is not None}
+    return p
+
+
+ASC_KEY_ID = "2X9R4HXF34"
+ASC_ISSUER_ID = "57246542-96fe-1a63-e053-0824d011072a"
+
+
+class AppStorePreflightTest(SigningMaterialTest):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        d = pathlib.Path(cls.dir.name)
+        cls.app_store = {secret: cls.sign(app_store_plist(suffix, cls.cert_der)) for suffix, _, secret in patch.TARGETS}
+        run("genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out", str(d / "asc.p8"))
+        cls.p8 = (d / "asc.p8").read_bytes()
+
+    def check_app_store(self, profiles=None):
+        return preflight_sign.check(profiles or self.app_store, self.p12, PASSWORD, TEAM, BUNDLE, NOW, 14, "appstore")
+
+    def with_app_store_profile(self, secret, plist):
+        profiles = dict(self.app_store)
+        profiles[secret] = self.sign(plist)
+        return profiles
+
+    def env(self):
+        env = {preflight_sign.P12_B64: base64.b64encode(self.p12).decode(), preflight_sign.P12_PASSWORD: PASSWORD,
+               preflight_sign.ASC_KEY_ID: ASC_KEY_ID, preflight_sign.ASC_ISSUER_ID: ASC_ISSUER_ID,
+               preflight_sign.ASC_KEY_P8_B64: base64.b64encode(self.p8).decode(),
+               preflight_sign.ASC_APP_ID: "6744123456"}
+        for _, _, secret in patch.TARGETS:
+            env["PLUMA_APPSTORE_PROFILE_" + secret] = base64.encodebytes(self.app_store[secret]).decode()
+        return env
+
+    def test_good_app_store(self):
+        report, errors = self.check_app_store()
+        self.assertEqual(errors, [])
+        self.assertEqual(len(report), 1 + len(patch.TARGETS))
+        self.assertIn(f"profile Intents: {TEAM}.{BUNDLE}.SiriIntents, 'Pluma.SiriIntents App Store', App Store",
+                      report[6])
+
+    def test_app_store_profile_problems(self):
+        cases = (
+            ("MAIN", app_store_plist("", self.cert_der, ProvisionedDevices=list(DEVICES)),
+             ("PLUMA_APPSTORE_PROFILE_MAIN", "not an App Store profile")),
+            ("SHARE", app_store_plist(".Share", self.cert_der, ProvisionsAllDevices=True),
+             ("PLUMA_APPSTORE_PROFILE_SHARE", "not an App Store profile")),
+            ("WIDGET", app_store_plist(".Widget", self.cert_der, entitlements={"get-task-allow": True}),
+             ("PLUMA_APPSTORE_PROFILE_WIDGET", "not an App Store profile")),
+            ("MAIN", app_store_plist("", self.cert_der, entitlements={"aps-environment": "development"}),
+             ("PLUMA_APPSTORE_PROFILE_MAIN", "an App Store build needs 'production'")),
+            ("MAIN", app_store_plist("", self.cert_der, entitlements={"aps-environment": None}),
+             ("PLUMA_APPSTORE_PROFILE_MAIN", "has push None")),
+            ("BROADCAST_UPLOAD", app_store_plist(".BroadcastUpload", self.cert_der,
+                                                 entitlements={"com.apple.security.application-groups": []}),
+             ("PLUMA_APPSTORE_PROFILE_BROADCAST_UPLOAD", f"lacks the App Group group.{BUNDLE}")),
+            ("NOTIFICATION_SERVICE", app_store_plist(".NotificationService", self.cert_der,
+                                                     ExpirationDate=NOW + datetime.timedelta(days=13)),
+             ("PLUMA_APPSTORE_PROFILE_NOTIFICATION_SERVICE", "in less than 14 days")),
+            ("NOTIFICATION_CONTENT", app_store_plist(".NotificationContent", self.cert_der,
+                                                     TeamIdentifier=["ZYXWV98765"]),
+             ("PLUMA_APPSTORE_PROFILE_NOTIFICATION_CONTENT", "of team")),
+            ("SIRI_INTENTS", app_store_plist(".SiriIntents", b"another certificate"),
+             ("PLUMA_APPSTORE_PROFILE_SIRI_INTENTS", "does not hold the certificate")),
+            ("SHARE", app_store_plist(".Widget", self.cert_der), (f"is for {TEAM}.{BUNDLE}.Widget", ".Share")),
+        )
+        for secret, plist, parts in cases:
+            with self.subTest(secret=secret, parts=parts):
+                _, errors = self.check_app_store(self.with_app_store_profile(secret, plist))
+                self.assert_error(errors, *parts)
+
+    def test_an_ad_hoc_profile_is_not_an_app_store_one(self):
+        _, errors = self.check_app_store(self.good)
+        self.assertEqual(len(errors), len(patch.TARGETS))
+        self.assert_error(errors, "PLUMA_APPSTORE_PROFILE_MAIN", "not an App Store profile")
+        _, errors = preflight_sign.check(self.app_store, self.p12, PASSWORD, TEAM, BUNDLE, NOW, 14)
+        self.assert_error(errors, "PLUMA_PROFILE_MAIN", "not an ad hoc profile")
+
+    def test_main_reads_the_app_store_environment(self):
+        args = ["--app", str(ROOT / "config/app.env"), "--team-id", TEAM, "--kind", "appstore", "--min-days", "0"]
+        with tempfile.TemporaryDirectory() as out:
+            self.assertEqual(preflight_sign.main(args + ["--out-dir", out], env=self.env()), 0)
+            for _, name, secret in patch.TARGETS:
+                self.assertEqual(pathlib.Path(out, "profiles", f"{name}.mobileprovision").read_bytes(),
+                                 self.app_store[secret])
+        # The ad hoc secrets do not stand in for the App Store ones.
+        env = self.env()
+        for _, _, secret in patch.TARGETS:
+            env[preflight_sign.PROFILE_PREFIX + secret] = env.pop("PLUMA_APPSTORE_PROFILE_" + secret)
+        self.assertEqual(preflight_sign.main(args, env=env), 1)
+
+    def test_app_store_connect(self):
+        self.assertEqual(preflight_sign.check_app_store_connect(self.env(), self.p8), [])
+        cases = (
+            (preflight_sign.ASC_KEY_ID, "", "not an API key ID"),
+            (preflight_sign.ASC_KEY_ID, "2x9r4hxf34", "not an API key ID"),
+            (preflight_sign.ASC_ISSUER_ID, "not-a-uuid", "not an issuer ID"),
+            (preflight_sign.ASC_APP_ID, "", "not the Apple ID of the app"),
+            (preflight_sign.ASC_APP_ID, "chat.pluma.app", "not the Apple ID of the app"),
+        )
+        for var, value, part in cases:
+            with self.subTest(var=var, value=value):
+                env = dict(self.env(), **{var: value})
+                self.assert_error(preflight_sign.check_app_store_connect(env, self.p8), var, part)
+        self.assert_error(preflight_sign.check_app_store_connect(self.env(), self.p12),
+                          preflight_sign.ASC_KEY_P8_B64, "not the .p8 file")
+        broken = b"-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n"
+        self.assert_error(preflight_sign.check_app_store_connect(self.env(), broken),
+                          preflight_sign.ASC_KEY_P8_B64, "does not parse")
+
+    def test_main_needs_the_api_key(self):
+        args = ["--app", str(ROOT / "config/app.env"), "--team-id", TEAM, "--kind", "appstore", "--min-days", "0"]
+        for var in (preflight_sign.ASC_KEY_P8_B64, preflight_sign.ASC_KEY_ID, preflight_sign.ASC_APP_ID):
+            with self.subTest(var=var):
+                env = self.env()
+                del env[var]
+                self.assertEqual(preflight_sign.main(args, env=env), 1)
 
 
 if __name__ == "__main__":
