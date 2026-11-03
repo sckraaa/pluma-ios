@@ -24,6 +24,19 @@ The repository holds no copy of the app's code. CI fetches the upstream release 
   - its close button dismisses it as before (`help.dismissSuggestion` with `BIRTHDAY_CONTACTS_TODAY`), but without the toast that sends the user to Settings to gift Premium: with Premium purchases blocked (`premium_purchase_blocked`) and no Stars, Settings offer no gifts.
   - the birthday row of the contact's profile, two taps away, offers a gift (by a tap and by its gift icon) only while Premium can be bought, as the chat already does.
 - **Read date.** The context menu of an outgoing message in a private chat shows when it was read, as the Android app does. Telegram's app shows it to a user without Premium only where Premium is sold, so with `premium_purchase_blocked` the row was gone. Where the peer hides it, the row says "Read" without the badge that opens Premium's privacy screen.
+- **Video quality.** The app re-encodes a video before sending at a fixed bitrate per quality. The user chooses the quality as in Telegram's app, and the default is still the server's `video_upload_maxbitrate` (with Pluma's server, 720p on mobile data and 1080p on Wi-Fi). Every quality is sent at a higher bitrate than Telegram's, with better sound, in both preset tables (`TGMediaVideoConverter.m`, `MediaEditorValues.swift`):
+
+  | quality | Telegram: video, sound | Pluma: video, sound |
+  |---|---|---|
+  | 240p | 0.4 Mbit/s, 32 kbit/s mono | 0.8 Mbit/s, 64 kbit/s stereo |
+  | 360p | 0.7 Mbit/s, 32 kbit/s mono | 1.5 Mbit/s, 64 kbit/s stereo |
+  | 480p | 1.6 Mbit/s, 64 kbit/s stereo | 2.5 Mbit/s, 128 kbit/s stereo |
+  | 720p | 3.0 Mbit/s, 64 kbit/s stereo | 5.0 Mbit/s, 128 kbit/s stereo |
+  | 1080p | 6.6 Mbit/s, 64 kbit/s stereo | 12 Mbit/s, 128 kbit/s stereo |
+  | a video sent as a GIF | 0.9 Mbit/s | 1.8 Mbit/s |
+  | round video | 1.0 Mbit/s, 64 kbit/s | 2.0 Mbit/s, 96 kbit/s |
+
+  A round video is recorded at 2 Mbit/s instead of 1 (`CameraOutput.swift`); a GIF file becomes an mp4 at 1 Mbit/s instead of 0.5 (`TGGifConverter.m`). No video is scaled up: an edited video with no quality chosen takes the default quality only up to its own size, as an unedited one already does. Upstream fits such a video into the default's size, so a trimmed 720p video with a 1080p default went out as 1080p.
 - **App Store requirements.** What App Store Connect warns about on upload (its notes on build 20):
   - the Info.plist names the purpose of background location (`NSLocationAlwaysAndWhenInUseUsageDescription`, ITMS-90683), in English the text every language's `InfoPlist.strings` already translates;
   - no Apple font in the bundle (ITMS-91198, refused from 1 October 2027): SF Camera, the face of the camera's controls, is gone, and the camera uses the system font of the same weight, as it already does when the font cannot be loaded;

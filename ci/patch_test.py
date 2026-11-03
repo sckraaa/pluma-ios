@@ -938,6 +938,19 @@ DAMAGE = (
      "            if premiumConfiguration.isPremiumDisabled || true {\n                return false"),
     (patch.CONTEXT_MENUS, "self.item.action != nil && stats.peers.isEmpty\n", "self.item.action != nil && !stats.peers.isEmpty\n"),
     (patch.CONTEXT_MENUS, "                    showReadBadge = true\n", "                    showReadBadge = false\n"),
+    (patch.VIDEO_PRESETS_LEGACY, "        case TGMediaVideoConversionPresetCompressedVeryHigh:\n            return 6600;\n",
+     "        case TGMediaVideoConversionPresetCompressedVeryHigh:\n            return 6000;\n"),
+    (patch.VIDEO_PRESETS_LEGACY, "        case TGMediaVideoConversionPresetCompressedLow:\n            return 32;\n",
+     "        case TGMediaVideoConversionPresetCompressedLow:\n            return 48;\n"),
+    (patch.VIDEO_PRESETS_LEGACY, "        default:\n            return 900;\n", "        default:\n            return 1000;\n"),
+    (patch.VIDEO_PRESETS, "        case .compressedHigh:\n            return 3000\n", "        case .compressedHigh:\n            return 3500\n"),
+    (patch.VIDEO_PRESETS, "        case .compressedMedium, .compressedHigh, .compressedVeryHigh, .videoMessage:\n            return 64\n",
+     "        case .compressedMedium, .compressedHigh, .compressedVeryHigh, .videoMessage:\n            return 96\n"),
+    (patch.VIDEO_PRESETS, "        case .compressedVeryLow, .compressedLow:\n            return 1\n",
+     "        case .compressedVeryLow:\n            return 1\n"),
+    (patch.ROUND_VIDEO_RECORDER, "AVVideoAverageBitRateKey: 1000 * 1000,", "AVVideoAverageBitRateKey: 1500 * 1000,"),
+    (patch.GIF_CONVERTER, "AVVideoAverageBitRateKey: @(500000),", "AVVideoAverageBitRateKey: @(750000),"),
+    (patch.VIDEO_FETCH, "            qualityPreset = defaultPreset\n", "            qualityPreset = .compressedMedium\n"),
     (patch.SERIALIZATION, "        return 228\n", "        return 229\n"),
     (patch.VERSIONS, '"app": "12.9.2"', '"app": "12.9.3"'),
     (patch.VERSIONS, '"xcode": "26.2"', '"xcode": "26.3"'),
@@ -1353,6 +1366,29 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn("let canGiftOnBirthday = isBirthdayToday && !PremiumConfiguration.with(", profile)
         self.assertIn("} else if canGiftOnBirthday && cachedData.disallowedGifts != TelegramDisallowedGifts.All {", profile)
         self.assertIn("icon: canGiftOnBirthday ? .premiumGift : nil, action: birthdayAction,", profile)
+        # Pluma's video bitrates in both preset tables, the round video
+        # recorder and the GIF converter; an edited video's default preset
+        # capped by the source's size.
+        legacy = tree.read(patch.VIDEO_PRESETS_LEGACY)
+        self.assertIn("        case TGMediaVideoConversionPresetCompressedVeryHigh:\n"
+                      "            return 12000; // pluma: 6600 in Telegram (task 052)\n", legacy)
+        self.assertIn("        case TGMediaVideoConversionPresetCompressedHigh:\n"
+                      "            return 128; // pluma: 64 in Telegram (task 052)\n", legacy)
+        self.assertIn("        case TGMediaVideoConversionPresetCompressedVeryLow:\n"
+                      "            return 2; // pluma: 1 in Telegram (task 052)\n", legacy)
+        self.assertIn("        case TGMediaVideoConversionPresetAnimation:\n            return 1800;", legacy)
+        for value in ("return 400;", "return 700;", "return 1600;", "return 3000;", "return 6600;"):
+            self.assertNotIn(value + "\n", legacy)
+        presets = tree.read(patch.VIDEO_PRESETS)
+        self.assertIn("        case .compressedHigh:\n            return 5000 // pluma: 3000 in Telegram (task 052)\n", presets)
+        self.assertIn("        case .videoMessage:\n            return 2000 // pluma: 1000 in Telegram (task 052)\n", presets)
+        self.assertIn("        case .sticker:\n            return 1000\n", presets)  # not a video message, kept
+        self.assertIn("        case .animation:\n            return 1800", presets)
+        self.assertIn("        case .compressedMedium, .compressedHigh, .compressedVeryHigh:\n            return 128\n", presets)
+        self.assertNotIn("            return 1\n", presets)
+        self.assertIn("AVVideoAverageBitRateKey: 2000 * 1000,", tree.read(patch.ROUND_VIDEO_RECORDER))
+        self.assertIn("AVVideoAverageBitRateKey: @(1000000),", tree.read(patch.GIF_CONVERTER))
+        self.assertIn(patch.VIDEO_DEFAULT_PRESET, tree.read(patch.VIDEO_FETCH))
         # What App Store Connect asks: the purpose of background location,
         # no SF Camera, Siri phrases for every intent.
         self.assertIn("    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>\n"

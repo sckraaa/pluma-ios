@@ -34,6 +34,10 @@ contact instead of offering a Premium gift, which Pluma does not sell.
 The context menu of an outgoing message shows when it was read without
 Premium, which Pluma does not sell, and offers no Premium where it is hidden.
 
+Videos are encoded before sending at about twice Telegram's bitrate at every
+quality the user can choose, and with better sound; so are round videos and
+GIF files.
+
 Standard library only, so the CI and a developer machine run it as is.
 """
 
@@ -123,6 +127,14 @@ CHAT_LIST_PANELS = "submodules/TelegramUI/Components/GlobalControlPanelsContext/
 PROFILE_ITEMS = "submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoProfileItems.swift"
 # The read date of an outgoing message in its context menu.
 CONTEXT_MENUS = "submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift"
+# What a video is encoded at before sending: the two preset tables, the
+# recorder of round videos, GIF files.
+VIDEO_PRESETS_LEGACY = "submodules/LegacyComponents/Sources/TGMediaVideoConverter.m"
+VIDEO_PRESETS = "submodules/TelegramUI/Components/MediaEditor/Sources/MediaEditorValues.swift"
+ROUND_VIDEO_RECORDER = "submodules/Camera/Sources/CameraOutput.swift"
+GIF_CONVERTER = "submodules/LegacyComponents/Sources/TGGifConverter.m"
+# The quality an edited video is sent at when none was chosen.
+VIDEO_FETCH = "submodules/TelegramUI/Components/Resources/FetchVideoMediaResource/Sources/FetchVideoMediaResource.swift"
 MAKE = "build-system/Make/Make.py"
 BUILD_CONFIGURATION = "build-system/Make/BuildConfiguration.py"
 VERSIONS = "versions.json"
@@ -506,6 +518,7 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + (PEER_NAME_COLORS, NOTIFICATION_AVATARS, WIDGET_AVATARS, LIVE_STREAM_AVATARS)
                   + (SETTINGS_ITEMS, SETTINGS_SEARCH)
                   + (CHAT_LIST, CHAT_LIST_NOTICE, CHAT_LIST_PANELS, PROFILE_ITEMS, CONTEXT_MENUS)
+                  + (VIDEO_PRESETS_LEGACY, VIDEO_PRESETS, ROUND_VIDEO_RECORDER, GIF_CONVERTER, VIDEO_FETCH)
                   + (FONT,) + tuple(CAMERA_FONTS) + tuple(SIRI_VOCABULARY.format(lang) for lang in SIRI_PHRASES))
 
 
@@ -1083,6 +1096,7 @@ def patch(tree, c):
     patch_support(tree)
     patch_birthdays(tree)
     patch_read_date(tree)
+    patch_video_quality(tree)
     patch_store(tree, c)
 
     # The build configuration of Make.py, with exactly the keys it reads.
@@ -2052,6 +2066,160 @@ def verify_read_date(tree):
         raise PatchError(f"{CONTEXT_MENUS}: a hidden read date still offers Premium")
 
 
+# --- video quality -------------------------------------------------------------
+#
+# Task 052 of the server repository. The owner's decision: the user chooses
+# the quality of a video as in Telegram (240p-1080p in the editor's quality
+# tab, TGPhotoQualityController.m), but every quality is sent at a higher
+# bitrate than Telegram's.
+#
+# The app re-encodes a video before sending (H.264, AVFoundation) at a fixed
+# bitrate per preset, whatever the source's. The presets are in two tables
+# that must agree:
+#   - TGMediaVideoConverter.m, _videoBitrateKbpsForPreset (1408-1445),
+#     _audioBitrateKbpsForPreset (1447-1479), _audioChannelsCountForPreset
+#     (1481-1510): an unedited video, the size estimate of the quality slider
+#     and the legacy round video recorder (TGVideoCameraPipeline.m 683-689);
+#   - MediaQualityPreset in MediaEditorValues.swift, videoBitrateKbps
+#     (180-207), audioBitrateKbps (209-218), audioChannelsCount (220-227): an
+#     edited video and a trimmed round video, through MediaEditorVideoExport
+#     (recommendedVideoExportConfiguration, 1929-2050).
+# The sizes of the presets stay upstream's.
+#
+#   preset        Telegram: video kbit/s, audio   Pluma
+#   240p          400, 32 mono                    800, 64 stereo
+#   360p          700, 32 mono                    1500, 64 stereo
+#   480p          1600, 64 stereo                 2500, 128 stereo
+#   720p          3000, 64 stereo                 5000, 128 stereo
+#   1080p         6600, 64 stereo                 12000, 128 stereo
+#   animation     900, no sound                   1800 (a video sent as a GIF)
+#   round video   1000, 64                        2000, 96 (channels upstream's)
+#
+# A round video without a trim is sent as CameraOutput.swift records it
+# (VideoMessageCameraScreen.swift 2000), at the recorder's own bitrate (374):
+# 1000 kbit/s there too. A GIF file becomes an mp4 in TGGifConverter.m at 500
+# kbit/s (103).
+#
+# No video is scaled up to a preset. An unedited one goes through the legacy
+# converter, which caps the preset by the source's size
+# (TGMediaVideoConverter.m 134-139, bestAvailablePresetForDimensions 930-943),
+# and so does the quality slider (TGPhotoQualityController.m 136). An edited
+# one with no quality chosen takes the default preset as it is
+# (FetchVideoMediaResource.swift 1022-1025), and the export fits the source
+# into the preset's size, larger or smaller (MediaEditorValues.swift
+# 1967-1973, aspectFitted in UIKitUtils.swift 517-520): a trimmed 720p video
+# went out as 1080p. The patch caps that default the way the legacy
+# converter does.
+#
+# Not changed: the default quality is the server's video_upload_maxbitrate
+# (LegacyAttachmentMenu.swift 14-53): v*5/100, so 85 on mobile data gives 720p
+# and 100 on Wi-Fi 1080p.
+
+# (preset, Telegram's value, Pluma's) for the legacy table's functions.
+LEGACY_VIDEO_KBPS = (("CompressedVeryLow", 400, 800), ("CompressedLow", 700, 1500), ("CompressedMedium", 1600, 2500),
+                     ("CompressedHigh", 3000, 5000), ("CompressedVeryHigh", 6600, 12000), ("VideoMessage", 1000, 2000))
+LEGACY_AUDIO_KBPS = (("CompressedVeryLow", 32, 64), ("CompressedLow", 32, 64), ("CompressedMedium", 64, 128),
+                     ("CompressedHigh", 64, 128), ("CompressedVeryHigh", 64, 128), ("VideoMessage", 64, 96))
+LEGACY_AUDIO_CHANNELS = (("CompressedVeryLow", 1, 2), ("CompressedLow", 1, 2))
+# (case, Telegram's value, Pluma's) for MediaQualityPreset.videoBitrateKbps.
+VIDEO_KBPS = (("compressedVeryLow", 400, 800), ("compressedLow", 700, 1500), ("compressedMedium", 1600, 2500),
+              ("compressedHigh", 3000, 5000), ("compressedVeryHigh", 6600, 12000), ("videoMessage", 1000, 2000))
+ANIMATION_KBPS = (900, 1800)
+# The default preset of an edited video, capped by the source's size.
+VIDEO_DEFAULT_PRESET_OLD = src(" " * 8, """
+    var qualityPreset = MediaQualityPreset(preset: legacyAdjustments.preset)
+    if qualityPreset == .compressedDefault {
+        qualityPreset = defaultPreset
+    }
+""")
+VIDEO_DEFAULT_PRESET = src(" " * 8, """
+    var qualityPreset = MediaQualityPreset(preset: legacyAdjustments.preset)
+    if qualityPreset == .compressedDefault {
+        qualityPreset = defaultPreset
+        // pluma: no larger than the source, as the legacy converter caps it
+        // (TGMediaVideoConverter.m 134-139); the export scales a source up to
+        // the preset's size (task 052).
+        let dimensions = legacyAdjustments.originalSize
+        if dimensions != .zero && qualityPreset.rawValue >= MediaQualityPreset.compressedVeryLow.rawValue && qualityPreset.rawValue <= MediaQualityPreset.compressedVeryHigh.rawValue {
+            let bestPreset = MediaQualityPreset(preset: TGMediaVideoConverter.bestAvailablePreset(forDimensions: dimensions))
+            if qualityPreset.rawValue > bestPreset.rawValue {
+                qualityPreset = bestPreset
+            }
+        }
+    }
+""")
+
+
+def video_quality_edits():
+    """The edits of the presets, as (file, upstream's text, Pluma's)."""
+    edits = []
+    for table in (LEGACY_VIDEO_KBPS, LEGACY_AUDIO_KBPS, LEGACY_AUDIO_CHANNELS):
+        for preset, old, new in table:
+            case = f"        case TGMediaVideoConversionPreset{preset}:\n"
+            edits.append((VIDEO_PRESETS_LEGACY, f"{case}            return {old};\n",
+                          f"{case}            return {new}; // pluma: {old} in Telegram (task 052)\n"))
+    old, new = ANIMATION_KBPS
+    edits.append((VIDEO_PRESETS_LEGACY, f"        default:\n            return {old};\n",
+                  "        case TGMediaVideoConversionPresetAnimation:\n"
+                  f"            return {new}; // pluma: {old} in Telegram, the default below (task 052)\n"
+                  f"        default:\n            return {old};\n"))
+    for case, old, new in VIDEO_KBPS:
+        edits.append((VIDEO_PRESETS, f"        case .{case}:\n            return {old}\n",
+                      f"        case .{case}:\n            return {new} // pluma: {old} in Telegram (task 052)\n"))
+    old, new = ANIMATION_KBPS
+    edits.append((VIDEO_PRESETS, f"        default:\n            return {old}\n",
+                  f"        case .animation:\n            return {new} // pluma: {old} in Telegram, the default below (task 052)\n"
+                  f"        default:\n            return {old}\n"))
+    edits.append((VIDEO_PRESETS, src(" " * 8, """
+        case .compressedVeryLow, .compressedLow:
+            return 32
+        case .compressedMedium, .compressedHigh, .compressedVeryHigh, .videoMessage:
+            return 64
+        default:
+            return 0
+    """), src(" " * 8, """
+        // pluma: Telegram's are 32 for 240p and 360p, 64 for the rest (task 052).
+        case .compressedVeryLow, .compressedLow:
+            return 64
+        case .compressedMedium, .compressedHigh, .compressedVeryHigh:
+            return 128
+        case .videoMessage:
+            return 96
+        default:
+            return 0
+    """)))
+    edits.append((VIDEO_PRESETS, src(" " * 8, """
+        case .compressedVeryLow, .compressedLow:
+            return 1
+        default:
+            return 2
+    """), src(" " * 8, """
+        // pluma: 240p and 360p in stereo too; mono in Telegram (task 052).
+        default:
+            return 2
+    """)))
+    edits.append((ROUND_VIDEO_RECORDER, "                AVVideoAverageBitRateKey: 1000 * 1000,\n",
+                   "                AVVideoAverageBitRateKey: 2000 * 1000, // pluma: 1000 kbit/s in Telegram (task 052)\n"))
+    edits.append((GIF_CONVERTER, "              AVVideoAverageBitRateKey: @(500000),\n",
+                   "              AVVideoAverageBitRateKey: @(1000000), // pluma: 500000 in Telegram (task 052)\n"))
+    edits.append((VIDEO_FETCH, VIDEO_DEFAULT_PRESET_OLD, VIDEO_DEFAULT_PRESET))
+    return tuple(edits)
+
+
+def patch_video_quality(tree):
+    """Higher bitrates than Telegram's for every video quality, round videos
+    and GIF files."""
+    for rel, old, new in video_quality_edits():
+        tree.replace(rel, old, new)
+
+
+def verify_video_quality(tree):
+    for rel, old, new in video_quality_edits():
+        text = tree.read(rel)
+        if text.count(new) != 1 or (old not in new and old in text):
+            raise PatchError(f"{rel}: not Pluma's video bitrates ({old.strip().splitlines()[-1]!r} in Telegram)")
+
+
 # --- palette "graphite and sage" ----------------------------------------------
 #
 # Task 017 of the server repository. Graphite for text, icons and headers;
@@ -2851,6 +3019,7 @@ def verify(tree, c):
     verify_support(tree)
     verify_birthdays(tree)
     verify_read_date(tree)
+    verify_video_quality(tree)
     verify_store(tree, c)
 
     build = tree.read(APP_BUILD)
