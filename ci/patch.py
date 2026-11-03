@@ -31,6 +31,9 @@ example phrase for every intent in every language.
 The chat list's notice about contacts' birthdays opens the chat with the
 contact instead of offering a Premium gift, which Pluma does not sell.
 
+The context menu of an outgoing message shows when it was read without
+Premium, which Pluma does not sell, and offers no Premium where it is hidden.
+
 Standard library only, so the CI and a developer machine run it as is.
 """
 
@@ -118,6 +121,8 @@ CHAT_LIST_NOTICE = "submodules/TelegramUI/Components/ChatList/ChatListHeaderNoti
 CHAT_LIST_PANELS = "submodules/TelegramUI/Components/GlobalControlPanelsContext/Sources/GlobalControlPanelsContext.swift"
 # The birthday row of a contact's profile.
 PROFILE_ITEMS = "submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoProfileItems.swift"
+# The read date of an outgoing message in its context menu.
+CONTEXT_MENUS = "submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift"
 MAKE = "build-system/Make/Make.py"
 BUILD_CONFIGURATION = "build-system/Make/BuildConfiguration.py"
 VERSIONS = "versions.json"
@@ -500,7 +505,7 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + (DAY_THEME, DARK_THEME, PRESENTATION_DATA, THEME_SETTINGS, LEGACY_COLORS, AVATAR_NODE)
                   + (PEER_NAME_COLORS, NOTIFICATION_AVATARS, WIDGET_AVATARS, LIVE_STREAM_AVATARS)
                   + (SETTINGS_ITEMS, SETTINGS_SEARCH)
-                  + (CHAT_LIST, CHAT_LIST_NOTICE, CHAT_LIST_PANELS, PROFILE_ITEMS)
+                  + (CHAT_LIST, CHAT_LIST_NOTICE, CHAT_LIST_PANELS, PROFILE_ITEMS, CONTEXT_MENUS)
                   + (FONT,) + tuple(CAMERA_FONTS) + tuple(SIRI_VOCABULARY.format(lang) for lang in SIRI_PHRASES))
 
 
@@ -1077,6 +1082,7 @@ def patch(tree, c):
     patch_identity(tree)
     patch_support(tree)
     patch_birthdays(tree)
+    patch_read_date(tree)
     patch_store(tree, c)
 
     # The build configuration of Make.py, with exactly the keys it reads.
@@ -1986,6 +1992,66 @@ def verify_birthdays(tree):
         raise PatchError(f"{PROFILE_ITEMS}: the birthday row offers a gift without Premium for sale")
 
 
+# --- read date ---------------------------------------------------------------
+#
+# The context menu of an outgoing message in a private chat shows when it was
+# read (messages.getOutboxReadDate), but upstream shows it to a user without
+# Premium only where Premium is sold: with premium_purchase_blocked, which the
+# Pluma server sends, the row goes (canViewReadStats). The owner's decision
+# (task 033): the read date is shown as the Android app shows it, which has no
+# such check. Where the date is hidden (the peer's privacy), upstream shows
+# "Read" with a badge that opens Premium's privacy screen to buy it; without
+# Premium for sale the row says "Read" only, with no badge and no action.
+
+READ_DATE_GATE_OLD = src(" " * 8, """
+    if !isPremium {
+        let premiumConfiguration = PremiumConfiguration.with(appConfiguration: appConfig)
+        if premiumConfiguration.isPremiumDisabled {
+            return false
+        }
+    }
+""")
+READ_DATE_GATE = src(" " * 8, """
+    // pluma: the read date is shown without Premium, which is not sold (task 033).
+""")
+READ_DATE_TAP_OLD = src(" " * 12, """
+    self.buttonNode.isUserInteractionEnabled = self.item.action != nil && stats.peers.isEmpty
+""")
+READ_DATE_TAP = src(" " * 12, """
+    // pluma: a hidden read date offers no Premium where it is not sold.
+    self.buttonNode.isUserInteractionEnabled = self.item.action != nil && stats.peers.isEmpty && !PremiumConfiguration.with(appConfiguration: self.item.context.currentAppConfiguration.with { $0 }).isPremiumDisabled
+""")
+READ_DATE_BADGE_OLD = src(" " * 20, """
+    self.textNode.attributedText = text
+    showReadBadge = true
+""")
+READ_DATE_BADGE = src(" " * 20, """
+    self.textNode.attributedText = text
+    // pluma: no badge offering Premium where it is not sold.
+    showReadBadge = !PremiumConfiguration.with(appConfiguration: self.item.context.currentAppConfiguration.with { $0 }).isPremiumDisabled
+""")
+
+
+def patch_read_date(tree):
+    """The read date of an outgoing message shows without Premium, which is
+    not sold, and a hidden one offers no Premium."""
+    tree.replace_lines(CONTEXT_MENUS, READ_DATE_GATE_OLD, READ_DATE_GATE)
+    tree.replace(CONTEXT_MENUS, READ_DATE_TAP_OLD, READ_DATE_TAP)
+    tree.replace(CONTEXT_MENUS, READ_DATE_BADGE_OLD, READ_DATE_BADGE)
+
+
+def verify_read_date(tree):
+    text = tree.read(CONTEXT_MENUS)
+    start = text.find("private func canViewReadStats(")
+    end = text.find("\n}\n", start)
+    if start < 0 or end < 0:
+        raise PatchError(f"{CONTEXT_MENUS}: no canViewReadStats")
+    if "isPremiumDisabled" in text[start:end]:
+        raise PatchError(f"{CONTEXT_MENUS}: the read date is still hidden without Premium for sale")
+    if READ_DATE_TAP not in text or READ_DATE_BADGE not in text or "showReadBadge = true\n" in text:
+        raise PatchError(f"{CONTEXT_MENUS}: a hidden read date still offers Premium")
+
+
 # --- palette "graphite and sage" ----------------------------------------------
 #
 # Task 017 of the server repository. Graphite for text, icons and headers;
@@ -2784,6 +2850,7 @@ def verify(tree, c):
     verify_identity(tree)
     verify_support(tree)
     verify_birthdays(tree)
+    verify_read_date(tree)
     verify_store(tree, c)
 
     build = tree.read(APP_BUILD)

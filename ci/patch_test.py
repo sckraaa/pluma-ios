@@ -934,6 +934,10 @@ APP_DELEGATE, INTRO = patch.APP_DELEGATE, patch.INTRO_ANIMATIONS
 # pinned upstream, replacement): every one must stop the patch with an error
 # that names the file.
 DAMAGE = (
+    (patch.CONTEXT_MENUS, "            if premiumConfiguration.isPremiumDisabled {\n                return false",
+     "            if premiumConfiguration.isPremiumDisabled || true {\n                return false"),
+    (patch.CONTEXT_MENUS, "self.item.action != nil && stats.peers.isEmpty\n", "self.item.action != nil && !stats.peers.isEmpty\n"),
+    (patch.CONTEXT_MENUS, "                    showReadBadge = true\n", "                    showReadBadge = false\n"),
     (patch.SERIALIZATION, "        return 228\n", "        return 229\n"),
     (patch.VERSIONS, '"app": "12.9.2"', '"app": "12.9.3"'),
     (patch.VERSIONS, '"xcode": "26.2"', '"xcode": "26.3"'),
