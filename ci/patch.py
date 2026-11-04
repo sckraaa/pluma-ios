@@ -141,6 +141,9 @@ MESSAGE_CONTEXT_MENU = "submodules/TelegramUI/Sources/Chat/ChatControllerOpenMes
 TAG_PANEL = "submodules/TelegramUI/Sources/ChatSearchTitleAccessoryPanelNode.swift"
 TITLE_PANELS = "submodules/TelegramUI/Sources/ChatInterfaceTitlePanelNodes.swift"
 MESSAGE_REACTIONS = "submodules/TelegramCore/Sources/State/MessageReactions.swift"
+# The update screen (TelegramUpdateUI); AppUpdate.swift and
+# MTApiEnvironment.m are in NETWORK_DIRS.
+UPDATE_INFO = "submodules/TelegramUpdateUI/Sources/UpdateInfoController.swift"
 # What a video is encoded at before sending: the two preset tables, the
 # recorder of round videos, GIF files.
 VIDEO_PRESETS_LEGACY = "submodules/LegacyComponents/Sources/TGMediaVideoConverter.m"
@@ -533,7 +536,7 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + (SETTINGS_ITEMS, SETTINGS_SEARCH)
                   + (CHAT_LIST, CHAT_LIST_NOTICE, CHAT_LIST_PANELS, PROFILE_ITEMS, CONTEXT_MENUS)
                   + (CHAT_STATE, CHAT_CONTROLLER, TAG_CONTEXT_MENU, MESSAGE_CONTEXT_MENU, TAG_PANEL, TITLE_PANELS)
-                  + (MESSAGE_REACTIONS,)
+                  + (MESSAGE_REACTIONS, UPDATE_INFO)
                   + (VIDEO_PRESETS_LEGACY, VIDEO_PRESETS, ROUND_VIDEO_RECORDER, GIF_CONVERTER, VIDEO_FETCH)
                   + (FONT,) + tuple(CAMERA_FONTS) + tuple(SIRI_VOCABULARY.format(lang) for lang in SIRI_PHRASES))
 
@@ -1113,6 +1116,7 @@ def patch(tree, c):
     patch_birthdays(tree)
     patch_read_date(tree)
     patch_saved_tags(tree)
+    patch_app_update(tree)
     patch_video_quality(tree)
     patch_store(tree, c)
 
@@ -2081,6 +2085,90 @@ def verify_read_date(tree):
         raise PatchError(f"{CONTEXT_MENUS}: the read date is still hidden without Premium for sale")
     if READ_DATE_TAP not in text or READ_DATE_BADGE not in text or "showReadBadge = true\n" in text:
         raise PatchError(f"{CONTEXT_MENUS}: a hidden read date still offers Premium")
+
+
+# --- app update ----------------------------------------------------------------
+#
+# Task 054 of the server repository (ADR 0035). The app asks help.getAppUpdate
+# at start and every 12 hours and shows the update screen for whatever the
+# server answers (TelegramCore AppUpdate.swift 37-49, ApplicationContext.swift
+# 586-596); its button opens the App Store page (UpdateInfoController.swift
+# 117-119), which Pluma does not have. TestFlight updates its own builds, so
+# the server offers updates only to builds installed from the site (ad hoc),
+# with the site's install page as help.appUpdate.url; the button opens it.
+# The server tells them apart by app_version: MtProtoKit sends "<version>
+# (<build>) <suffix>" (MTApiEnvironment.m 384-394), the suffix empty on iOS;
+# a build whose profile lists devices, which only an ad hoc (or a development)
+# profile does, gives "adhoc". The App Store build shares the compiled code
+# with the ad hoc one (ci/build.sh), so this is decided when the app runs, not
+# when it is built.
+APP_UPDATE = "submodules/TelegramCore/Sources/State/AppUpdate.swift"
+MT_API_ENVIRONMENT = "submodules/MtProtoKit/Sources/MTApiEnvironment.m"
+APP_UPDATE_EDITS = (
+    (APP_UPDATE,
+     "    public let entities: [MessageTextEntity]\n"
+     "    \n"
+     "    public init(blocking: Bool, version: String, text: String, entities: [MessageTextEntity]) {\n",
+     "    public let entities: [MessageTextEntity]\n"
+     "    // pluma: the page that installs the update, for a build from the site.\n"
+     "    public let url: String?\n"
+     "    \n"
+     "    public init(blocking: Bool, version: String, text: String, entities: [MessageTextEntity], url: String? = nil) {\n"),
+    (APP_UPDATE,
+     "        self.entities = entities\n"
+     "    }\n",
+     "        self.entities = entities\n"
+     "        self.url = url\n"
+     "    }\n"),
+    (APP_UPDATE,
+     "                self.entities = messageTextEntitiesFromApiEntities(entities)\n",
+     "                self.entities = messageTextEntitiesFromApiEntities(entities)\n"
+     "                self.url = appUpdateData.url\n"),
+    (UPDATE_INFO,
+     "    let arguments = UpdateInfoControllerArguments(openAppStorePage: {\n"
+     "        context.sharedContext.applicationBindings.openAppStorePage()\n"
+     "    }, linkAction: { action, itemLink in\n",
+     "    let arguments = UpdateInfoControllerArguments(openAppStorePage: {\n"
+     "        // pluma: the server's install page for a build from the site; Pluma has no App Store page.\n"
+     "        if let url = appUpdateInfo.url {\n"
+     "            context.sharedContext.applicationBindings.openUrl(url)\n"
+     "        } else {\n"
+     "            context.sharedContext.applicationBindings.openAppStorePage()\n"
+     "        }\n"
+     "    }, linkAction: { action, itemLink in\n"),
+    (MT_API_ENVIRONMENT,
+     "            suffix = [NSString stringWithFormat:@\"%@\", value];\n"
+     "        }\n"
+     "#endif\n",
+     "            suffix = [NSString stringWithFormat:@\"%@\", value];\n"
+     "        }\n"
+     "#endif\n"
+     "#if TARGET_OS_IPHONE\n"
+     "        // pluma: a build installed from the site (an ad hoc profile, which lists\n"
+     "        // devices) says so in app_version; the server offers it the site's\n"
+     "        // install page for an update. TestFlight updates its own builds.\n"
+     "        NSString *profilePath = [[NSBundle mainBundle] pathForResource:@\"embedded\" ofType:@\"mobileprovision\"];\n"
+     "        NSData *profile = profilePath != nil ? [NSData dataWithContentsOfFile:profilePath] : nil;\n"
+     "        NSData *devicesKey = [@\"<key>ProvisionedDevices</key>\" dataUsingEncoding:NSUTF8StringEncoding];\n"
+     "        if (profile != nil && [profile rangeOfData:devicesKey options:0 range:NSMakeRange(0, profile.length)].location != NSNotFound) {\n"
+     "            suffix = @\"adhoc\";\n"
+     "        }\n"
+     "#endif\n"),
+)
+
+
+def patch_app_update(tree):
+    """The update screen opens the server's install page, and a build from
+    the site says so in app_version."""
+    for rel, old, new in APP_UPDATE_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_app_update(tree):
+    for rel, old, new in APP_UPDATE_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the app update edit {new.strip().splitlines()[-1]!r} is not there")
 
 
 # --- tags of Saved Messages ----------------------------------------------------
@@ -3247,6 +3335,7 @@ def verify(tree, c):
     verify_birthdays(tree)
     verify_read_date(tree)
     verify_saved_tags(tree)
+    verify_app_update(tree)
     verify_video_quality(tree)
     verify_store(tree, c)
 

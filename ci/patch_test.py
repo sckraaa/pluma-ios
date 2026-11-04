@@ -693,6 +693,49 @@ class BirthdayTest(unittest.TestCase):
                          [patch.CHAT_LIST, patch.CHAT_LIST_NOTICE, patch.CHAT_LIST_PANELS])
 
 
+class AppUpdateTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.dir.name)
+        (root / "Telegram").mkdir()
+        (root / "Telegram/BUILD").write_text("")
+        (root / "versions.json").write_text("{}")
+        self.tree = patch.Tree(root)
+        files = {}
+        for rel, old, _ in patch.APP_UPDATE_EDITS:
+            files[rel] = files.get(rel, "") + old + "\n"
+        for rel, text in files.items():
+            self.tree.write(rel, text)
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_app_update(self):
+        with self.assertRaisesRegex(patch.PatchError, "is not there"):
+            patch.verify_app_update(self.tree)
+        patch.patch_app_update(self.tree)
+        patch.verify_app_update(self.tree)
+        info = self.tree.read(patch.APP_UPDATE)
+        self.assertIn("    public let url: String?\n", info)
+        self.assertIn("                self.url = appUpdateData.url\n", info)
+        self.assertIn("            context.sharedContext.applicationBindings.openUrl(url)\n", self.tree.read(patch.UPDATE_INFO))
+        self.assertIn('            suffix = @"adhoc";\n', self.tree.read(patch.MT_API_ENVIRONMENT))
+        # A second run finds none of the upstream texts.
+        with self.assertRaises(patch.PatchError):
+            patch.patch_app_update(self.tree)
+
+    def test_check(self):
+        patch.patch_app_update(self.tree)
+        for rel, old, new in patch.APP_UPDATE_EDITS:
+            patched = self.tree.read(rel)
+            with self.subTest(file=rel, edit=new.strip().splitlines()[-1]):
+                self.tree.write(rel, patched.replace(new, old))
+                with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                    patch.verify_app_update(self.tree)
+            self.tree.write(rel, patched)
+        patch.verify_app_update(self.tree)
+
+
 class SavedTagsTest(unittest.TestCase):
     # Each file the patch edits, with the upstream text of its edits.
     def upstream(self):
