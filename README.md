@@ -269,7 +269,7 @@ After `build-ipa` hands the IPA to the install service, `ci/release-upload.sh` r
 - `RELEASES_UPLOAD_TOKEN`, a secret of the `release` environment: `teamgramd/deploy/releases/put-token.sh` of the server repository sets it. Without it `build-ipa` fails at its start.
 - `PLUMA_RELEASES_URL`, a repository variable, defaults to `https://pluma.chat`.
 
-A bad release is withdrawn on the server (`pluma-admin release withdraw ios <build>`, `docs/ops/releases.md` of the server repository).
+A bad release: `pluma-admin release withdraw ios <build>` on the server stops the update screens (`docs/ops/releases.md` of the server repository), but the install page keeps serving the IPA it was given. To take it back, run the workflow with `ipa` on the last good commit, or release the fix as the next build. The workflow needs both tokens, `RELEASES_UPLOAD_TOKEN` and `IOSINSTALL_UPLOAD_TOKEN`: a build is offered to the apps only together with the IPA the install page serves.
 
 ## When it builds
 

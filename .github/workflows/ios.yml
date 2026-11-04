@@ -168,13 +168,16 @@ jobs:
         env:
           PLUMA_AGE_RECIPIENT: ${{ vars.PLUMA_AGE_RECIPIENT }}
           RELEASES_UPLOAD_TOKEN: ${{ secrets.RELEASES_UPLOAD_TOKEN }}
+          IOSINSTALL_UPLOAD_TOKEN: ${{ secrets.IOSINSTALL_UPLOAD_TOKEN }}
         run: |
           if [[ ! "$PLUMA_AGE_RECIPIENT" =~ ^age1[0-9a-z]+$ ]]; then
             echo "::error::PLUMA_AGE_RECIPIENT is not an age public key; the IPA would have nowhere to go (README, Signing)."
             exit 1
           fi
-          if [ -z "$RELEASES_UPLOAD_TOKEN" ]; then
-            echo "::error::The release environment has no RELEASES_UPLOAD_TOKEN; the apps would not learn of the build (README, Releases)."
+          # The apps are offered the build only when the install page has it:
+          # both services, or neither run.
+          if [ -z "$RELEASES_UPLOAD_TOKEN" ] || [ -z "$IOSINSTALL_UPLOAD_TOKEN" ]; then
+            echo "::error::The release environment has no RELEASES_UPLOAD_TOKEN or IOSINSTALL_UPLOAD_TOKEN; the apps would be offered a build the install page does not have (README, Releases)."
             exit 1
           fi
       - name: Xcode, disk space, Metal toolchain
