@@ -34,6 +34,9 @@ contact instead of offering a Premium gift, which Pluma does not sell.
 The context menu of an outgoing message shows when it was read without
 Premium, which Pluma does not sell, and offers no Premium where it is hidden.
 
+The tags of Saved Messages work without Premium, and a message takes as many
+reactions, or tags in Saved Messages, as the server's limits allow.
+
 Videos are encoded before sending at about twice Telegram's bitrate at every
 quality the user can choose, and with better sound; so are round videos and
 GIF files.
@@ -127,6 +130,17 @@ CHAT_LIST_PANELS = "submodules/TelegramUI/Components/GlobalControlPanelsContext/
 PROFILE_ITEMS = "submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoProfileItems.swift"
 # The read date of an outgoing message in its context menu.
 CONTEXT_MENUS = "submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift"
+# The tags of Saved Messages: the flag of the chat's state, the gates that
+# check Premium (a tap on a tag, its context menu, the tag bar of a message's
+# context menu, the panel of tags over the chat and when it shows), and the
+# number of reactions a message takes.
+CHAT_STATE = "submodules/ChatPresentationInterfaceState/Sources/ChatPresentationInterfaceState.swift"
+CHAT_CONTROLLER = "submodules/TelegramUI/Sources/ChatController.swift"
+TAG_CONTEXT_MENU = "submodules/TelegramUI/Sources/ChatControllerOpenMessageReactionContextMenu.swift"
+MESSAGE_CONTEXT_MENU = "submodules/TelegramUI/Sources/Chat/ChatControllerOpenMessageContextMenu.swift"
+TAG_PANEL = "submodules/TelegramUI/Sources/ChatSearchTitleAccessoryPanelNode.swift"
+TITLE_PANELS = "submodules/TelegramUI/Sources/ChatInterfaceTitlePanelNodes.swift"
+MESSAGE_REACTIONS = "submodules/TelegramCore/Sources/State/MessageReactions.swift"
 # What a video is encoded at before sending: the two preset tables, the
 # recorder of round videos, GIF files.
 VIDEO_PRESETS_LEGACY = "submodules/LegacyComponents/Sources/TGMediaVideoConverter.m"
@@ -518,6 +532,8 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + (PEER_NAME_COLORS, NOTIFICATION_AVATARS, WIDGET_AVATARS, LIVE_STREAM_AVATARS)
                   + (SETTINGS_ITEMS, SETTINGS_SEARCH)
                   + (CHAT_LIST, CHAT_LIST_NOTICE, CHAT_LIST_PANELS, PROFILE_ITEMS, CONTEXT_MENUS)
+                  + (CHAT_STATE, CHAT_CONTROLLER, TAG_CONTEXT_MENU, MESSAGE_CONTEXT_MENU, TAG_PANEL, TITLE_PANELS)
+                  + (MESSAGE_REACTIONS,)
                   + (VIDEO_PRESETS_LEGACY, VIDEO_PRESETS, ROUND_VIDEO_RECORDER, GIF_CONVERTER, VIDEO_FETCH)
                   + (FONT,) + tuple(CAMERA_FONTS) + tuple(SIRI_VOCABULARY.format(lang) for lang in SIRI_PHRASES))
 
@@ -1096,6 +1112,7 @@ def patch(tree, c):
     patch_support(tree)
     patch_birthdays(tree)
     patch_read_date(tree)
+    patch_saved_tags(tree)
     patch_video_quality(tree)
     patch_store(tree, c)
 
@@ -2066,6 +2083,216 @@ def verify_read_date(tree):
         raise PatchError(f"{CONTEXT_MENUS}: a hidden read date still offers Premium")
 
 
+# --- tags of Saved Messages ----------------------------------------------------
+#
+# Task 053 of the server repository. In Saved Messages the reactions of a
+# message are its tags (messageReactions.reactions_as_tags; areReactionsTags in
+# MessageUtils.swift): the user tags messages, filters the chat by a tag
+# (messages.search with saved_reaction) and names the tags
+# (messages.getSavedReactionTags, messages.updateSavedReactionTag). Upstream
+# lets only Premium users do it, and Pluma does not sell Premium. The owner's
+# decision: tags for every user, with as many tags on a message as Premium
+# allows in Telegram.
+#
+# No key of appConfiguration says whether tags are available: every gate
+# checks isPremium of the chat's state. canUseSavedTags, true, takes its place
+# at the gates of tags only; isPremium stays everywhere else, and so does every
+# other Premium feature. The gates:
+#   a. a tap on a tag of a message (ChatController.swift, updateMessageReaction);
+#   b. the context menu of a tag: rename, filter, remove
+#      (ChatControllerOpenMessageReactionContextMenu.swift);
+#   c. the bar of tags in a message's context menu, locked with its title
+#      Chat_MessageContextMenu_NonPremiumTagsTitle
+#      (ChatControllerOpenMessageContextMenu.swift);
+#   d. a tag outside the bar's top list, from the expanded list; a custom
+#      emoji tag still needs Premium, as a custom emoji reaction does in other
+#      chats (the same function);
+#   e-h. the panel of tags over the chat: the promo "unlock / add tags" in its
+#      place, a tap that filters, a long press that renames, the locks
+#      (ChatSearchTitleAccessoryPanelNode.swift);
+#   i-j. when the panel shows: as for Premium, only once the chat has tags,
+#      and in the embedded chat too (ChatInterfaceTitlePanelNodes.swift).
+#
+# How many reactions a message takes (updateMessageReactionsInteractively,
+# MessageReactions.swift): Premium takes reactions_user_max_premium of
+# appConfiguration, everybody else 1, whatever reactions_user_max_default says.
+# Now everybody takes the server's limit (UserLimitsConfiguration), and in
+# Saved Messages the Premium one: the Pluma server sends 3 for both. The
+# toast that more reactions need Premium (ChatController.swift,
+# Chat_Reactions_MultiplePremiumTooltip) shows only while Premium is sold.
+#
+# The texts of the promos become unreachable; the patch adds none.
+
+SAVED_TAGS_FLAG_ANCHOR = "    public let isPremium: Bool\n"
+SAVED_TAGS_FLAG = SAVED_TAGS_FLAG_ANCHOR + src(" " * 4, """
+    // pluma: the tags of Saved Messages without Premium, which Pluma does not
+    // sell (task 053). The gates of tags check this; all others isPremium.
+    public var canUseSavedTags: Bool {
+        return true
+    }
+""")
+
+# (file, upstream, Pluma) for each gate of tags.
+SAVED_TAGS_GATES = (
+    # a. A tap on a tag of a message.
+    (CHAT_CONTROLLER, src(" " * 16, """
+        if !strongSelf.presentationInterfaceState.isPremium {
+            strongSelf.presentTagPremiumPaywall()
+            return
+        }
+    """), src(" " * 16, """
+        // pluma: tags without Premium (task 053).
+        if !strongSelf.presentationInterfaceState.canUseSavedTags {
+            strongSelf.presentTagPremiumPaywall()
+            return
+        }
+    """)),
+    # b. The context menu of a tag.
+    (TAG_CONTEXT_MENU, src(" " * 12, """
+        if !self.presentationInterfaceState.isPremium {
+            self.presentTagPremiumPaywall()
+            return
+        }
+    """), src(" " * 12, """
+        // pluma: tags without Premium (task 053).
+        if !self.presentationInterfaceState.canUseSavedTags {
+            self.presentTagPremiumPaywall()
+            return
+        }
+    """)),
+    # c. The bar of tags in a message's context menu.
+    (MESSAGE_CONTEXT_MENU, src(" " * 24, """
+        if self.presentationInterfaceState.isPremium {
+            actions.reactionsTitle = presentationData.strings.Chat_ContextMenuTagsTitle
+    """), src(" " * 24, """
+        // pluma: tags without Premium (task 053).
+        if self.presentationInterfaceState.canUseSavedTags {
+            actions.reactionsTitle = presentationData.strings.Chat_ContextMenuTagsTitle
+    """)),
+    # d. A tag outside the top list.
+    (MESSAGE_CONTEXT_MENU, src(" " * 32, """
+        if !self.presentationInterfaceState.isPremium {
+            controller?.premiumReactionsSelected?()
+            return
+        }
+    """), src(" " * 32, """
+        // pluma: tags without Premium (task 053); a custom emoji tag still
+        // needs it, as a custom emoji reaction does in other chats.
+        var isTagLocked = !self.presentationInterfaceState.canUseSavedTags
+        if case .custom = chosenReaction, !self.presentationInterfaceState.isPremium {
+            isTagLocked = true
+        }
+        if isTagLocked {
+            controller?.premiumReactionsSelected?()
+            return
+        }
+    """)),
+    # e. The promo in place of the panel's tags.
+    (TAG_PANEL, src(" " * 8, """
+        if !params.interfaceState.isPremium {
+            let promoView: PromoView
+    """), src(" " * 8, """
+        // pluma: tags without Premium (task 053).
+        if !params.interfaceState.canUseSavedTags {
+            let promoView: PromoView
+    """)),
+    # f. A tap on a tag of the panel: the filter.
+    (TAG_PANEL, src(" " * 20, """
+        if !params.interfaceState.isPremium {
+            if let chatController = self.interfaceInteraction?.chatController() {
+    """), src(" " * 20, """
+        // pluma: tags without Premium (task 053).
+        if !params.interfaceState.canUseSavedTags {
+            if let chatController = self.interfaceInteraction?.chatController() {
+    """)),
+    # g. A long press on it: the name.
+    (TAG_PANEL, src(" " * 20, """
+        if !params.interfaceState.isPremium {
+            (chatController as? ChatControllerImpl)?.presentTagPremiumPaywall()
+    """), src(" " * 20, """
+        // pluma: tags without Premium (task 053).
+        if !params.interfaceState.canUseSavedTags {
+            (chatController as? ChatControllerImpl)?.presentTagPremiumPaywall()
+    """)),
+    # h. The locks on the panel's tags.
+    (TAG_PANEL, "isLocked: !params.interfaceState.isPremium,", "isLocked: !params.interfaceState.canUseSavedTags,"),
+    # i. The panel shows without tags only to offer them.
+    (TITLE_PANELS, src(" " * 12, """
+        if chatPresentationInterfaceState.hasSearchTags || !chatPresentationInterfaceState.isPremium {
+    """), src(" " * 12, """
+        // pluma: tags without Premium (task 053): the panel once there are tags.
+        if chatPresentationInterfaceState.hasSearchTags || !chatPresentationInterfaceState.canUseSavedTags {
+    """)),
+    # j. The embedded chat hides it without Premium.
+    (TITLE_PANELS, src(" " * 8, """
+        if case .standard(.embedded) = chatPresentationInterfaceState.mode {
+            if !chatPresentationInterfaceState.isPremium {
+    """), src(" " * 8, """
+        if case .standard(.embedded) = chatPresentationInterfaceState.mode {
+            // pluma: tags without Premium (task 053).
+            if !chatPresentationInterfaceState.canUseSavedTags {
+    """)),
+)
+
+REACTIONS_LIMIT_OLD = src(" " * 8, """
+    let maxCount: Int
+    if isPremium {
+        let limitsConfiguration = UserLimitsConfiguration(appConfiguration: appConfiguration, isPremium: isPremium)
+        maxCount = Int(limitsConfiguration.maxReactionsPerMessage)
+    } else {
+        maxCount = 1
+    }
+""")
+REACTIONS_LIMIT = src(" " * 8, """
+    // pluma: the server's limit without Premium too, not 1, and in Saved
+    // Messages, where reactions are tags, the limit of Premium (task 053).
+    let limitsConfiguration = UserLimitsConfiguration(appConfiguration: appConfiguration, isPremium: isPremium || chatPeerId == account.peerId)
+    let maxCount = Int(limitsConfiguration.maxReactionsPerMessage)
+""")
+
+REACTIONS_TOAST_OLD = ("                        if !strongSelf.presentationInterfaceState.isPremium && mappedUpdatedReactions.count > "
+                       "strongSelf.context.userLimits.maxReactionsPerMessage {\n")
+REACTIONS_TOAST = ("                        // pluma: no offer of Premium for more reactions where it is not sold (task 053).\n"
+                   "                        if !strongSelf.presentationInterfaceState.isPremium && mappedUpdatedReactions.count > "
+                   "strongSelf.context.userLimits.maxReactionsPerMessage && !PremiumConfiguration.with(appConfiguration: "
+                   "strongSelf.context.currentAppConfiguration.with { $0 }).isPremiumDisabled {\n")
+
+
+def patch_saved_tags(tree):
+    """Tags of Saved Messages without Premium, which Pluma does not sell, and
+    the server's limit of reactions on a message for everybody."""
+    tree.expect(CHAT_STATE, "canUseSavedTags", count=0)
+    tree.replace(CHAT_STATE, SAVED_TAGS_FLAG_ANCHOR, SAVED_TAGS_FLAG)
+    for rel, old, new in SAVED_TAGS_GATES:
+        tree.replace_lines(rel, old, new)
+    tree.replace(MESSAGE_REACTIONS, REACTIONS_LIMIT_OLD, REACTIONS_LIMIT)
+    tree.replace(CHAT_CONTROLLER, REACTIONS_TOAST_OLD, REACTIONS_TOAST)
+
+
+def verify_saved_tags(tree):
+    if tree.read(CHAT_STATE).count(SAVED_TAGS_FLAG) != 1:
+        raise PatchError(f"{CHAT_STATE}: no canUseSavedTags that is true")
+    uses = {}
+    for rel, old, new in SAVED_TAGS_GATES:
+        text = tree.read(rel)
+        if new not in text or old in text:
+            raise PatchError(f"{rel}: a gate of tags still checks Premium")
+        uses[rel] = uses.get(rel, 0) + new.count("canUseSavedTags")
+    # The flag stays at the gates of tags.
+    for rel, count in uses.items():
+        if tree.read(rel).count("canUseSavedTags") != count:
+            raise PatchError(f"{rel}: canUseSavedTags outside the gates of tags")
+    # The panel of tags and when it shows no longer look at Premium at all.
+    for rel in (TAG_PANEL, TITLE_PANELS):
+        if "isPremium" in tree.read(rel):
+            raise PatchError(f"{rel}: a gate of tags still checks Premium")
+    reactions = tree.read(MESSAGE_REACTIONS)
+    if REACTIONS_LIMIT not in reactions or "maxCount = 1\n" in reactions:
+        raise PatchError(f"{MESSAGE_REACTIONS}: a message takes one reaction without Premium")
+    if REACTIONS_TOAST not in tree.read(CHAT_CONTROLLER):
+        raise PatchError(f"{CHAT_CONTROLLER}: the toast offers Premium for more reactions where it is not sold")
+
+
 # --- video quality -------------------------------------------------------------
 #
 # Task 052 of the server repository. The owner's decision: the user chooses
@@ -3019,6 +3246,7 @@ def verify(tree, c):
     verify_support(tree)
     verify_birthdays(tree)
     verify_read_date(tree)
+    verify_saved_tags(tree)
     verify_video_quality(tree)
     verify_store(tree, c)
 
