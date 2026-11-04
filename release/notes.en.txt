@@ -1,0 +1,1 @@
+Pluma now tells you when a new version is out and opens the install page in one tap.
