@@ -693,6 +693,126 @@ class BirthdayTest(unittest.TestCase):
                          [patch.CHAT_LIST, patch.CHAT_LIST_NOTICE, patch.CHAT_LIST_PANELS])
 
 
+class SavedTagsTest(unittest.TestCase):
+    # Each file the patch edits, with the upstream text of its edits.
+    def upstream(self):
+        files = {patch.CHAT_STATE: patch.SAVED_TAGS_FLAG_ANCHOR,
+                 patch.MESSAGE_REACTIONS: patch.REACTIONS_LIMIT_OLD,
+                 patch.CHAT_CONTROLLER: patch.REACTIONS_TOAST_OLD}
+        for rel, old, _ in patch.SAVED_TAGS_GATES:
+            files[rel] = files.get(rel, "") + old + "\n"
+        return files
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.dir.name)
+        (root / "Telegram").mkdir()
+        (root / "Telegram/BUILD").write_text("")
+        (root / "versions.json").write_text("{}")
+        self.tree = patch.Tree(root)
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def write(self, files):
+        for rel, text in files.items():
+            self.tree.write(rel, text)
+
+    def test_gates(self):
+        self.write(self.upstream())
+        with self.assertRaises(patch.PatchError):
+            patch.verify_saved_tags(self.tree)
+        patch.patch_saved_tags(self.tree)
+        patch.verify_saved_tags(self.tree)
+        # One flag, true, next to isPremium, which stays.
+        self.assertEqual(self.tree.read(patch.CHAT_STATE),
+                         "    public let isPremium: Bool\n"
+                         "    // pluma: the tags of Saved Messages without Premium, which Pluma does not\n"
+                         "    // sell (task 053). The gates of tags check this; all others isPremium.\n"
+                         "    public var canUseSavedTags: Bool {\n        return true\n    }\n")
+        # The gates check it instead of Premium.
+        self.assertIn("                if !strongSelf.presentationInterfaceState.canUseSavedTags {\n"
+                      "                    strongSelf.presentTagPremiumPaywall()\n", self.tree.read(patch.CHAT_CONTROLLER))
+        self.assertIn("            if !self.presentationInterfaceState.canUseSavedTags {\n"
+                      "                self.presentTagPremiumPaywall()\n", self.tree.read(patch.TAG_CONTEXT_MENU))
+        menu = self.tree.read(patch.MESSAGE_CONTEXT_MENU)
+        self.assertIn("                        if self.presentationInterfaceState.canUseSavedTags {\n"
+                      "                            actions.reactionsTitle = presentationData.strings.Chat_ContextMenuTagsTitle\n", menu)
+        # A custom emoji tag outside the top list still needs Premium.
+        self.assertIn("                                var isTagLocked = !self.presentationInterfaceState.canUseSavedTags\n"
+                      "                                if case .custom = chosenReaction, !self.presentationInterfaceState.isPremium {\n"
+                      "                                    isTagLocked = true\n"
+                      "                                }\n"
+                      "                                if isTagLocked {\n"
+                      "                                    controller?.premiumReactionsSelected?()\n", menu)
+        panel = self.tree.read(patch.TAG_PANEL)
+        self.assertEqual(panel.count("!params.interfaceState.canUseSavedTags"), 4)
+        self.assertNotIn("isPremium", panel)
+        titles = self.tree.read(patch.TITLE_PANELS)
+        self.assertIn("            if chatPresentationInterfaceState.hasSearchTags || "
+                      "!chatPresentationInterfaceState.canUseSavedTags {\n", titles)
+        self.assertIn("            if !chatPresentationInterfaceState.canUseSavedTags {\n", titles)
+        # The server's limit of reactions for everybody, Premium's in Saved
+        # Messages; the toast about more reactions only while Premium is sold.
+        reactions = self.tree.read(patch.MESSAGE_REACTIONS)
+        self.assertIn("UserLimitsConfiguration(appConfiguration: appConfiguration, "
+                      "isPremium: isPremium || chatPeerId == account.peerId)\n"
+                      "        let maxCount = Int(limitsConfiguration.maxReactionsPerMessage)\n", reactions)
+        self.assertNotIn("maxCount = 1", reactions)
+        self.assertIn("strongSelf.context.userLimits.maxReactionsPerMessage && !PremiumConfiguration.with(appConfiguration: "
+                      "strongSelf.context.currentAppConfiguration.with { $0 }).isPremiumDisabled {\n",
+                      self.tree.read(patch.CHAT_CONTROLLER))
+
+    def test_verify(self):
+        # Each part of the result is checked on its own: a gate back on
+        # Premium, the flag false or used elsewhere, the limits as upstream's.
+        damage = [(rel, new, old) for rel, old, new in patch.SAVED_TAGS_GATES]
+        damage += [
+            (patch.CHAT_STATE, "        return true\n", "        return false\n"),
+            (patch.CHAT_CONTROLLER, patch.REACTIONS_TOAST, patch.REACTIONS_TOAST_OLD),
+            (patch.MESSAGE_REACTIONS, patch.REACTIONS_LIMIT, patch.REACTIONS_LIMIT_OLD),
+            (patch.MESSAGE_CONTEXT_MENU, "if isTagLocked {\n",
+             "if isTagLocked {\n    let shown = self.presentationInterfaceState.canUseSavedTags\n"),
+            (patch.TITLE_PANELS, "            // pluma: tags without Premium (task 053).\n",
+             "            // pluma: tags without Premium (task 053).\n            let isPremium = true\n"),
+        ]
+        for rel, new, old in damage:
+            with self.subTest(rel=rel, old=old[:60]):
+                self.write(self.upstream())
+                patch.patch_saved_tags(self.tree)
+                text = self.tree.read(rel)
+                self.assertEqual(text.count(new), 1)
+                self.tree.write(rel, text.replace(new, old))
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify_saved_tags(self.tree)
+                self.assertIn(rel, str(e.exception))
+
+    def test_upstream_changed(self):
+        # Any gate that moved, and the flag that upstream added itself, stop
+        # the patch with the file's name.
+        edits = [(rel, old) for rel, old, _ in patch.SAVED_TAGS_GATES]
+        edits += [(patch.CHAT_STATE, patch.SAVED_TAGS_FLAG_ANCHOR), (patch.MESSAGE_REACTIONS, patch.REACTIONS_LIMIT_OLD),
+                  (patch.CHAT_CONTROLLER, patch.REACTIONS_TOAST_OLD)]
+        for rel, old in edits:
+            with self.subTest(rel=rel, old=old[:60]):
+                files = self.upstream()
+                files[rel] = files[rel].replace(old, old.replace("isPremium", "hasPremium").replace("maxCount", "limit"))
+                self.write(files)
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.patch_saved_tags(self.tree)
+                self.assertIn(rel, str(e.exception))
+        files = self.upstream()
+        files[patch.CHAT_STATE] += "    public var canUseSavedTags: Bool { return self.isPremium }\n"
+        self.write(files)
+        with self.assertRaises(patch.PatchError) as e:
+            patch.patch_saved_tags(self.tree)
+        self.assertIn(patch.CHAT_STATE, str(e.exception))
+
+    def test_table(self):
+        for rel in {rel for rel, _, _ in patch.SAVED_TAGS_GATES} | {patch.CHAT_STATE, patch.MESSAGE_REACTIONS}:
+            self.assertIn(rel, patch.UPSTREAM_PATHS)
+
+
 class IdentityTest(unittest.TestCase):
     # The letter avatars of AvatarNode.swift, with the Saved Messages avatar
     # after them...
@@ -938,6 +1058,32 @@ DAMAGE = (
      "            if premiumConfiguration.isPremiumDisabled || true {\n                return false"),
     (patch.CONTEXT_MENUS, "self.item.action != nil && stats.peers.isEmpty\n", "self.item.action != nil && !stats.peers.isEmpty\n"),
     (patch.CONTEXT_MENUS, "                    showReadBadge = true\n", "                    showReadBadge = false\n"),
+    # The tags of Saved Messages and the limit of reactions.
+    (patch.CHAT_STATE, "    public let isPremium: Bool\n", "    public var isPremium: Bool\n"),
+    (patch.CHAT_CONTROLLER, "                if !strongSelf.presentationInterfaceState.isPremium {\n"
+     "                    strongSelf.presentTagPremiumPaywall()\n",
+     "                if !strongSelf.presentationInterfaceState.isPremium {\n"
+     "                    strongSelf.presentTagsPremiumPaywall()\n"),
+    (patch.CHAT_CONTROLLER, "mappedUpdatedReactions.count > strongSelf.context.userLimits.maxReactionsPerMessage {",
+     "mappedUpdatedReactions.count >= strongSelf.context.userLimits.maxReactionsPerMessage {"),
+    (patch.TAG_CONTEXT_MENU, "            if !self.presentationInterfaceState.isPremium {\n                self.presentTagPremiumPaywall()",
+     "            if self.presentationInterfaceState.isPremium == false {\n                self.presentTagPremiumPaywall()"),
+    (patch.MESSAGE_CONTEXT_MENU, "if self.presentationInterfaceState.isPremium {\n"
+     "                            actions.reactionsTitle = presentationData.strings.Chat_ContextMenuTagsTitle",
+     "if self.presentationInterfaceState.isPremium {\n"
+     "                            actions.reactionsTitle = presentationData.strings.Chat_ContextMenuTagTitle"),
+    (patch.MESSAGE_CONTEXT_MENU, "$0.reaction.rawValue == chosenReaction }) {\n"
+     "                                if !self.presentationInterfaceState.isPremium {\n",
+     "$0.reaction.rawValue == chosenReaction }) {\n"
+     "                                if self.presentationInterfaceState.isPremium == false {\n"),
+    (patch.TAG_PANEL, "        if !params.interfaceState.isPremium {\n            let promoView: PromoView\n",
+     "        if !params.interfaceState.isPremium {\n            let promoView: PromoView?\n"),
+    (patch.TAG_PANEL, "isLocked: !params.interfaceState.isPremium,", "isLocked: params.interfaceState.isPremium == false,"),
+    (patch.TITLE_PANELS, "hasSearchTags || !chatPresentationInterfaceState.isPremium {",
+     "hasSearchTags || chatPresentationInterfaceState.isPremium == false {"),
+    (patch.TITLE_PANELS, "            if !chatPresentationInterfaceState.isPremium {\n                matches = false\n",
+     "            if chatPresentationInterfaceState.isPremium == false {\n                matches = false\n"),
+    (patch.MESSAGE_REACTIONS, "            maxCount = 1\n", "            maxCount = 2\n"),
     (patch.VIDEO_PRESETS_LEGACY, "        case TGMediaVideoConversionPresetCompressedVeryHigh:\n            return 6600;\n",
      "        case TGMediaVideoConversionPresetCompressedVeryHigh:\n            return 6000;\n"),
     (patch.VIDEO_PRESETS_LEGACY, "        case TGMediaVideoConversionPresetCompressedLow:\n            return 32;\n",
@@ -1366,6 +1512,31 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn("let canGiftOnBirthday = isBirthdayToday && !PremiumConfiguration.with(", profile)
         self.assertIn("} else if canGiftOnBirthday && cachedData.disallowedGifts != TelegramDisallowedGifts.All {", profile)
         self.assertIn("icon: canGiftOnBirthday ? .premiumGift : nil, action: birthdayAction,", profile)
+        # Tags of Saved Messages without Premium, at the gates of tags only;
+        # the server's limit of reactions on a message for everybody.
+        state = tree.read(patch.CHAT_STATE)
+        self.assertIn("    public let isPremium: Bool\n", state)
+        self.assertIn("    public var canUseSavedTags: Bool {\n        return true\n    }\n", state)
+        controller = tree.read(patch.CHAT_CONTROLLER)
+        self.assertIn("                if !strongSelf.presentationInterfaceState.canUseSavedTags {\n"
+                      "                    strongSelf.presentTagPremiumPaywall()\n", controller)
+        self.assertEqual(controller.count("canUseSavedTags"), 1)
+        self.assertIn(").isPremiumDisabled {\n                            let _ = (ApplicationSpecificNotice."
+                      "incrementMultipleReactionsSuggestion(", controller)
+        self.assertEqual(tree.read(patch.TAG_CONTEXT_MENU).count("canUseSavedTags"), 1)
+        menu = tree.read(patch.MESSAGE_CONTEXT_MENU)
+        self.assertEqual(menu.count("canUseSavedTags"), 2)
+        # A custom emoji reaction outside Saved Messages still needs Premium.
+        self.assertEqual(menu.count("                                    if !self.presentationInterfaceState.isPremium {\n"
+                                    "                                        controller?.premiumReactionsSelected?()\n"), 1)
+        for rel, uses in ((patch.TAG_PANEL, 4), (patch.TITLE_PANELS, 2)):
+            text = tree.read(rel)
+            self.assertEqual(text.count("canUseSavedTags"), uses, rel)
+            self.assertNotIn("isPremium", text, rel)
+        reactions = tree.read(patch.MESSAGE_REACTIONS)
+        self.assertIn(patch.REACTIONS_LIMIT, reactions)
+        self.assertNotIn("maxCount = 1\n", reactions)
+        self.assertEqual(reactions.count("let isPremium = (transaction.getPeer(account.peerId) as? TelegramUser)?.isPremium ?? false\n"), 1)
         # Pluma's video bitrates in both preset tables, the round video
         # recorder and the GIF converter; an edited video's default preset
         # capped by the source's size.
