@@ -43,6 +43,7 @@ The repository holds no copy of the app's code. CI fetches the upstream release 
   - the Info.plist names the purpose of background location (`NSLocationAlwaysAndWhenInUseUsageDescription`, ITMS-90683), in English the text every language's `InfoPlist.strings` already translates;
   - no Apple font in the bundle (ITMS-91198, refused from 1 October 2027): SF Camera, the face of the camera's controls, is gone, and the camera uses the system font of the same weight, as it already does when the font cannot be loaded;
   - Siri gets an example phrase for each of the five system intents of the Intents extension in each of the app's 19 languages (ITMS-90626), naming Pluma; upstream gives one for sending a message only, naming Telegram, in English for most languages.
+- **App update** (task 054 of the server repository). A build installed from the site (its profile lists devices, as an ad hoc profile does) ends its `app_version` with `adhoc`, so the server offers it updates; the update screen opens the page the server gives (the site's install page) instead of the App Store, which has no Pluma page. TestFlight builds are left to TestFlight.
 - **Build flags.** The upstream `.bazelrc` imports `pluma.bazelrc`, which [`ci/build.sh`](ci/build.sh) writes: the cache locations, and no provisioning profiles for a simulator build.
 
 After the edits, the result is checked again. MtProtoKit, TelegramCore and TelegramVoip may hold no address in Telegram's published ranges, and their only RSA keys must be the server's. The check also covers the layer (`currentLayer()` is 228), the versions of `versions.json`, and the `Make.py` options and targets the build relies on.
@@ -134,7 +135,7 @@ Every run builds the simulator app for the development server of [`config/dev`](
 
 ## Signing
 
-The IPA is signed inside the build, with ad hoc profiles: it installs on the registered devices only, up to 100 iPhones per membership year. The `preflight-sign` job checks the signing material first, in the protected `release` environment, and a bad certificate or profile fails it within a minute. It requires the following:
+The IPA is signed inside the build, with ad hoc profiles: it installs on the registered devices only, up to 100 iPhones per membership year. The `build-ipa` job checks the signing material first, in the protected `release` environment, and a bad certificate or profile fails it within a minute. It requires the following:
 - the certificate is an Apple Distribution certificate of the team, valid for at least 14 more days, and the key in the `.p12` is its key;
 - there is one ad hoc profile for each of the seven App IDs below, of the team, valid for at least 14 more days, and holding that certificate;
 - every profile has the App Group, and the app's profile has push (`aps-environment` = `production`);
@@ -191,7 +192,7 @@ The APNs key of task 009 stays on the server and is not part of the build.
    ```
 4. Set the server variables and, last, `PLUMA_TEAM_ID` ([Configuration](#configuration)).
 
-A release waits for your approval twice: for `preflight-sign`, and a minute later for `build-ipa`. The IPA is the `pluma-ios` artifact of the run, kept for 30 days:
+A release waits for your approval once, for `build-ipa`. The IPA is the `pluma-ios` artifact of the run, kept for 30 days:
 
 ```sh
 gh run download <run id> -R sckraaa/pluma-ios -n pluma-ios
@@ -260,6 +261,15 @@ shasum -a 256 -c pluma-ios-*.ipa.sha256
 ```
 
 An upload that fails after a good build (say, a network error) is repeated with *Re-run failed jobs*: the run number stays, and App Store Connect accepts it as long as the first attempt did not get through.
+
+## Releases
+
+After `build-ipa` hands the IPA to the install service, `ci/release-upload.sh` records the build with the server's releases service: the apps installed from the site then show the update screen, which leads to the install page. The notes are [`release/notes.en.txt`](release/notes.en.txt) and [`release/notes.ru.txt`](release/notes.ru.txt); change them with the change they describe.
+
+- `RELEASES_UPLOAD_TOKEN`, a secret of the `release` environment: `teamgramd/deploy/releases/put-token.sh` of the server repository sets it. Without it `build-ipa` fails at its start.
+- `PLUMA_RELEASES_URL`, a repository variable, defaults to `https://pluma.chat`.
+
+A bad release is withdrawn on the server (`pluma-admin release withdraw ios <build>`, `docs/ops/releases.md` of the server repository).
 
 ## When it builds
 

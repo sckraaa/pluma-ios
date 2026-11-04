@@ -8,11 +8,13 @@
 #   build-sim       the simulator app for the development server, without
 #                   code signing, the Bazel disk cache in the GitHub Actions
 #                   cache;
-#   preflight-sign  the distribution certificate and the ad hoc profile of
-#                   every target, in the protected "release" environment: bad
-#                   signing material fails here within a minute, not after an
-#                   hour of compilation;
-#   build-ipa       the ad hoc IPA for the server, signed inside the build;
+#   build-ipa       the ad hoc IPA for the server, signed inside the build, in
+#                   the protected "release" environment (one approval): it
+#                   checks the distribution certificate and the ad hoc
+#                   profile of every target first, so bad signing material
+#                   fails within a minute, not after an hour of compilation;
+#                   then it hands the IPA to the install service and offers
+#                   it to the apps installed from the site;
 #   preflight-testflight, build-testflight
 #                   on a manual run of main with "testflight" ticked: the
 #                   same IPA signed with App Store profiles and uploaded to
@@ -134,17 +136,22 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  preflight-sign:
+  build-ipa:
     needs: check
     if: vars.PLUMA_TEAM_ID != '' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.ipa))
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    runs-on: macos-26
+    timeout-minutes: 180
     environment: release
+    env:
+      UPSTREAM_DIR: /Users/Shared/telegram-ios
+      BUILD_NUMBER: ${{ github.run_number }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Certificate and profiles
+      # Before anything long: bad signing material fails here within a
+      # minute, not after an hour of compilation. One job, so one approval.
+      - name: Preflight, certificate and profiles
         env:
           PLUMA_DIST_P12_B64: ${{ secrets.PLUMA_DIST_P12_B64 }}
           PLUMA_DIST_P12_PASSWORD: ${{ secrets.PLUMA_DIST_P12_PASSWORD }}
@@ -157,27 +164,19 @@ jobs:
           PLUMA_PROFILE_BROADCAST_UPLOAD: ${{ secrets.PLUMA_PROFILE_BROADCAST_UPLOAD }}
           TEAM_ID: ${{ vars.PLUMA_TEAM_ID }}
         run: python3 -I ci/preflight_sign.py --app config/app.env --team-id "$TEAM_ID"
-      - name: The owner's age key
+      - name: Preflight, the owner's age key and the releases service
         env:
           PLUMA_AGE_RECIPIENT: ${{ vars.PLUMA_AGE_RECIPIENT }}
+          RELEASES_UPLOAD_TOKEN: ${{ secrets.RELEASES_UPLOAD_TOKEN }}
         run: |
           if [[ ! "$PLUMA_AGE_RECIPIENT" =~ ^age1[0-9a-z]+$ ]]; then
             echo "::error::PLUMA_AGE_RECIPIENT is not an age public key; the IPA would have nowhere to go (README, Signing)."
             exit 1
           fi
-
-  build-ipa:
-    needs: preflight-sign
-    runs-on: macos-26
-    timeout-minutes: 180
-    environment: release
-    env:
-      UPSTREAM_DIR: /Users/Shared/telegram-ios
-      BUILD_NUMBER: ${{ github.run_number }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
+          if [ -z "$RELEASES_UPLOAD_TOKEN" ]; then
+            echo "::error::The release environment has no RELEASES_UPLOAD_TOKEN; the apps would not learn of the build (README, Releases)."
+            exit 1
+          fi
       - name: Xcode, disk space, Metal toolchain
         run: ci/setup.sh build
       - name: age
@@ -248,6 +247,11 @@ jobs:
           ipas=(out/pluma-ios-*.ipa)
           [ ${#ipas[@]} = 1 ] || { echo "::error::expected one IPA in out/, found ${#ipas[@]}"; exit 1; }
           ci/install-upload.sh "${ipas[0]}"
+      - name: Offer the build to the apps installed from the site
+        env:
+          PLUMA_RELEASES_URL: ${{ vars.PLUMA_RELEASES_URL || 'https://pluma.chat' }}
+          RELEASES_UPLOAD_TOKEN: ${{ secrets.RELEASES_UPLOAD_TOKEN }}
+        run: ci/release-upload.sh
       - name: Encrypt the IPA
         env:
           PLUMA_AGE_RECIPIENT: ${{ vars.PLUMA_AGE_RECIPIENT }}
