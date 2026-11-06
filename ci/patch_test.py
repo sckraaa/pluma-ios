@@ -540,6 +540,61 @@ class ClientLinksTest(unittest.TestCase):
                 self.assertRegex(new, r"\Ahttps://(web\.)?pluma\.chat/\Z")
 
 
+class LinksTest(unittest.TestCase):
+    """pluma.chat links (task 026): the patterns and the tables."""
+
+    def test_literals(self):
+        for text, count in (('"https://t.me/\\(name)"', 1), ('"t.me/"', 1), ('"t.me"', 1), ('"https://t.me\\(path)"', 1),
+                            ('@"t.me/%@"', 1), ('"\\(scheme)://t.me/\\(name)"', 1), ('"t.me/c/" || "t.me/+"', 2),
+                            ('"a.t.me"', 0), ('"https://telegram.me/"', 0), ('"https://t.mega/"', 0),
+                            ('"https://pluma.chat/\\(name)"', 0), ("/// an internal https://t.me or tg: link", 0)):
+            with self.subTest(text=text):
+                self.assertEqual(len(patch.TME_LITERAL.findall(text.encode("utf-8"))), count)
+        for text, found in (("t.me link", True), ("[https://t.me/%@]()", True), ("such as t.me/title", True),
+                            ("pluma.chat link", False), ("a.t.me", False), ("t.messages", False)):
+            with self.subTest(text=text):
+                self.assertEqual(bool(patch.STRINGS_TME.search(text)), found)
+
+    def test_table(self):
+        for rel, old, new, count in patch.LINK_HOSTS:
+            with self.subTest(rel=rel, old=old[:40]):
+                self.assertIn(rel, patch.UPSTREAM_PATHS)
+                self.assertIn("t.me", old)
+                self.assertNotIn(patch.LINK_HOST, old)
+                self.assertGreater(new.count(patch.LINK_HOST), 0)
+        for rel, text, count in patch.SHARE_LINKS:
+            with self.subTest(rel=rel, text=text):
+                self.assertIn(rel, patch.UPSTREAM_PATHS)
+                self.assertGreater(text.count("{host}"), 0)
+                self.assertGreater(len(patch.TME_LITERAL.findall(text.replace("{host}", "t.me").encode("utf-8"))), 0)
+        for rel, text, count in patch.SHARE_KEEP:
+            with self.subTest(rel=rel, text=text):
+                self.assertIn(rel, patch.UPSTREAM_PATHS)
+                self.assertGreater(len(patch.TME_LITERAL.findall(text.encode("utf-8"))), 0)
+        self.assertEqual(len({(rel, text) for rel, text, _ in patch.SHARE_LINKS}), len(patch.SHARE_LINKS))
+        self.assertEqual(len({(rel, text) for rel, text, _ in patch.SHARE_KEEP}), len(patch.SHARE_KEEP))
+        self.assertFalse({key for key, _ in patch.STRINGS_LINKS} & set(patch.STRINGS_KEEP))
+        self.assertIn(patch.STRINGS, patch.UPSTREAM_PATHS)
+
+    def test_site_pages(self):
+        # The pages of the site pluma.chat itself, one list in every client.
+        self.assertEqual(set(patch.PLUMA_SITE_PATHS), {
+            "iphone", "ipad", "android", "mac", "windows", "linux", "web", "pero", "app", "en", "dl", "ios",
+            "collect", "assets", "_l", ".well-known",
+            "favicon.svg", "og.png", "apple-touch-icon.png", "404.html", "progress.json"})
+        self.assertEqual(len(set(patch.PLUMA_SITE_PATHS)), len(patch.PLUMA_SITE_PATHS))
+        for name in patch.PLUMA_SITE_PATHS:
+            with self.subTest(name=name):
+                self.assertEqual(name, name.lower())
+                self.assertNotIn("/", name)
+                self.assertIn(f'"{name}"', patch.PLUMA_SITE_FUNC)
+        for rel, old, new, count in patch.PLUMA_SITE:
+            with self.subTest(rel=rel, old=old[:40]):
+                self.assertIn(rel, patch.UPSTREAM_PATHS)
+                self.assertTrue(new.startswith(old) or patch.PLUMA_SITE_CHECK in new)
+                self.assertNotEqual(old, new)
+
+
 class BirthdayTest(unittest.TestCase):
     # The birthday notice of the chat list, each place with the case after it:
     # what a tap does (ChatListControllerNode.swift)...
@@ -1279,6 +1334,24 @@ DAMAGE = (
      "        if let internalUrl = parseInternalUrl(sharedContext: sharedContext, context: context, query: host + \"?\" + query), case .peer",
      "    if let parsedUrl = URL(string: url), [\"tg\"].contains(parsedUrl.scheme), let host = parsedUrl.host, let query = parsedUrl.query {\n"
      "        if let internalUrl = parseInternalUrl(sharedContext: sharedContext, context: context, query: host + \"?\" + query), case .peer"),
+    # pluma.chat links: a host list, the subdomain check, a new t.me link in
+    # a file the patch edits, a changed link it keeps, a text with one more.
+    ("submodules/TelegramUI/Sources/OpenUrl.swift", '["t.me", "telegram.me", "telegram.dog"]',
+     '["t.me", "telegram.me", "telegram.dog", "telegram.org"]'),
+    (patch.URL_HANDLING, 'lowercasedUrl.contains(".\\(basePath)?"))) {', 'lowercasedUrl.contains(".\\(basePath)#"))) {'),
+    (patch.URL_HANDLING, "    return telegramWebShortLinkHosts.contains(host)\n", "    return telegramWebShortLinkHosts.contains(host.lowercased())\n"),
+    (patch.URL_HANDLING, "public func isTelegramMeLink(_ url: String) -> Bool {\n", "public func isTelegramMeLink(_ url: String, strict: Bool = false) -> Bool {\n"),
+    (patch.URL_HANDLING, "            if isTelegramWebShortLink(url) {\n                return .single(.result(.externalUrl(url)))\n",
+     "            if isTelegramWebShortLink(url) {\n                return .single(.result(.externalUrl(url, forceExternal: true)))\n"),
+    ("submodules/TelegramUI/Sources/OpenUrl.swift", "telegramMeHosts.contains(host) {\n            handleInternalUrl(parsedUrl.absoluteString)\n",
+     "telegramMeHosts.contains(host.lowercased()) {\n            handleInternalUrl(parsedUrl.absoluteString)\n"),
+    ("submodules/TelegramUI/Sources/Chat/ChatControllerOpenLinkContextMenu.swift", "import UrlWhitelist\n", ""),
+    ("submodules/ShareController/Sources/ShareController.swift", 'url = "https://t.me/\\(addressName)/\\(message.id.id)"',
+     'url = "https://t.me/\\(addressName)/\\(message.id.id)"; let profile = "https://t.me/\\(addressName)"'),
+    ("submodules/PremiumUI/Sources/PremiumGiftCodeScreen.swift", 'link = "https://t.me/giftcode/\\(slug)"',
+     'link = "https://t.me/giftcode/\\(slug)/"'),
+    (patch.STRINGS, '"EmptyGroupInfo.Line3" = "Public links such as t.me/title";',
+     '"EmptyGroupInfo.Line3" = "Public links such as t.me/title or t.me/name";'),
     # The links of Settings > Devices.
     (patch.SESSIONS, 'url: "https://getdesktop.telegram.org", forceExternal', 'url: "https://desktop.telegram.org", forceExternal'),
     (patch.SESSIONS, "    }, openWebLink: {\n", "    }, openWebClientLink: {\n"),
@@ -1496,6 +1569,38 @@ class UpstreamTest(unittest.TestCase):
         self.assertNotRegex(scan, patch.CLIENT_SITES)
         self.assertIn('"AuthSessions.AddDevice.ScanInstallInfo" = "Go to [pluma.chat](desktop) or [web.pluma.chat](web) to get the QR code";',
                       strings)
+        # pluma.chat: among the hosts of the app's own links, no username in
+        # its subdomains, in the links the app makes and the texts that show
+        # them; t.me where the app keeps it.
+        self.assertIn('    "t.me", "telegram.dog",\n    "pluma.chat"\n]\n', tree.read(patch.URL_HANDLING))
+        self.assertIn('if basePath != "pluma.chat" && (lowercasedUrl.hasPrefix(scheme) && ', tree.read(patch.URL_HANDLING))
+        # The pages of the site itself are a site's: not the app's links, an
+        # external result when resolved, opened as any site's.
+        handling = tree.read(patch.URL_HANDLING)
+        self.assertIn('    "favicon.svg", "og.png", "apple-touch-icon.png", "404.html", "progress.json"\n]\n', handling)
+        self.assertIn('parsedUrl.host?.lowercased() == "pluma.chat" else {', handling)
+        self.assertIn('public func isTelegramMeLink(_ url: String) -> Bool {\n    if isPlumaSiteLink(url) {\n        return false\n', handling)
+        self.assertIn('            if isPlumaSiteLink(url) {\n                return .single(.result(.externalUrl(url)))\n', handling)
+        self.assertIn('telegramMeHosts.contains(host), !isPlumaSiteLink(parsedUrl.absoluteString) {\n'
+                      '            handleInternalUrl(', tree.read(patch.OPEN_URL))
+        menu = tree.read(patch.OPEN_LINK_MENU)
+        self.assertIn('|| (host == "pluma.chat" && !isPlumaSiteLink(parsedUrl.absoluteString)) {', menu)
+        self.assertIn("import UrlHandling\n", menu)
+        self.assertIn('["t.me", "telegram.me", "telegram.dog", "pluma.chat"]', tree.read(patch.OPEN_URL))
+        self.assertIn('$0.message.hasPrefix("https://pluma.chat/") || $0.message.hasPrefix("pluma.chat/") }', scan)
+        self.assertIn('} else if slug.hasPrefix("https://pluma.chat/addlist/") {', tree.read(patch.CHAT_FOLDERS))
+        self.assertIn('url = "https://pluma.chat/\\(addressName)/\\(message.id.id)"',
+                      tree.read("submodules/ShareController/Sources/ShareController.swift"))
+        self.assertIn('link = "\\(externalLink ? "https://pluma.chat/proxy" : "plm://proxy")?server=',
+                      tree.read("submodules/QrCodeUI/Sources/QrCodeScreen.swift"))
+        self.assertIn('title: NSAttributedString(string: "pluma.chat/",',
+                      tree.read("submodules/TelegramUI/Sources/CreateChannelController.swift"))
+        self.assertIn('private let phonebookUsernamePrefix = "https://t.me/" + phonebookUsernamePathPrefix',
+                      tree.read("submodules/AccountContext/Sources/DeviceContactData.swift"))
+        self.assertIn('"Username.LinkHint" = "This link opens a chat with you in Pluma:[\\nhttps://pluma.chat/%@]";', strings)
+        self.assertIn('"Business.Links.SimpleLinkInfoUsernamePhone" = "You can also use a simple link for a chat with you '
+                      '— [pluma.chat/%1$@](username) or [pluma.chat/\\\\u{2060}+\\\\u{2060}%2$@](phone).";', strings)
+        self.assertIn('"Premium.Limits.PublicLinksInfo" = "Reserve up to 20 [t.me/name]() links";', strings)
         # The palette.
         day, dark = tree.read(patch.DAY_THEME), tree.read(patch.DARK_THEME)
         self.assertIn("public let defaultDayAccentColor = UIColor(rgb: 0x5b7a5e)", day)
@@ -1666,6 +1771,40 @@ class UpstreamTest(unittest.TestCase):
                 (self.root / rel).write_bytes(b"\x89PNG")
                 with self.assertRaises(patch.PatchError) as e:
                     self.run_patch()
+                self.assertIn(rel, str(e.exception))
+
+    def test_links(self):
+        # The check after the edits finds a t.me link the patch does not know
+        # (in a new file too), a list of the app's hosts without pluma.chat, a
+        # subdomain of pluma.chat read as a username, a page of the site read
+        # as the app's link, a text with a t.me link.
+        share = "submodules/ShareController/Sources/ShareController.swift"
+        sample = "submodules/TelegramUI/Sources/ShareProfileLink.swift"
+        for rel, old, new in (
+            (sample, None, 'let link = "https://t.me/\\(addressName)"\n'),
+            (share, 'url = "https://pluma.chat/\\(addressName)/', 'url = "https://t.me/\\(addressName)/'),
+            (patch.OPEN_URL, '"telegram.dog", "pluma.chat"]', '"telegram.dog"]'),
+            (patch.URL_HANDLING, patch.URL_SUBDOMAIN, patch.URL_SUBDOMAIN_OLD),
+            (patch.URL_HANDLING, "    if isPlumaSiteLink(url) {\n        return false\n    }\n", ""),
+            (patch.URL_HANDLING, "            if isPlumaSiteLink(url) {\n                return .single(.result(.externalUrl(url)))\n"
+                                 "            }\n", ""),
+            (patch.URL_HANDLING, '"iphone", ', ""),
+            (patch.OPEN_URL, ", !isPlumaSiteLink(parsedUrl.absoluteString) {", " {"),
+            (patch.OPEN_LINK_MENU, '(host == "pluma.chat" && !isPlumaSiteLink(parsedUrl.absoluteString))', 'host == "pluma.chat"'),
+            (patch.STRINGS, '"Link: pluma.chat/%@"', '"Link: t.me/%@"'),
+            (patch.STRINGS, '"Settings.FAQ" = "Pluma FAQ";', '"Settings.FAQ" = "Pluma FAQ at t.me/faq";'),
+        ):
+            with self.subTest(rel=rel, old=(old or new)[:60]):
+                self.tearDown()
+                tree, c = self.run_patch()
+                if old is None:
+                    tree.write(rel, new)
+                else:
+                    text = tree.read(rel)
+                    self.assertEqual(text.count(old), 1)
+                    tree.write(rel, text.replace(old, new))
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify(tree, c)
                 self.assertIn(rel, str(e.exception))
 
     def test_intro_without_wordmark(self):

@@ -47,7 +47,9 @@ def profile_plist(suffix, cert_der, **over):
     }
     if suffix == "":
         ent["aps-environment"] = "production"
+        ent["com.apple.developer.associated-domains"] = "*"
     ent.update(over.pop("entitlements", {}))
+    ent = {k: v for k, v in ent.items() if v is not None}
     p = {
         "AppIDName": f"Pluma{suffix}",
         "ApplicationIdentifierPrefix": [TEAM],
@@ -130,6 +132,8 @@ class PreflightTest(SigningMaterialTest):
             ("MAIN", profile_plist("", self.cert_der, entitlements={"aps-environment": "development"}),
              ("PLUMA_PROFILE_MAIN", "'production'")),
             ("MAIN", profile_plist("", self.cert_der, Platform=["tvOS"]), ("not iOS",)),
+            ("MAIN", profile_plist("", self.cert_der, entitlements={"com.apple.developer.associated-domains": None}),
+             ("PLUMA_PROFILE_MAIN", "lacks Associated Domains")),
             ("SHARE", profile_plist(".Share", b"another certificate"), ("PLUMA_PROFILE_SHARE", "does not hold the certificate")),
             ("WIDGET", profile_plist(".Widget", self.cert_der, ProvisionedDevices=DEVICES[:1]),
              ("profile Widget", "misses 1")),
