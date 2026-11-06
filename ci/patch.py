@@ -342,6 +342,326 @@ CLIENT_TEXTS = (
 # Telegram's client sites, which none of those files may open after the edits.
 CLIENT_SITES = re.compile(r"(?:get)?desktop\.telegram\.org|web\.telegram\.org")
 
+# pluma.chat is to Pluma what t.me is to Telegram: the domain of the links the
+# app makes for people to copy, share, show and scan, and a domain whose links
+# the app opens itself. The server makes its links there too (invites, the
+# config's me_url_prefix). t.me, telegram.me and telegram.dog stay the app's
+# own as well, as upstream. Only the host pluma.chat itself: web.pluma.chat and
+# the other subdomains are sites, not usernames as those of t.me.
+LINK_HOST = "pluma.chat"
+OPEN_URL = "submodules/TelegramUI/Sources/OpenUrl.swift"
+CHAT_FOLDERS = "submodules/TelegramCore/Sources/TelegramEngine/Peers/ChatFolders.swift"
+_SETTINGS_UI = "submodules/SettingsUI/Sources/"
+_UI_COMPONENTS = "submodules/TelegramUI/Components/"
+_PEER_INFO = _UI_COMPONENTS + "PeerInfo/PeerInfoScreen/Sources/"
+_PEER_INFO_PANES = _UI_COMPONENTS + "PeerInfo/PeerInfoVisualMediaPaneNode/Sources/"
+_SETTINGS_SCREENS = _UI_COMPONENTS + "Settings/"
+# The lists and checks that tell the app's own links from others':
+# (file, Telegram's text, Pluma's, how many times).
+LINK_HOSTS = (
+    # Every link the app opens, makes previews of or parses (proxies, QR
+    # codes): the parsers of UrlHandling and the check of OpenUrl.
+    (URL_HANDLING, '    "t.me", "telegram.dog"\n]\n', '    "t.me", "telegram.dog",\n    "pluma.chat"\n]\n', 1),
+    (OPEN_URL, '["t.me", "telegram.me", "telegram.dog"]', '["t.me", "telegram.me", "telegram.dog", "pluma.chat"]', 1),
+    # Concealed links (text links of messages and bots) open without asking.
+    ("submodules/UrlWhitelist/Sources/UrlWhitelist.swift",
+     '    "t.me",\n    "telegram.me",\n', '    "t.me",\n    "telegram.me",\n    "pluma.chat",\n', 1),
+    # Links of these hosts are found in text where only the app's own are.
+    ("submodules/TextFormat/Sources/GenerateTextEntities.swift",
+     '    "t.me",\n    "telegram.me",\n', '    "t.me",\n    "telegram.me",\n    "pluma.chat",\n', 1),
+    # A long press on a link offers no "open in the browser" for them, but
+    # for the pages of the site pluma.chat itself (PLUMA_SITE).
+    ("submodules/TelegramUI/Sources/Chat/ChatControllerOpenLinkContextMenu.swift",
+     'if host == "t.me" || host == "telegram.me" || host == "telegram.dog" {',
+     'if host == "t.me" || host == "telegram.me" || host == "telegram.dog" '
+     '|| (host == "pluma.chat" && !isPlumaSiteLink(parsedUrl.absoluteString)) {', 1),
+    # The QR scanner of a profile and the story camera take Pluma's codes.
+    (QR_SCAN, 'filteredCodes = codes.filter { $0.message.hasPrefix("https://t.me/") || $0.message.hasPrefix("t.me/") }',
+     'filteredCodes = codes.filter { $0.message.hasPrefix("https://t.me/") || $0.message.hasPrefix("t.me/") '
+     '|| $0.message.hasPrefix("https://pluma.chat/") || $0.message.hasPrefix("pluma.chat/") }', 1),
+    (_UI_COMPONENTS + "CameraScreen/Sources/CameraScreen.swift",
+     'message.hasPrefix("t.me/contact/") || message.hasPrefix("t.me/") {',
+     'message.hasPrefix("t.me/contact/") || message.hasPrefix("t.me/") || message.hasPrefix("pluma.chat/") {', 1),
+    # The preview of a message link reads "View Message".
+    (_UI_COMPONENTS + "Chat/ChatMessageWebpageBubbleContentNode/Sources/ChatMessageWebpageBubbleContentNode.swift",
+     'if webpage.displayUrl.hasPrefix("t.me/") {',
+     'if webpage.displayUrl.hasPrefix("t.me/") || webpage.displayUrl.hasPrefix("pluma.chat/") {', 1),
+    # A link pasted where the app asks for a bot or a sticker set.
+    (_SETTINGS_SCREENS + "ChatbotSetupScreen/Sources/ChatbotSetupScreen.swift",
+     'url.host == "t.me" {', '(url.host == "t.me" || url.host == "pluma.chat") {', 2),
+    (_UI_COMPONENTS + "GroupStickerPackSetupController/Sources/GroupStickerPackSetupController.swift",
+     'url.host == "t.me" || url.host == "telegram.me" {',
+     'url.host == "t.me" || url.host == "telegram.me" || url.host == "pluma.chat" {', 1),
+    # The slug of a shared chat folder's link (the server makes it).
+    (CHAT_FOLDERS,
+     '            slug = String(slug[slug.index(slug.startIndex, offsetBy: "https://t.me/addlist/".count)...])\n'
+     '        }\n',
+     '            slug = String(slug[slug.index(slug.startIndex, offsetBy: "https://t.me/addlist/".count)...])\n'
+     '        } else if slug.hasPrefix("https://pluma.chat/addlist/") {\n'
+     '            slug = String(slug[slug.index(slug.startIndex, offsetBy: "https://pluma.chat/addlist/".count)...])\n'
+     '        }\n', 1),
+)
+# UrlHandling reads a link of a subdomain of t.me (name.t.me) as one of a
+# username (t.me/name); one of pluma.chat stays a link of that site.
+URL_SUBDOMAIN_OLD = ('                    if (lowercasedUrl.hasPrefix(scheme) && (lowercasedUrl.hasSuffix(".\\(basePath)") '
+                     '|| lowercasedUrl.contains(".\\(basePath)/") || lowercasedUrl.contains(".\\(basePath)?"))) {\n')
+URL_SUBDOMAIN = ("                    // pluma: a subdomain of pluma.chat is a site of its own (web.pluma.chat), not a username.\n"
+                 + URL_SUBDOMAIN_OLD.replace("if (lowercasedUrl", f'if basePath != "{LINK_HOST}" && (lowercasedUrl', 1))
+# The pages of the site pluma.chat itself: its root and the first segments of
+# its paths (lower case), the same list in every client. A link of one of
+# them is a link of that site, not one of a username: the app opens it as any
+# site's (its in-app browser or the one the person chose), and the in-app
+# browser shows it instead of handing it back to the app. The site's
+# apple-app-site-association leaves the same paths out of the app's universal
+# links, so the system browser keeps them as well.
+PLUMA_SITE_PATHS = ("iphone", "ipad", "android", "mac", "windows", "linux", "web", "pero", "app", "en", "dl", "ios",
+                    "collect", "assets", "_l", ".well-known",
+                    "favicon.svg", "og.png", "apple-touch-icon.png", "404.html", "progress.json")
+PLUMA_SITE_CHECK = "isPlumaSiteLink"
+PLUMA_SITE_FUNC = (
+    "\n"
+    "// pluma: the pages of the site pluma.chat itself, its root and the first segments of its\n"
+    "// paths, are a site's, not the app's links (the same list in every client).\n"
+    "private let plumaSitePaths: Set<String> = [\n"
+    + ",\n".join("    " + ", ".join(f'"{p}"' for p in PLUMA_SITE_PATHS[i:i + 8])
+                 for i in range(0, len(PLUMA_SITE_PATHS), 8)) + "\n"
+    "]\n"
+    "\n"
+    f"public func {PLUMA_SITE_CHECK}(_ url: String) -> Bool {{\n"
+    "    var urlWithScheme = url\n"
+    '    if !urlWithScheme.contains("://") {\n'
+    '        urlWithScheme = "https://\\(urlWithScheme)"\n'
+    "    }\n"
+    f'    guard let parsedUrl = URL(string: urlWithScheme), parsedUrl.host?.lowercased() == "{LINK_HOST}" else {{\n'
+    "        return false\n"
+    "    }\n"
+    '    if let scheme = parsedUrl.scheme?.lowercased(), scheme != "http" && scheme != "https" {\n'
+    "        return false\n"
+    "    }\n"
+    '    guard let first = parsedUrl.path.split(separator: "/").first else {\n'
+    "        return true\n"
+    "    }\n"
+    "    return plumaSitePaths.contains(first.lowercased())\n"
+    "}\n"
+)
+OPEN_LINK_MENU = "submodules/TelegramUI/Sources/Chat/ChatControllerOpenLinkContextMenu.swift"
+# Where the app tells its own links from the site's pages: (file, upstream's
+# text, Pluma's, how many times).
+PLUMA_SITE = (
+    # The check itself, beside that of Telegram's web short links.
+    (URL_HANDLING, "    return telegramWebShortLinkHosts.contains(host)\n}\n",
+     "    return telegramWebShortLinkHosts.contains(host)\n}\n" + PLUMA_SITE_FUNC, 1),
+    # Not a link of the app's own: the in-app browser and the web apps show
+    # it instead of handing it back to the app.
+    (URL_HANDLING, "public func isTelegramMeLink(_ url: String) -> Bool {\n",
+     "public func isTelegramMeLink(_ url: String) -> Bool {\n"
+     f"    if {PLUMA_SITE_CHECK}(url) {{\n        return false\n    }}\n", 1),
+    # A link resolved in the app (a tap in a chat) comes back as an external
+    # one, as a web short link does.
+    (URL_HANDLING, "            if isTelegramWebShortLink(url) {\n"
+                   "                return .single(.result(.externalUrl(url)))\n"
+                   "            }\n",
+     "            if isTelegramWebShortLink(url) {\n"
+     "                return .single(.result(.externalUrl(url)))\n"
+     "            }\n"
+     f"            if {PLUMA_SITE_CHECK}(url) {{\n"
+     "                return .single(.result(.externalUrl(url)))\n"
+     "            }\n", 1),
+    # An external link of a page opens as any site's, by the person's browser
+    # settings, instead of being resolved in the app again.
+    (OPEN_URL, "        if let host = parsedUrl.host, telegramMeHosts.contains(host) {\n"
+               "            handleInternalUrl(parsedUrl.absoluteString)\n",
+     f"        if let host = parsedUrl.host, telegramMeHosts.contains(host), !{PLUMA_SITE_CHECK}(parsedUrl.absoluteString) {{\n"
+     "            handleInternalUrl(parsedUrl.absoluteString)\n", 1),
+    # The long-press menu of a link calls the check (LINK_HOSTS).
+    (OPEN_LINK_MENU, "import UrlWhitelist\n", "import UrlWhitelist\nimport UrlHandling\n", 1),
+)
+# The links the app makes, and the prefixes it shows before a username or a
+# set's name: (file, text with {host}, how many times). {host} is t.me
+# upstream.
+SHARE_LINKS = (
+    # Profiles, channels and groups: share, copy, QR codes, the admin log.
+    (_SETTINGS_UI + "UsernameSetupController.swift", 'subject: .url("https://{host}/\\(currentAddressName)")', 1),
+    (_PEER_INFO + "PeerInfoScreen.swift", 'strongSelf.openShareLink(url: "https://{host}/\\(username)")', 1),
+    (_PEER_INFO + "PeerInfoProfileItems.swift", 'let linkText = "https://{host}/\\(mainUsername)/\\(threadId)"', 1),
+    (_PEER_INFO + "PeerInfoProfileItems.swift", 'text: "https://{host}/\\(mainUsername)",', 1),
+    (_PEER_INFO + "PeerInfoScreenOpenPeerInfoContextMenu.swift", 'text = "https://{host}/\\(addressName)"', 1),
+    (_PEER_INFO + "PeerInfoScreenOpenPeerInfoContextMenu.swift",
+     'text = "https://{host}/@id\\(peer.id.id._internalGetInt64Value())"', 1),
+    (_PEER_INFO + "PeerInfoScreenOpenURL.swift", 'url = "https://{host}/\\(value)"', 1),
+    (_PEER_INFO + "PeerInfoScreenDisplayGiftsContextMenu.swift",
+     'self?.openShareLink(url: "https://{host}/\\(addressName)/c/\\(id)")', 1),
+    (_PEER_INFO_PANES + "PeerInfoGiftsPaneNode.swift", 'self.openShareLink?("https://{host}/\\(addressName)/c/\\(id)")', 1),
+    (_PEER_INFO_PANES + "PeerInfoStoryPaneNode.swift", 'subject: .url("https://{host}/\\(urlBase)/a/\\(id)"),', 1),
+    ("submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift", 'let link = "https://{host}/\\(addressName)"', 1),
+    (_SETTINGS_SCREENS + "CollectibleItemInfoScreen/Sources/CollectibleItemInfoScreen.swift",
+     'UIPasteboard.general.string = "https://{host}/\\(username.username)"', 1),
+    (_SETTINGS_SCREENS + "AutomaticBusinessMessageSetupScreen/Sources/BusinessLinksSetupScreen.swift",
+     'linkValue = "{host}/+\\(phoneNumber)"', 1),
+    (_SETTINGS_SCREENS + "AutomaticBusinessMessageSetupScreen/Sources/BusinessLinksSetupScreen.swift",
+     'linkValue = "{host}/\\(addressName)"', 1),
+    (_UI_COMPONENTS + "PeerInfo/PostSuggestionsSettingsScreen/Sources/PostSuggestionsSettingsScreen.swift",
+     'let link = "{host}/\\(address)?direct"', 1),
+    ("submodules/InviteLinksUI/Sources/InviteLinkListController.swift", 'mainInvite = .link(link: "{host}/\\(address)",', 1),
+    ("submodules/QrCodeUI/Sources/QrCodeScreen.swift", 'return "https://{host}/\\(peer.addressName ?? "")"', 1),
+    ("submodules/QrCodeUI/Sources/QrCodeScreen.swift", 'return "https://{host}/addlist/\\(slug)"', 1),
+    (_UI_COMPONENTS + "Chat/ChatQrCodeScreen/Sources/ChatQrCodeScreen.swift",
+     'codeLink = "https://{host}/\\(peer.addressName ?? "")"', 1),
+    (_UI_COMPONENTS + "Chat/ChatQrCodeScreen/Sources/ChatQrCodeScreen.swift", 'codeLink = "https://{host}/+\\(peer.phone ?? "")"', 1),
+    (_UI_COMPONENTS + "Chat/ChatQrCodeScreen/Sources/ChatQrCodeScreen.swift",
+     'codeLink = "https://{host}/c/\\(peer.id.id._internalGetInt64Value())"', 1),
+    (_UI_COMPONENTS + "Chat/ChatRecentActionsController/Sources/ChatRecentActionsHistoryTransition.swift",
+     'let prevText = "https://{host}/\\(prev)"', 1),
+    (_UI_COMPONENTS + "Chat/ChatRecentActionsController/Sources/ChatRecentActionsHistoryTransition.swift",
+     'text = "https://{host}/\\(new)"', 1),
+    (_UI_COMPONENTS + "Chat/ChatRecentActionsController/Sources/ChatRecentActionsHistoryTransition.swift",
+     'let link = "https://{host}/\\(username)"', 2),
+    (_SETTINGS_UI + "Privacy and Security/SelectivePrivacySettingsController.swift",
+     'let phoneLink = "https://{host}/+\\(phoneNumber)"', 1),
+    ("submodules/WebUI/Sources/WebAppController.swift", 'subject: .url("https://{host}/\\(addressName)?profile")', 1),
+    ("submodules/GameUI/Sources/GameControllerNode.swift", 'let url = "https://{host}/\\(addressName)?game=\\(gameName)"', 1),
+    ("submodules/TelegramCallsUI/Sources/VideoChatScreenInviteMembers.swift", 'return "https://{host}/\\(addressName)"', 1),
+    ("submodules/TelegramCallsUI/Sources/Components/MediaStreamComponent.swift",
+     'listenerLink: "https://{host}/\\(addressName)?voicechat"', 1),
+    # Messages of public channels and groups.
+    ("submodules/ShareController/Sources/ShareController.swift", 'url = "https://{host}/\\(addressName)/\\(message.id.id)"', 1),
+    ("submodules/TelegramUI/Sources/Chat/ChatControllerOpenTimecodeContextMenu.swift",
+     'let inputCopyText = "https://{host}/\\(addressName)/\\(message.id.id)\\(timestampSuffix)"', 1),
+    ("submodules/GalleryUI/Sources/Items/UniversalVideoGalleryItem.swift",
+     'let visibleString = "{host}/\\(username)/\\(message.id.id)"', 1),
+    (_UI_COMPONENTS + "Chat/ChatQrCodeScreen/Sources/ChatQrCodeScreen.swift", 'link = "{host}/\\(addressName)/\\(message.id.id)"', 1),
+    # Sticker and emoji sets.
+    (_SETTINGS_UI + "Stickers/InstalledStickerPacksController.swift", 'packNames.map { "https://{host}/addstickers/\\($0)" }', 1),
+    (_SETTINGS_UI + "Stickers/ArchivedStickerPacksController.swift", 'packNames.map { "https://{host}/addstickers/\\($0)" }', 1),
+    ("submodules/StickerPackPreviewUI/Sources/StickerPackScreen.swift", 'links += "https://{host}/addemoji/\\(info.shortName)"', 1),
+    ("submodules/StickerPackPreviewUI/Sources/StickerPackScreen.swift", 'links += "https://{host}/addstickers/\\(info.shortName)"', 1),
+    ("submodules/StickerPackPreviewUI/Sources/StickerPackScreen.swift", 'text = "https://{host}/addemoji/\\(info.shortName)"', 1),
+    ("submodules/StickerPackPreviewUI/Sources/StickerPackScreen.swift", 'text = "https://{host}/addstickers/\\(info.shortName)"', 1),
+    (_UI_COMPONENTS + "ChatEntityKeyboardInputNode/Sources/PaneSearchContainerNode.swift",
+     'let link = "https://{host}/addstickers/\\(selectedStickerPack.info.shortName)"', 1),
+    # Themes, wallpapers, languages, proxies.
+    (_SETTINGS_UI + "ThemePickerController.swift", '.url("https://{host}/addtheme/\\(theme.theme.slug)")', 1),
+    (_SETTINGS_UI + "ThemePickerController.swift", '.url("https://{host}/addtheme/\\(cloudTheme.theme.slug)")', 1),
+    (_SETTINGS_UI + "Themes/ThemeSettingsController.swift", '.url("https://{host}/addtheme/\\(theme.theme.slug)")', 1),
+    (_SETTINGS_UI + "Themes/ThemeSettingsController.swift", '.url("https://{host}/addtheme/\\(cloudTheme.theme.slug)")', 1),
+    (_SETTINGS_UI + "Themes/ThemePreviewController.swift", 'subject = .url("https://{host}/addtheme/\\(theme.slug)")', 1),
+    (_SETTINGS_UI + "Themes/ThemePreviewController.swift", 'subject = .url("https://{host}/addtheme/\\(slug)")', 1),
+    (_SETTINGS_SCREENS + "WallpaperGalleryScreen/Sources/WallpaperGalleryController.swift",
+     '.url("https://{host}/bg/\\(file.slug)\\(optionsString)")', 2),
+    (_SETTINGS_SCREENS + "WallpaperGalleryScreen/Sources/WallpaperGalleryController.swift",
+     '.url("https://{host}/bg/\\(UIColor(rgb: color).hexString)")', 1),
+    (_SETTINGS_SCREENS + "WallpaperGalleryScreen/Sources/WallpaperGalleryController.swift",
+     '.url("https://{host}/bg/\\(colorsString)")', 1),
+    (_SETTINGS_SCREENS + "WallpaperGridScreen/Sources/ThemeGridController.swift", 'string.append("https://{host}/bg/\\(item)")', 1),
+    (_SETTINGS_UI + "Language Selection/LocalizationListControllerNode.swift",
+     '.url("https://{host}/setlanguage/\\(info.languageCode)")', 1),
+    (_SETTINGS_UI + "Data and Storage/ProxyListSettingsController.swift", 'string = "https://{host}/proxy?server=', 1),
+    (_SETTINGS_UI + "Data and Storage/ProxyListSettingsController.swift", 'string = "https://{host}/socks?server=', 1),
+    ("submodules/QrCodeUI/Sources/QrCodeScreen.swift", '(externalLink ? "https://{host}/proxy" : ', 1),
+    ("submodules/QrCodeUI/Sources/QrCodeScreen.swift", '(externalLink ? "https://{host}/socks" : ', 1),
+    # The prefixes before a public link's name.
+    ("submodules/PeerInfoUI/Sources/ChannelVisibilityController.swift", 'title: NSAttributedString(string: "{host}/",', 1),
+    ("submodules/PeerInfoUI/Sources/ChannelVisibilityController.swift", 'label = "{host}/" + addressName', 1),
+    ("submodules/TelegramUI/Sources/CreateGroupController.swift", 'title: NSAttributedString(string: "{host}/",', 1),
+    ("submodules/TelegramUI/Sources/CreateChannelController.swift", 'title: NSAttributedString(string: "{host}/",', 1),
+    (_SETTINGS_UI + "Themes/EditThemeController.swift", 'title: NSAttributedString(string: "{host}/addtheme/",', 1),
+    (_UI_COMPONENTS + "Stickers/StickerPackEditTitleController/Sources/StickerPackEditTitleController.swift",
+     'self.inputFieldNode.prefix = "{host}/addstickers/"', 1),
+    (_UI_COMPONENTS + "GroupStickerPackSetupController/Sources/GroupStickerPackSetupController.swift",
+     'isEmoji ? "{host}/addemoji/" : "{host}/addstickers/"', 1),
+)
+# The t.me links the app keeps, which no edit may miss: (file, text, how many
+# times). Every other t.me literal of the app's code (TME_LITERAL) is one of
+# SHARE_LINKS, so a new one upstream stops the patch.
+SHARE_KEEP = (
+    # The host lists above, beside pluma.chat, and the parsers' own forms.
+    (URL_HANDLING, '    "t.me", "telegram.dog",\n', 1),
+    (URL_HANDLING, '    "t.me/iv?",\n', 1),
+    (URL_HANDLING, 'return .internalInstantView(url: "https://t.me/\\(query)")', 1),
+    (URL_HANDLING, 'return .oauth(url: "https://t.me/\\(query)")', 1),
+    (OPEN_URL, '["t.me", "telegram.me", "telegram.dog", "pluma.chat"]', 1),
+    ("submodules/UrlWhitelist/Sources/UrlWhitelist.swift", '    "t.me",\n', 1),
+    ("submodules/TextFormat/Sources/GenerateTextEntities.swift", '    "t.me",\n', 1),
+    ("submodules/TelegramUI/Sources/Chat/ChatControllerOpenLinkContextMenu.swift", 'if host == "t.me" || ', 1),
+    (QR_SCAN, '$0.message.hasPrefix("https://t.me/") || $0.message.hasPrefix("t.me/")', 1),
+    (_UI_COMPONENTS + "CameraScreen/Sources/CameraScreen.swift",
+     'if message.hasPrefix("t.me/c/") || message.hasPrefix("t.me/+") || message.hasPrefix("t.me/contact/") '
+     '|| message.hasPrefix("t.me/")', 1),
+    (_UI_COMPONENTS + "Chat/ChatMessageWebpageBubbleContentNode/Sources/ChatMessageWebpageBubbleContentNode.swift",
+     'webpage.displayUrl.hasPrefix("t.me/")', 1),
+    (_SETTINGS_SCREENS + "ChatbotSetupScreen/Sources/ChatbotSetupScreen.swift", 'url.host == "t.me"', 2),
+    (_UI_COMPONENTS + "GroupStickerPackSetupController/Sources/GroupStickerPackSetupController.swift",
+     'url.host == "t.me"', 1),
+    (CHAT_FOLDERS, '"https://t.me/addlist/"', 2),
+    # Links made only to be opened in the app, which still takes t.me.
+    (OPEN_URL, 'return appendQueryItems(to: "https://t.me\\(path)", items: queryItems)', 1),
+    ("submodules/WebUI/Sources/WebAppUtils.swift", 'let urlString = "https://t.me\\(pathFull)"', 1),
+    ("submodules/WebUI/Sources/WebAppUtils.swift", 'guard url.host?.lowercased() == "t.me" else {', 1),
+    (_UI_COMPONENTS + "Stars/StarsTransactionsScreen/Sources/StarsTransactionsScreen.swift",
+     'itemLink: .url(url: "https://t.me/+\\(inviteHash)", concealed: false)', 1),
+    (_UI_COMPONENTS + "Stars/StarsTransactionsScreen/Sources/StarsTransactionsScreen.swift",
+     'itemLink: .url(url: "https://t.me/$\\(invoiceSlug)", concealed: false)', 1),
+    # Telegram's own: gift codes, collectible gifts, auctions, text styles,
+    # Stars, Cocoon, the bot of link previews, the page that adds a mini
+    # app to the home screen, a payment provider's return to Telegram.
+    ("submodules/PremiumUI/Sources/PremiumIntroScreen.swift", '"https://t.me/giftcode/\\(giftCode.slug)"', 2),
+    ("submodules/PremiumUI/Sources/PremiumGiftCodeScreen.swift", '"https://t.me/giftcode/\\(giftCode.slug)"', 1),
+    ("submodules/PremiumUI/Sources/PremiumGiftCodeScreen.swift", '"https://t.me/giftcode/\\(slug)"', 1),
+    (_UI_COMPONENTS + "Gifts/GiftViewScreen/Sources/GiftViewScreen.swift", 'let link = "https://t.me/nft/\\(gift.slug)"', 2),
+    (_PEER_INFO_PANES + "PeerInfoGiftsPaneNode.swift", 'let link = "https://t.me/nft/\\(gift.slug)"', 1),
+    (_PEER_INFO + "PeerInfoScreen.swift", 'self.openUrl(url: "https://t.me/nft/\\(slug)", ', 1),
+    ("submodules/TelegramUI/Sources/ChatController.swift", 'self.openUrl("https://t.me/nft/\\(slug)", ', 1),
+    (_UI_COMPONENTS + "Stories/StoryContainerScreen/Sources/StoryItemSetContainerViewSendMessage.swift",
+     'url: "https://t.me/nft/\\(slug)", ', 1),
+    ("submodules/ShareController/Sources/ShareController.swift", 'link.contains("t.me/nft/")', 1),
+    (_UI_COMPONENTS + "Gifts/GiftViewScreen/Sources/GiftAuctionBidScreen.swift", 'link = "https://t.me/auction/\\(slug)"', 2),
+    (_UI_COMPONENTS + "Gifts/GiftViewScreen/Sources/GiftAuctionViewScreen.swift", 'link = "https://t.me/auction/\\(slug)"', 2),
+    (_UI_COMPONENTS + "TextProcessingScreen/Sources/TextProcessingScreen.swift", '.url("https://t.me/addstyle/\\(slug)")', 1),
+    (_UI_COMPONENTS + "Stars/StarsTransactionScreen/Sources/StarsTransactionScreen.swift",
+     '"t.me/\\(peerName)/\\(messageId.id)"', 1),
+    (_UI_COMPONENTS + "CocoonInfoScreen/Sources/CocoonInfoScreen.swift", '.url(url: "https://t.me/cocoon", ', 1),
+    (_UI_COMPONENTS + "CocoonInfoScreen/Sources/CocoonInfoScreen.swift", '.url(url: "https://t.me/cocoon?direct", ', 1),
+    ("submodules/InstantPageUI/Sources/InstantPageFeedbackNode.swift",
+     'url: "https://t.me/previews?start=webpage\\(webPageId)"', 1),
+    ("submodules/WebUI/Sources/WebAppController.swift",
+     '"\\(scheme)://t.me/\\(addressName)\\(appName)?startapp&addToHomeScreen"', 1),
+    ("submodules/BotPaymentsUI/Sources/BotCheckoutWebInteractionControllerNode.swift", 'if host == "t.me" || ', 1),
+    # No link: the QR code's markers before the code is ready, a fake ad of
+    # debug builds.
+    (_UI_COMPONENTS + "Chat/ChatQrCodeScreen/Sources/ChatQrCodeScreen.swift",
+     'qrCode(string: "https://t.me/contact/000000:abcdef", ', 1),
+    ("submodules/TelegramUI/Sources/ChatHistoryListNode.swift", 'url: "t.me/telegram", ', 1),
+    # The address of a username in device contacts, which the app writes and
+    # reads back by this prefix (Siri's extension too): contacts already
+    # written must stay readable.
+    ("submodules/AccountContext/Sources/DeviceContactData.swift",
+     'private let phonebookUsernamePrefix = "https://t.me/" + phonebookUsernamePathPrefix', 1),
+    ("Telegram/SiriIntents/IntentContacts.swift",
+     'private let phonebookUsernamePrefix = "https://t.me/" + phonebookUsernamePathPrefix', 1),
+    # The old Objective-C watch extension, which no target builds.
+    ("Telegram/Watch/Extension/TGUserInfoController.m", '@"t.me/%@"', 1),
+)
+# A t.me link written in the app's code: a string literal that starts with
+# the host, or a URL with it right after the scheme.
+TME_LITERAL = re.compile(rb'(?:"|://)t\.me(?=[/\\"])')
+# The texts that show a link of a username, a phone number or a public link,
+# by key (en.lproj, the only language the app bundles): (key, how many t.me).
+STRINGS_LINKS = (
+    ("Username.LinkHint", 1),
+    ("Channel.Username.LinkHint", 1),
+    ("EmptyGroupInfo.Line3", 1),
+    ("PrivacyPhoneNumberSettings.CustomPublicLink", 1),
+    ("Business.Links.SimpleLinkInfoUsernamePhone", 2),
+    ("Business.Links.SimpleLinkInfoUsername", 1),
+    ("Business.Links.SimpleLinkInfoPhone", 1),
+    ("CreateBot.UsernameStatus.Link", 1),
+    # The switch of a proxy's QR code between the app's scheme and an https link.
+    ("SocksProxySetup.QrCode.TMeLink", 1),
+)
+# Texts that keep t.me: Premium's limits, Telegram's Cocoon.
+STRINGS_KEEP = ("Premium.Limits.PublicLinksInfo", "CocoonInfo.IntergrateInfo")
+STRINGS_TME = re.compile(r"(?<![0-9A-Za-z_.])t\.me(?![0-9A-Za-z_])")
+
 # What App Store Connect asks of every upload (its notes on Pluma's build 20,
 # 2026-11-01). Not here: ITMS-90068, iOS 15 at least from April 2027. The
 # pinned release targets 13.0 and compiles 673 of its modules with
@@ -531,6 +851,7 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + tuple(sorted({rel for rel, _, _ in CODE_NAMES}))
                   + tuple(sorted({rel for rel, _, _ in SCHEME_LINKS})) + (URL_HANDLING,)
                   + tuple(sorted({rel for rel, _, _, _, _ in CLIENT_LINKS}))
+                  + tuple(sorted({rel for rel, _, _, _ in LINK_HOSTS} | {rel for rel, _, _ in SHARE_LINKS + SHARE_KEEP}))
                   + (DAY_THEME, DARK_THEME, PRESENTATION_DATA, THEME_SETTINGS, LEGACY_COLORS, AVATAR_NODE)
                   + (PEER_NAME_COLORS, NOTIFICATION_AVATARS, WIDGET_AVATARS, LIVE_STREAM_AVATARS)
                   + (SETTINGS_ITEMS, SETTINGS_SEARCH)
@@ -1110,6 +1431,7 @@ def patch(tree, c):
     patch_names(tree, c)
     patch_scheme(tree, c)
     patch_client_links(tree)
+    patch_links(tree)
     patch_palette(tree)
     patch_identity(tree)
     patch_support(tree)
@@ -3196,6 +3518,83 @@ def verify_client_links(tree):
             raise PatchError(f"{rel}: the scanner's text does not name Pluma's sites")
 
 
+# The app's universal links (task 026): upstream gives the associated
+# domains of t.me only to Telegram's own bundle ids and none to another.
+# Pluma's app opens https://pluma.chat links itself; the App ID has the
+# Associated Domains capability and the site serves
+# /.well-known/apple-app-site-association.
+ASSOCIATED_DOMAINS_OLD = 'associated_domains_fragment = "" if telegram_bundle_id not in official_bundle_ids else """\n'
+ASSOCIATED_DOMAINS = (
+    'associated_domains_fragment = """\n'
+    "<key>com.apple.developer.associated-domains</key>\n"
+    "<array>\n"
+    "    <string>applinks:" + LINK_HOST + "</string>\n"
+    "</array>\n"
+    '""" if telegram_bundle_id not in official_bundle_ids else """\n'
+)
+
+
+def patch_links(tree):
+    """pluma.chat for the links the app makes, and among the hosts whose
+    links it opens itself."""
+    tree.replace(APP_BUILD, ASSOCIATED_DOMAINS_OLD, ASSOCIATED_DOMAINS)
+    for rel, old, new, count in LINK_HOSTS:
+        tree.replace(rel, old, new, count=count)
+    tree.replace(URL_HANDLING, URL_SUBDOMAIN_OLD, URL_SUBDOMAIN)
+    for rel, old, new, count in PLUMA_SITE:
+        tree.replace(rel, old, new, count=count)
+    for rel, text, count in SHARE_LINKS:
+        tree.replace(rel, text.replace("{host}", "t.me"), text.replace("{host}", LINK_HOST), count=count)
+    for key, count in STRINGS_LINKS:
+        tree.replace_in_line(STRINGS, f'"{key}" = "', (("t.me", LINK_HOST, count),))
+
+
+def link_sources(tree):
+    """The app's source files in the tree (all of them in a full checkout)."""
+    for top in ("submodules", "Telegram"):
+        for p in sorted((tree.root / top).rglob("*")):
+            if p.suffix in (".swift", ".m", ".mm", ".h") and p.is_file():
+                yield p.relative_to(tree.root).as_posix()
+
+
+def verify_links(tree):
+    if tree.read(APP_BUILD).count("<string>applinks:" + LINK_HOST + "</string>") != 1:
+        raise PatchError(f"{APP_BUILD}: the app has no universal links of {LINK_HOST}")
+    for rel, _, new, count in LINK_HOSTS:
+        if tree.read(rel).count(new) != count:
+            raise PatchError(f"{rel}: does not take {LINK_HOST} for the app's own links")
+    if tree.read(URL_HANDLING).count(URL_SUBDOMAIN) != 1:
+        raise PatchError(f"{URL_HANDLING}: reads a subdomain of {LINK_HOST} as a username")
+    for rel, _, new, count in PLUMA_SITE:
+        if tree.read(rel).count(new) != count:
+            raise PatchError(f"{rel}: takes the pages of the site {LINK_HOST} for the app's own links")
+    if tree.read(URL_HANDLING).count(PLUMA_SITE_CHECK + "(") != 3:
+        raise PatchError(f"{URL_HANDLING}: the check of the pages of {LINK_HOST} is not where the patch put it")
+    for rel, text, count in SHARE_LINKS:
+        if tree.read(rel).count(text.replace("{host}", LINK_HOST)) != count:
+            raise PatchError(f"{rel}: does not make its links with {LINK_HOST}")
+    kept = {}
+    for rel, text, count in SHARE_KEEP:
+        found = tree.read(rel).count(text)
+        if found != count:
+            raise PatchError(f"{rel}: {found} occurrences of the t.me link {text.strip()!r}, expected {count}; "
+                             "upstream changed it")
+        kept[rel] = kept.get(rel, 0) + count * len(TME_LITERAL.findall(text.encode("utf-8")))
+    for rel in link_sources(tree):
+        found = len(TME_LITERAL.findall((tree.root / rel).read_bytes()))
+        if found != kept.get(rel, 0):
+            raise PatchError(f"{rel}: {found} t.me links, {kept.get(rel, 0)} of them kept (SHARE_KEEP); "
+                             f"the links the app makes are {LINK_HOST}'s")
+    strings = tree.read(STRINGS)
+    for m in STRINGS_ENTRY.finditer(strings):
+        if STRINGS_TME.search(m.group(2)) and m.group(1).split('"')[1] not in STRINGS_KEEP:
+            raise PatchError(f"{STRINGS}: {m.group(0)[:80]!r} still shows a t.me link")
+    for key, count in STRINGS_LINKS:
+        lines = [line for line in strings.split("\n") if line.startswith(f'"{key}" = "')]
+        if len(lines) != 1 or lines[0].count(LINK_HOST) != count:
+            raise PatchError(f"{STRINGS}: {key} does not show a {LINK_HOST} link")
+
+
 def verify_scheme(tree, c):
     build = tree.read(APP_BUILD)
     schemes = re.findall(r"<key>CFBundleURLSchemes</key>\s*<array>(.*?)</array>", build, re.S)
@@ -3329,6 +3728,7 @@ def verify(tree, c):
     verify_names(tree, c)
     verify_scheme(tree, c)
     verify_client_links(tree)
+    verify_links(tree)
     verify_palette(tree)
     verify_identity(tree)
     verify_support(tree)

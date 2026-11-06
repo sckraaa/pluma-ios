@@ -234,6 +234,10 @@ def check(profiles, p12, password, team, bundle, now, min_days, kind="adhoc"):
         group = f"group.{bundle}"
         if group not in ent.get("com.apple.security.application-groups", []):
             problems.append(f"lacks the App Group {group}")
+        # The app opens pluma.chat links (task 026): its profile must allow
+        # the associated domains its entitlements list.
+        if suffix == "" and "com.apple.developer.associated-domains" not in ent:
+            problems.append("lacks Associated Domains (enable it on the App ID and regenerate the profile)")
         if suffix == "" and ent.get("aps-environment") != "production":
             problems.append(f"has push {ent.get('aps-environment')!r}, an {label} build needs 'production'")
         if cert and cert.der not in p.get("DeveloperCertificates", []):
