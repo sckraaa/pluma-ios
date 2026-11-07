@@ -692,6 +692,20 @@ CAMERA_FONTS_PLIST = ("    <key>UIAppFonts</key>\n"
                       "        <string>AremacFS-Regular.otf</string>\n"
                       "        <string>AremacFS-Semibold.otf</string>\n"
                       "    </array>\n")
+# The legacy camera (TGCameraController, the camera of the attachment menu)
+# takes the same font through TGCameraInterfaceAssets, without a fallback:
+# a nil font in its title attributes throws, and the app crashed on opening
+# the camera (the owner's report of 2026-11-07, TGCameraModeControl
+# _createButtonForMode:title:). It falls back as Font.swift does.
+CAMERA_ASSETS = "submodules/LegacyComponents/Sources/TGCameraInterfaceAssets.m"
+CAMERA_ASSETS_FALLBACKS = (
+    ('    return [UIFont fontWithName:TGCameraEncodeText(@"TGDbnfsb.Sfhvmbs", -1) size:size];\n',
+     '    UIFont *font = [UIFont fontWithName:TGCameraEncodeText(@"TGDbnfsb.Sfhvmbs", -1) size:size];\n'
+     '    return font ?: [UIFont systemFontOfSize:size weight:UIFontWeightRegular];\n'),
+    ('    return [UIFont fontWithName:TGCameraEncodeText(@"TGDbnfsb.Tfnjcpme", -1) size:size];\n',
+     '    UIFont *font = [UIFont fontWithName:TGCameraEncodeText(@"TGDbnfsb.Tfnjcpme", -1) size:size];\n'
+     '    return font ?: [UIFont systemFontOfSize:size weight:UIFontWeightSemibold];\n'),
+)
 CAMERA_FONT_FALLBACKS = (
     'font = UIFont(name: encodeText(string: "TGDbnfsb.Tfnjcpme", key: -1), size: size) '
     '?? UIFont.systemFont(ofSize: size, weight: weight.weight)',
@@ -859,7 +873,7 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + (CHAT_STATE, CHAT_CONTROLLER, TAG_CONTEXT_MENU, MESSAGE_CONTEXT_MENU, TAG_PANEL, TITLE_PANELS)
                   + (MESSAGE_REACTIONS, UPDATE_INFO)
                   + (VIDEO_PRESETS_LEGACY, VIDEO_PRESETS, ROUND_VIDEO_RECORDER, GIF_CONVERTER, VIDEO_FETCH)
-                  + (FONT,) + tuple(CAMERA_FONTS) + tuple(SIRI_VOCABULARY.format(lang) for lang in SIRI_PHRASES))
+                  + (FONT, CAMERA_ASSETS) + tuple(CAMERA_FONTS) + tuple(SIRI_VOCABULARY.format(lang) for lang in SIRI_PHRASES))
 
 
 class PatchError(Exception):
@@ -3174,6 +3188,8 @@ def patch_store(tree, c):
 
     for fallback in CAMERA_FONT_FALLBACKS:
         tree.expect(FONT, fallback)
+    for old, new in CAMERA_ASSETS_FALLBACKS:
+        tree.replace(CAMERA_ASSETS, old, new)
     tree.replace(APP_BUILD, CAMERA_FONTS_PLIST, "")
     for rel, sha256 in CAMERA_FONTS.items():
         tree.remove_file(rel, sha256)
@@ -3190,6 +3206,9 @@ def verify_store(tree, c):
         raise PatchError(f"{APP_BUILD}: no purpose of background location ({LOCATION_KEY})")
     if "AremacFS" in build or any(tree.sha256(rel) for rel in CAMERA_FONTS):
         raise PatchError(f"{APP_BUILD}: the bundle still carries SF Camera, an Apple font")
+    assets = tree.read(CAMERA_ASSETS)
+    if any(new not in assets for _, new in CAMERA_ASSETS_FALLBACKS):
+        raise PatchError(f"{CAMERA_ASSETS}: the camera's font has no fallback without SF Camera")
     for lang, phrases in SIRI_PHRASES.items():
         rel = SIRI_VOCABULARY.format(lang)
         text = tree.read(rel)
