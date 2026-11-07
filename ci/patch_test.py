@@ -1263,6 +1263,7 @@ DAMAGE = (
      "                <string>INSearchCallHistoryIntent</string>\n                <string>INAnswerCallIntent</string>\n"),
     (patch.FONT, 'UIFont(name: encodeText(string: "TGDbnfsb.Sfhvmbs", key: -1), size: size) ?? UIFont.systemFont(ofSize: size, weight: weight.weight)',
      'UIFont(name: encodeText(string: "TGDbnfsb.Sfhvmbs", key: -1), size: size)!'),
+    (patch.CAMERA_ASSETS, 'TGCameraEncodeText(@"TGDbnfsb.Tfnjcpme", -1) size:size];', 'TGCameraEncodeText(@"TGDbnfsb.Tfnjcpme", -1) size:size + 1];'),
     (patch.INFOPLIST_STRINGS.format("en"), '"NSLocationAlwaysAndWhenInUseUsageDescription"', '"NSLocationAlwaysAndWhenInUse"'),
     (patch.SIRI_VOCABULARY.format("ru"), "\u0410\u043b\u0438\u0441\u0435", "\u0410\u043b\u0435\u043a\u0441\u0443"),
     (patch.INTRO_SPLASH, "    private let controller: RMIntroViewController\n", "    private let controller: RMIntroViewController?\n"),
@@ -1717,6 +1718,9 @@ class UpstreamTest(unittest.TestCase):
         self.assertNotIn("UIAppFonts", build)
         for rel in patch.CAMERA_FONTS:
             self.assertFalse((self.root / rel).exists(), rel)
+        assets = tree.read(patch.CAMERA_ASSETS)
+        self.assertIn("return font ?: [UIFont systemFontOfSize:size weight:UIFontWeightRegular];", assets)
+        self.assertIn("return font ?: [UIFont systemFontOfSize:size weight:UIFontWeightSemibold];", assets)
         self.assertEqual(set(patch.SIRI_PHRASES), set(patch.SIRI_UPSTREAM))
         en = tree.read(patch.SIRI_VOCABULARY.format("en"))
         self.assertIn("<string>Send a Pluma message to Alex saying I&apos;ll be there in 10 minutes</string>", en)
