@@ -911,6 +911,92 @@ class SavedTagsTest(unittest.TestCase):
             self.assertIn(rel, patch.UPSTREAM_PATHS)
 
 
+class PremiumStickersTest(unittest.TestCase):
+    # Each file the patch edits, with the upstream text of its edits.
+    def upstream(self):
+        files = {patch.MEDIA_FILE: patch.PREMIUM_STICKERS_FLAG_ANCHOR}
+        for rel, old, _, count in patch.PREMIUM_STICKERS_GATES:
+            files[rel] = files.get(rel, "") + (old + "\n") * count
+        # The search of custom emoji keeps isPremium.
+        files[patch.SEARCH_STICKERS] += patch._SEARCH_PREMIUM
+        return files
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.dir.name)
+        (root / "Telegram").mkdir()
+        (root / "Telegram/BUILD").write_text("")
+        (root / "versions.json").write_text("{}")
+        self.tree = patch.Tree(root)
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def write(self, files):
+        for rel, text in files.items():
+            self.tree.write(rel, text)
+
+    def test_gates(self):
+        self.write(self.upstream())
+        with self.assertRaises(patch.PatchError):
+            patch.verify_premium_stickers(self.tree)
+        patch.patch_premium_stickers(self.tree)
+        patch.verify_premium_stickers(self.tree)
+        self.assertIn("public func premiumStickersAvailable() -> Bool {\n    return true\n}\n", self.tree.read(patch.MEDIA_FILE))
+        self.assertIn("if file.isPremiumSticker && !hasPremium && !premiumStickersAvailable() {\n",
+                      self.tree.read(patch.ENTITY_KEYBOARD_INPUT))
+        self.assertIn("addItem(item, true, !hasPremium && !premiumStickersAvailable())\n",
+                      self.tree.read(patch.STICKER_PACK_SCREEN))
+        # The search of custom emoji still checks the account.
+        self.assertEqual(self.tree.read(patch.SEARCH_STICKERS).count("?.isPremium ?? false\n"), 1)
+        # A second run stops.
+        with self.assertRaises(patch.PatchError):
+            patch.patch_premium_stickers(self.tree)
+
+    def test_verify(self):
+        damage = [(rel, new, old) for rel, old, new, _ in patch.PREMIUM_STICKERS_GATES]
+        damage += [(patch.MEDIA_FILE, "    return true\n", "    return false\n")]
+        for rel, new, old in damage:
+            with self.subTest(rel=rel, new=new[:60]):
+                self.write(self.upstream())
+                patch.patch_premium_stickers(self.tree)
+                text = self.tree.read(rel)
+                self.assertGreaterEqual(text.count(new), 1)
+                self.tree.write(rel, text.replace(new, old))
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify_premium_stickers(self.tree)
+                self.assertIn(rel, str(e.exception))
+        # The flag asked somewhere else: another feature would open.
+        for rel in patch.PREMIUM_STICKERS_USES:
+            with self.subTest(rel=rel):
+                self.write(self.upstream())
+                patch.patch_premium_stickers(self.tree)
+                self.tree.write(rel, self.tree.read(rel) + "if premiumStickersAvailable() {\n")
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify_premium_stickers(self.tree)
+                self.assertIn(rel, str(e.exception))
+
+    def test_upstream_changed(self):
+        for rel, old, _, _ in patch.PREMIUM_STICKERS_GATES:
+            with self.subTest(rel=rel, old=old[:60]):
+                files = self.upstream()
+                files[rel] = files[rel].replace(old, old.replace("Premium", "Paid"))
+                self.write(files)
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.patch_premium_stickers(self.tree)
+                self.assertIn(rel, str(e.exception))
+        files = self.upstream()
+        files[patch.MEDIA_FILE] += "public func premiumStickersAvailable() -> Bool { return false }\n"
+        self.write(files)
+        with self.assertRaises(patch.PatchError) as e:
+            patch.patch_premium_stickers(self.tree)
+        self.assertIn(patch.MEDIA_FILE, str(e.exception))
+
+    def test_table(self):
+        for rel in {rel for rel, _, _, _ in patch.PREMIUM_STICKERS_GATES} | {patch.MEDIA_FILE}:
+            self.assertIn(rel, patch.UPSTREAM_PATHS)
+
+
 class IdentityTest(unittest.TestCase):
     # The letter avatars of AvatarNode.swift, with the Saved Messages avatar
     # after them...
