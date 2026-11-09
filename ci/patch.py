@@ -3954,6 +3954,9 @@ PREMIUM_FOR_EVERYONE_EDITS = (
     ("submodules/PeerInfoUI/Sources/ChannelPermissionsController.swift",
      "        if !canSendText || !canSendMedia || slowModeTimeout > 0 {\n            let unrestrictBoosters = state.modifiedUnrestrictBoosters ?? (cachedData.boostsToUnrestrict ?? 0)\n",
      "        if false && (!canSendText || !canSendMedia || slowModeTimeout > 0) { // pluma: boosts do not exist here (ADR 0041)\n            let unrestrictBoosters = state.modifiedUnrestrictBoosters ?? (cachedData.boostsToUnrestrict ?? 0)\n", 1),
+    ("submodules/TelegramUI/Components/Settings/PeerNameColorScreen/Sources/ChannelAppearanceScreen.swift",
+     "            let boostSectionFrame = CGRect(origin: CGPoint(x: sideInset, y: contentHeight), size: boostSectionSize)\n            if let boostSectionView = self.boostSection.view {\n                if boostSectionView.superview == nil {\n                    self.scrollView.addSubview(boostSectionView)\n                }\n                transition.setFrame(view: boostSectionView, frame: boostSectionFrame)\n            }\n            contentHeight += boostSectionSize.height\n            contentHeight += sectionSpacing - 8.0\n",
+     "            // pluma: boosts do not exist here (ADR 0041), the section is never added.\n            let _ = boostSectionSize\n", 1),
 )
 # The check job fetches only the paths the patch reads (ci/fetch-upstream.sh sparse).
 UPSTREAM_PATHS += tuple(sorted({edit[0] for edit in PREMIUM_FOR_EVERYONE_EDITS} - set(UPSTREAM_PATHS)))
