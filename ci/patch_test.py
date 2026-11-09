@@ -748,6 +748,33 @@ class BirthdayTest(unittest.TestCase):
                          [patch.CHAT_LIST, patch.CHAT_LIST_NOTICE, patch.CHAT_LIST_PANELS])
 
 
+class MediaEditorAccentTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.dir.name)
+        (root / "Telegram").mkdir()
+        (root / "Telegram/BUILD").write_text("")
+        (root / "versions.json").write_text("{}")
+        self.tree = patch.Tree(root)
+        for rel, count in patch.MEDIA_EDITOR_ACCENTS:
+            self.tree.write(rel, "UIColor(rgb: 0x5b7a5e)\n" * count)
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_sage(self):
+        patch.verify_media_editor_accent(self.tree)
+
+    def test_a_new_blue_stops_the_patch(self):
+        for rel, _ in patch.MEDIA_EDITOR_ACCENTS:
+            with self.subTest(file=rel):
+                text = self.tree.read(rel)
+                self.tree.write(rel, text + "UIColor(rgb: 0x0088FF)\n")
+                with self.assertRaisesRegex(patch.PatchError, "Telegram's blue"):
+                    patch.verify_media_editor_accent(self.tree)
+                self.tree.write(rel, text)
+
+
 class CrashReportsTest(unittest.TestCase):
     PATCHED = (patch.CRASH_REPORT_TEAM + patch.CRASH_REPORT_PROMPT
                + "                TextAlertAction(type: .defaultAction, title: \"Send\", action: { self.send(report, context: context) })\n")
@@ -1457,6 +1484,12 @@ DAMAGE = (
     (patch.SETTINGS_SEARCH, "        allItems.append(contentsOf: helpItems)\n", "        allItems += helpItems\n"),
     (patch.CRASH_REPORTS, 'text: "Send to Telegram Team"', 'text: "Send to the Telegram Team"'),
     (patch.CRASH_REPORTS, 'Sign in to a Telegram account to share', 'Sign in to Telegram to share'),
+    (patch.CHAT_EDITOR_CONTROLS, "UIColor(rgb: 0x0088ff)", "UIColor(rgb: 0x0088FE)"),
+    (patch.CHAT_EDITOR_COVER, "UIColor(rgb: 0x0088ff)", "UIColor(rgb: 0x0088FE)"),
+    (patch.MEDIA_EDITOR, "pressedColor: UIColor(rgb: 0x0088ff)", "pressedColor: UIColor(rgb: 0x0088FE)"),
+    (patch.MEDIA_TOOLS, "UIColor(rgb: 0x0088ff)", "UIColor(rgb: 0x0088FE)"),
+    (patch.DRAWING_SCREEN, ".color(UIColor(rgb: 0x0088ff))", ".color(UIColor(rgb: 0x0088FE))"),
+    (patch.PICKER_TOOLBAR, "UIColor(rgb: 0x0088ff)", "UIColor(rgb: 0x0088FE)"),
     (patch.CRASH_REPORTS, "actions.send(pending[0], context: context)", "actions.send(pending.first!, context: context)"),
     (patch.CRASH_REPORTS, "    private func share(_ report: CrashReport) {", "    fileprivate func share(_ report: CrashReport) {"),
     ("submodules/QrCodeUI/Sources/QrCodeScanScreen.swift", 'filteredCodes = codes.filter { $0.message.hasPrefix("tg://") }',
@@ -1772,6 +1805,8 @@ class UpstreamTest(unittest.TestCase):
         # No support section.
         self.assertNotIn("Settings_Support", tree.read(patch.SETTINGS_ITEMS))
         self.assertNotIn("let helpItems = ", tree.read(patch.SETTINGS_SEARCH))
+        for rel, count in patch.MEDIA_EDITOR_ACCENTS:
+            self.assertEqual(tree.read(rel).count("UIColor(rgb: 0x5b7a5e)"), count, rel)
         crash_reports = tree.read(patch.CRASH_REPORTS)
         self.assertNotIn("Send to Telegram Team", crash_reports)
         self.assertNotIn("actions.send(", crash_reports)

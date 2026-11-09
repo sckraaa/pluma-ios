@@ -171,6 +171,16 @@ ROUND_VIDEO_RECORDER_NEO = "submodules/Camera/CameraNeo/Sources/VideoRecorder.sw
 GIF_CONVERTER = "submodules/LegacyComponents/Sources/TGGifConverter.m"
 # The quality an edited video is sent at when none was chosen.
 VIDEO_FETCH = "submodules/TelegramUI/Components/Resources/FetchVideoMediaResource/Sources/FetchVideoMediaResource.swift"
+# The media editors' send and done buttons, Telegram's blue in any theme.
+CHAT_EDITOR_CONTROLS = "submodules/TelegramUI/Components/ChatMediaEditorScreen/Sources/ChatMediaEditorBottomControlsComponent.swift"
+CHAT_EDITOR_COVER = "submodules/TelegramUI/Components/ChatMediaEditorScreen/Sources/ChatMediaEditorCover.swift"
+MEDIA_EDITOR = "submodules/TelegramUI/Components/MediaEditorScreen/Sources/MediaEditorScreen.swift"
+MEDIA_TOOLS = "submodules/TelegramUI/Components/MediaEditorScreen/Sources/MediaToolsScreen.swift"
+DRAWING_SCREEN = "submodules/DrawingUI/Sources/DrawingScreen.swift"
+PICKER_TOOLBAR = "submodules/MediaPickerUI/Sources/MediaPickerPhotoToolbarView.swift"
+# (file, how many times upstream writes the blue).
+MEDIA_EDITOR_ACCENTS = ((CHAT_EDITOR_CONTROLS, 1), (CHAT_EDITOR_COVER, 1), (MEDIA_EDITOR, 4), (MEDIA_TOOLS, 1),
+                        (DRAWING_SCREEN, 2), (PICKER_TOOLBAR, 1))
 # Sections of 13.2 that Pluma's server does not serve and that a client without
 # the server's app config key does not show (wallet_available, news_feed_enabled,
 # agent_bot_ids):
@@ -1055,6 +1065,7 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + (MESSAGE_REACTIONS, UPDATE_INFO)
                   + (MEDIA_FILE, SEARCH_STICKERS, ENTITY_KEYBOARD_INPUT, ENTITY_KEYBOARD_SIGNALS, STICKER_PACK_SCREEN)
                   + (VIDEO_PRESETS_LEGACY, VIDEO_PRESETS, ROUND_VIDEO_RECORDER, ROUND_VIDEO_RECORDER_NEO, GIF_CONVERTER, VIDEO_FETCH)
+                  + tuple(rel for rel, _ in MEDIA_EDITOR_ACCENTS)
                   + (FONT, CAMERA_ASSETS) + tuple(CAMERA_FONTS) + tuple(SIRI_VOCABULARY.format(lang) for lang in SIRI_PHRASES))
 
 
@@ -3382,7 +3393,7 @@ PALETTE_EDITS = (
     (AVATAR_NODE, AVATAR_REPOST, AVATAR_REPOST.replace(
         "UIColor(rgb: 0x3DA1FD), UIColor(rgb: 0x34C76F)\n",
         "UIColor(rgb: 0x4f6e52), UIColor(rgb: 0x9dbb9f) // pluma: sage\n"), 1),
-)
+) + tuple((rel, "UIColor(rgb: 0x0088ff)", "UIColor(rgb: 0x5b7a5e)", count) for rel, count in MEDIA_EDITOR_ACCENTS)
 
 # Night's message colours, each kind on one long line: (file, a text that
 # only that line has, edits within the line).
@@ -3573,12 +3584,19 @@ def patch_palette(tree):
         tree.replace_in_line(rel, anchor, edits)
 
 
+def verify_media_editor_accent(tree):
+    for rel, _ in MEDIA_EDITOR_ACCENTS:
+        if "0x0088ff" in tree.read(rel).lower():
+            raise PatchError(f"{rel}: a media editor still has Telegram's blue")
+
+
 def verify_palette(tree):
     for rel in (DAY_THEME, DARK_THEME):
         text = tree.read(rel)
         for blue in TELEGRAM_BLUES:
             if blue in text:
                 raise PatchError(f"{rel}: Telegram's blue {blue} is still there")
+    verify_media_editor_accent(tree)
     if "PresentationThemeAccentColor(baseColor: .blue)" in tree.read(PRESENTATION_DATA):
         raise PatchError(f"{PRESENTATION_DATA}: Night still gets the blue accent")
     # The other avatar colours are the peer colours, one per user
