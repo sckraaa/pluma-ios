@@ -1459,6 +1459,7 @@ def patch(tree, c):
     patch_read_date(tree)
     patch_saved_tags(tree)
     patch_premium_stickers(tree)
+    premium_for_everyone(tree)
     patch_app_update(tree)
     patch_video_quality(tree)
     patch_store(tree, c)
@@ -3888,6 +3889,7 @@ def verify(tree, c):
     verify_read_date(tree)
     verify_saved_tags(tree)
     verify_premium_stickers(tree)
+    verify_premium_for_everyone(tree)
     verify_app_update(tree)
     verify_video_quality(tree)
     verify_store(tree, c)
@@ -3899,6 +3901,42 @@ def verify(tree, c):
     if (conf["bundle_id"], conf["api_id"], conf["team_id"]) != (c.bundle_id, str(c.api_id), c.team_id):
         raise PatchError(f"{CONFIGURATION}: not the Pluma app")
 
+
+
+# --- Premium for everyone -----------------------------------------------------
+# Task 071 (ADR 0041): every user has Premium and every boost-gated feature is
+# open, so the server sends the Premium flag for everybody. Only what the flag
+# would make wrong is edited: the star by every name, the purchase rows that
+# show for anyone with Premium, and what the server does not serve.
+PREMIUM_FOR_EVERYONE_EDITS = (
+    ("submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoSettingsItems.swift",
+     "    if !isPremiumDisabled || context.isPremium {\n        items[.payment]!.append(PeerInfoScreenDisclosureItem(id: 100,",
+     "    if !isPremiumDisabled { // pluma: the row is the purchase; everybody has Premium\n        items[.payment]!.append(PeerInfoScreenDisclosureItem(id: 100,", 1),
+    ("submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoSettingsItems.swift",
+     "    if !isPremiumDisabled || context.isPremium {\n        items[.payment]!.append(PeerInfoScreenDisclosureItem(id: 104,",
+     "    if !isPremiumDisabled { // pluma: the row is the purchase; everybody has Premium\n        items[.payment]!.append(PeerInfoScreenDisclosureItem(id: 104,", 1),
+    ("submodules/TelegramUI/Components/EntityKeyboard/Sources/EmojiPagerContentSignals.swift",
+     "        let isPremiumDisabled = premiumConfiguration.isPremiumDisabled\n",
+     "        // pluma: custom emoji and premium stickers stay in the keyboard: everybody has Premium.\n        let isPremiumDisabled = false\n", 3),
+    ("submodules/TelegramUI/Components/Chat/ChatMessageInteractiveFileNode/Sources/ChatMessageInteractiveFileNode.swift",
+     "                if Namespaces.Message.allNonRegular.contains(arguments.message.id.namespace) {\n                    displayTranscribe = false\n",
+     "                // pluma: the server has no transcription to offer.\n                if true || Namespaces.Message.allNonRegular.contains(arguments.message.id.namespace) {\n                    displayTranscribe = false\n", 1),
+    ("submodules/TelegramUI/Components/Chat/ChatMessageInteractiveInstantVideoNode/Sources/ChatMessageInteractiveInstantVideoNode.swift",
+     "                    if item.message.id.peerId.namespace != Namespaces.Peer.SecretChat && statusDisplayType == .free && !isViewOnceMessage && !item.presentationData.isPreview {\n                        let premiumConfiguration",
+     "                    // pluma: the server has no transcription to offer.\n                    if false && item.message.id.peerId.namespace != Namespaces.Peer.SecretChat && statusDisplayType == .free && !isViewOnceMessage && !item.presentationData.isPreview {\n                        let premiumConfiguration", 1),
+)
+
+
+def premium_for_everyone(tree):
+    for rel, old, new, count in PREMIUM_FOR_EVERYONE_EDITS:
+        tree.replace(rel, old, new, count=count)
+
+
+def verify_premium_for_everyone(tree):
+    for rel, old, new, count in PREMIUM_FOR_EVERYONE_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != count or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the edit of task 071 is not there")
 
 def main(argv=None):
     if (argv if argv is not None else sys.argv[1:]) == ["--paths"]:
