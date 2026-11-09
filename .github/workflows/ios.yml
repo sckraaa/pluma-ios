@@ -1,7 +1,7 @@
 # Builds the Pluma iOS client from the Telegram-iOS release upstream.env pins.
 #
 #   check           the scripts' tests, the patch on a sparse checkout of the
-#                   pinned upstream (layer 228, the server key, no Telegram
+#                   pinned upstream (layer 233, the server key, no Telegram
 #                   address; for the development server, and for the server
 #                   of the repository variables once signed builds are on),
 #                   and lint: seconds, on Linux;
@@ -89,7 +89,7 @@ jobs:
 
   build-sim:
     needs: check
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 180
     env:
       UPSTREAM_DIR: /Users/Shared/telegram-ios
@@ -139,7 +139,7 @@ jobs:
   build-ipa:
     needs: check
     if: vars.PLUMA_TEAM_ID != '' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.ipa))
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 180
     environment: release
     env:
@@ -305,7 +305,7 @@ jobs:
 
   build-testflight:
     needs: preflight-testflight
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 180
     environment: release
     env:
