@@ -1341,6 +1341,8 @@ DAMAGE = (
      "        case .compressedVeryLow:\n            return 1\n"),
     (patch.VIDEO_PRESETS, "<= 400.0 ? 1000 : 1200\n", "<= 400.0 ? 1000 : 1500\n"),
     (patch.ROUND_VIDEO_RECORDER, "AVVideoAverageBitRateKey: 1000 * 1000,", "AVVideoAverageBitRateKey: 1500 * 1000,"),
+    (patch.ROUND_VIDEO_RECORDER_NEO, "audioSettings[AVSampleRateKey] = streamDescription.pointee.mSampleRate\n",
+     "audioSettings[AVSampleRateKey] = 48000.0\n"),
     (patch.GIF_CONVERTER, "AVVideoAverageBitRateKey: @(500000),", "AVVideoAverageBitRateKey: @(750000),"),
     (patch.VIDEO_FETCH, "            qualityPreset = defaultPreset\n", "            qualityPreset = .compressedMedium\n"),
     (patch.SERIALIZATION, "        return 233\n", "        return 234\n"),
@@ -1890,6 +1892,7 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn("        self.bitrateKbps = 2000 //", presets)
         self.assertIn("AVVideoAverageBitRateKey: 2000 * 1000,", tree.read(patch.ROUND_VIDEO_RECORDER))
         self.assertIn("AVVideoAverageBitRateKey: 2_000_000,", tree.read(patch.ROUND_VIDEO_RECORDER_NEO))
+        self.assertIn("audioSettings[AVEncoderBitRateKey] = 96_000", tree.read(patch.ROUND_VIDEO_RECORDER_NEO))
         self.assertIn("AVVideoAverageBitRateKey: @(1000000),", tree.read(patch.GIF_CONVERTER))
         self.assertIn(patch.VIDEO_DEFAULT_PRESET, tree.read(patch.VIDEO_FETCH))
         # What App Store Connect asks: the purpose of background location,

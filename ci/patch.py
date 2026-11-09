@@ -3186,6 +3186,15 @@ def video_quality_edits():
                    "                AVVideoAverageBitRateKey: 2000 * 1000, // pluma: 1000 kbit/s in Telegram (task 052)\n"))
     edits.append((ROUND_VIDEO_RECORDER_NEO, "            AVVideoAverageBitRateKey: 1_200_000,\n",
                    "            AVVideoAverageBitRateKey: 2_000_000, // pluma: 1200 kbit/s in Telegram (task 052)\n"))
+    # A round video that is not cropped is sent as recorded, so the table's
+    # 96 kbit/s must be set here as well. A low sample rate (a Bluetooth
+    # headset's microphone) keeps upstream's 64: the recording fails if the
+    # writer refuses the settings, and no device has tried 96 at that rate.
+    edits.append((ROUND_VIDEO_RECORDER_NEO, "            audioSettings[AVSampleRateKey] = streamDescription.pointee.mSampleRate\n",
+                   "            audioSettings[AVSampleRateKey] = streamDescription.pointee.mSampleRate\n"
+                   "            if streamDescription.pointee.mSampleRate >= 44100.0 {\n"
+                   "                audioSettings[AVEncoderBitRateKey] = 96_000 // pluma: 64 kbit/s in Telegram (task 052)\n"
+                   "            }\n"))
     edits.append((GIF_CONVERTER, "              AVVideoAverageBitRateKey: @(500000),\n",
                    "              AVVideoAverageBitRateKey: @(1000000), // pluma: 500000 in Telegram (task 052)\n"))
     edits.append((VIDEO_FETCH, VIDEO_DEFAULT_PRESET_OLD, VIDEO_DEFAULT_PRESET))
