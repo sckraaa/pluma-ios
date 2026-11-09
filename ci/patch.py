@@ -201,6 +201,8 @@ BRAND_REPLACED = {
     # copied from brand/pluma-devices.tgs: the plane on its lid and in its QR
     # code is the mark.
     "Telegram/Telegram-iOS/Resources/Devices.tgs": "9abb2d5dbd4ac7d2a83722b4871b6be03f76605d1594bcb5b17204ec8e4285fe",
+    # The badge of a message or block the app cannot show.
+    "submodules/TelegramUI/Images.xcassets/Chat/Message/UnsupportedIcon.imageset/logo.pdf": "3fa116c1bf4e112e72450eef0430d7d105c35424cc867406348a006fc099faa5",
     # The textures of the intro's first page, the sphere and the plane around
     # it: transparent, as the page's mark is a view of its own (brand/render.sh).
     # The intro fills the sphere's with its background colour, so the sphere
