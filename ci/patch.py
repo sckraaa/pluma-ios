@@ -141,6 +141,11 @@ MESSAGE_CONTEXT_MENU = "submodules/TelegramUI/Sources/Chat/ChatControllerOpenMes
 TAG_PANEL = "submodules/TelegramUI/Sources/ChatSearchTitleAccessoryPanelNode.swift"
 TITLE_PANELS = "submodules/TelegramUI/Sources/ChatInterfaceTitlePanelNodes.swift"
 MESSAGE_REACTIONS = "submodules/TelegramCore/Sources/State/MessageReactions.swift"
+MEDIA_FILE = "submodules/TelegramCore/Sources/SyncCore/SyncCore_TelegramMediaFile.swift"
+SEARCH_STICKERS = "submodules/TelegramCore/Sources/TelegramEngine/Stickers/SearchStickers.swift"
+ENTITY_KEYBOARD_INPUT = "submodules/TelegramUI/Components/ChatEntityKeyboardInputNode/Sources/ChatEntityKeyboardInputNode.swift"
+ENTITY_KEYBOARD_SIGNALS = "submodules/TelegramUI/Components/EntityKeyboard/Sources/EmojiPagerContentSignals.swift"
+STICKER_PACK_SCREEN = "submodules/StickerPackPreviewUI/Sources/StickerPackScreen.swift"
 # The update screen (TelegramUpdateUI); AppUpdate.swift and
 # MTApiEnvironment.m are in NETWORK_DIRS.
 UPDATE_INFO = "submodules/TelegramUpdateUI/Sources/UpdateInfoController.swift"
@@ -872,6 +877,7 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + (CHAT_LIST, CHAT_LIST_NOTICE, CHAT_LIST_PANELS, PROFILE_ITEMS, CONTEXT_MENUS)
                   + (CHAT_STATE, CHAT_CONTROLLER, TAG_CONTEXT_MENU, MESSAGE_CONTEXT_MENU, TAG_PANEL, TITLE_PANELS)
                   + (MESSAGE_REACTIONS, UPDATE_INFO)
+                  + (MEDIA_FILE, SEARCH_STICKERS, ENTITY_KEYBOARD_INPUT, ENTITY_KEYBOARD_SIGNALS, STICKER_PACK_SCREEN)
                   + (VIDEO_PRESETS_LEGACY, VIDEO_PRESETS, ROUND_VIDEO_RECORDER, GIF_CONVERTER, VIDEO_FETCH)
                   + (FONT, CAMERA_ASSETS) + tuple(CAMERA_FONTS) + tuple(SIRI_VOCABULARY.format(lang) for lang in SIRI_PHRASES))
 
@@ -1452,6 +1458,7 @@ def patch(tree, c):
     patch_birthdays(tree)
     patch_read_date(tree)
     patch_saved_tags(tree)
+    patch_premium_stickers(tree)
     patch_app_update(tree)
     patch_video_quality(tree)
     patch_store(tree, c)
@@ -2682,6 +2689,132 @@ REACTIONS_TOAST = ("                        // pluma: no offer of Premium for mo
                    "strongSelf.context.currentAppConfiguration.with { $0 }).isPremiumDisabled {\n")
 
 
+# --- premium stickers ---------------------------------------------------------
+# Task 058 of the server repository: a premium sticker (a file with a video
+# thumbnail of size "f", SyncCore_TelegramMediaFile.swift 1060) is sent and
+# played by every user, as with Premium in Telegram. Pluma sells no Premium
+# and the owner reported the gate as a defect. No key of appConfiguration
+# opens it: each place checks the account's isPremium, and
+# PremiumConfiguration.isPremiumDisabled (the server's
+# premium_purchase_blocked) drops premium stickers from every list. The
+# function premiumStickersAvailable(), true, stands in at these places only:
+#   a. the sticker pane: a tap opens the Premium screen instead of sending
+#      (ChatEntityKeyboardInputNode.swift 1278); the long press shows no send
+#      items and an unlock accessory (2996);
+#   b. the pane's lists drop or lock them (EmojiPagerContentSignals.swift 1282,
+#      1825, 1862, 1897, 1945, 2089; the same text at 327 is of the emoji pane,
+#      where no file has the "f" thumbnail);
+#   c. a sticker set: they are left out while Premium is not sold and locked
+#      otherwise (StickerPackScreen.swift 594, 1748-1751, 1867-1870);
+#   d. "add to favourites" in the context menu of a sticker message
+#      (ChatInterfaceStateContextMenus.swift 1007);
+#   e. stickers found for an emoji or a search, in the three functions of
+#      stickers (SearchStickers.swift 166, 756, 1154); searchEmoji (1545) keeps
+#      isPremium.
+# The recipient plays the effect from the file alone (ChatMessageAnimatedSticker
+# ItemNode.swift 2591, unless the server sends nopremium, which Pluma's does
+# not). Custom emoji are another matter and stay.
+
+PREMIUM_STICKERS_FLAG_ANCHOR = "public final class TelegramMediaFile: Media, Equatable, Codable {\n"
+PREMIUM_STICKERS_FLAG = """// pluma: premium stickers are open to every user; Pluma does not sell Premium
+// (task 058). Only the gates of premium stickers ask this.
+public func premiumStickersAvailable() -> Bool {
+    return true
+}
+
+""" + PREMIUM_STICKERS_FLAG_ANCHOR
+PREMIUM_STICKERS_COMMENT = "// pluma: premium stickers without Premium (task 058).\n"
+_SEARCH_PREMIUM = "        let isPremium = transaction.getPeer(account.peerId)?.isPremium ?? false\n"
+_SEARCH_FREE = "        " + PREMIUM_STICKERS_COMMENT + (
+    "        let isPremium = (transaction.getPeer(account.peerId)?.isPremium ?? false) || premiumStickersAvailable()\n")
+_SEARCH_AFTER = ("        \n"
+                 "        var result: [FoundStickerItem] = []\n"
+                 "        if scope.contains(.installed) {\n"
+                 "            for entry in transaction.getOrderedListItems(collectionId: Namespaces.OrderedItemList.CloudSavedStickers) {\n")
+
+# (file, upstream, Pluma, how many times upstream has it)
+PREMIUM_STICKERS_GATES = (
+    (SEARCH_STICKERS, _SEARCH_PREMIUM + _SEARCH_AFTER, _SEARCH_FREE + _SEARCH_AFTER, 3),
+    (ENTITY_KEYBOARD_INPUT,
+     "                        if file.isPremiumSticker && !hasPremium {\n",
+     "                        " + PREMIUM_STICKERS_COMMENT +
+     "                        if file.isPremiumSticker && !hasPremium && !premiumStickersAvailable() {\n", 1),
+    (ENTITY_KEYBOARD_INPUT,
+     "                        let isLocked = file.isPremiumSticker && !hasPremium\n",
+     "                        " + PREMIUM_STICKERS_COMMENT +
+     "                        let isLocked = file.isPremiumSticker && !hasPremium && !premiumStickersAvailable()\n", 1),
+    (ENTITY_KEYBOARD_SIGNALS,
+     "                    let isPremiumLocked: Bool = item.file.isPremiumSticker && !hasPremium\n",
+     "                    " + PREMIUM_STICKERS_COMMENT +
+     "                    let isPremiumLocked: Bool = item.file.isPremiumSticker && !hasPremium && !premiumStickersAvailable()\n", 3),
+    (ENTITY_KEYBOARD_SIGNALS,
+     "                    if isPremiumDisabled && item.file.isPremiumSticker {\n",
+     "                    " + PREMIUM_STICKERS_COMMENT +
+     "                    if isPremiumDisabled && !premiumStickersAvailable() && item.file.isPremiumSticker {\n", 3),
+    (ENTITY_KEYBOARD_SIGNALS,
+     "                    if isPremiumDisabled && item.media.isPremiumSticker {\n",
+     "                    " + PREMIUM_STICKERS_COMMENT +
+     "                    if isPremiumDisabled && !premiumStickersAvailable() && item.media.isPremiumSticker {\n", 1),
+    (STICKER_PACK_SCREEN,
+     "isLocked: item.file.isPremiumSticker && !hasPremium,",
+     "isLocked: item.file.isPremiumSticker && !hasPremium && !premiumStickersAvailable(),", 1),
+    (STICKER_PACK_SCREEN,
+     "                    if !premiumConfiguration.isPremiumDisabled {\n",
+     "                    " + PREMIUM_STICKERS_COMMENT +
+     "                    if !premiumConfiguration.isPremiumDisabled || premiumStickersAvailable() {\n", 1),
+    (STICKER_PACK_SCREEN,
+     "                                addItem(item, true, !hasPremium)\n",
+     "                                addItem(item, true, !hasPremium && !premiumStickersAvailable())\n", 1),
+    (STICKER_PACK_SCREEN,
+     "        if !premiumConfiguration.isPremiumDisabled {\n"
+     "            if !premiumItems.isEmpty {\n",
+     "        " + PREMIUM_STICKERS_COMMENT +
+     "        if !premiumConfiguration.isPremiumDisabled || premiumStickersAvailable() {\n"
+     "            if !premiumItems.isEmpty {\n", 1),
+    (STICKER_PACK_SCREEN,
+     "                    addItem(item, true, !hasPremium)\n"
+     "                    currentIndex += 1\n",
+     "                    addItem(item, true, !hasPremium && !premiumStickersAvailable())\n"
+     "                    currentIndex += 1\n", 1),
+    (CONTEXT_MENUS,
+     "            if !isPremiumSticker || chatPresentationInterfaceState.isPremium {\n",
+     "            " + PREMIUM_STICKERS_COMMENT +
+     "            if !isPremiumSticker || chatPresentationInterfaceState.isPremium || premiumStickersAvailable() {\n", 1),
+)
+# How many times each file asks premiumStickersAvailable(); nothing else may.
+PREMIUM_STICKERS_USES = {
+    SEARCH_STICKERS: 3,
+    ENTITY_KEYBOARD_INPUT: 2,
+    ENTITY_KEYBOARD_SIGNALS: 7,
+    STICKER_PACK_SCREEN: 5,
+    CONTEXT_MENUS: 1,
+}
+
+
+def patch_premium_stickers(tree):
+    """Premium stickers are sent, shown and suggested without Premium, which
+    Pluma does not sell; custom emoji keep their gates."""
+    tree.expect(MEDIA_FILE, "premiumStickersAvailable", count=0)
+    tree.replace(MEDIA_FILE, PREMIUM_STICKERS_FLAG_ANCHOR, PREMIUM_STICKERS_FLAG)
+    for rel, old, new, count in PREMIUM_STICKERS_GATES:
+        tree.replace_lines(rel, old, new, count=count)
+
+
+def verify_premium_stickers(tree):
+    if tree.read(MEDIA_FILE).count(PREMIUM_STICKERS_FLAG) != 1:
+        raise PatchError(f"{MEDIA_FILE}: no premiumStickersAvailable() that is true")
+    for rel, old, new, count in PREMIUM_STICKERS_GATES:
+        text = tree.read(rel)
+        if text.count(new) != count or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: a gate of premium stickers still checks Premium")
+    for rel, count in PREMIUM_STICKERS_USES.items():
+        found = tree.read(rel).count("premiumStickersAvailable()")
+        if found != count:
+            raise PatchError(f"{rel}: {found} uses of premiumStickersAvailable(), expected {count}")
+    if tree.read(SEARCH_STICKERS).count("?.isPremium ?? false\n") != 1:
+        raise PatchError(f"{SEARCH_STICKERS}: the search of custom emoji must keep isPremium")
+
+
 def patch_saved_tags(tree):
     """Tags of Saved Messages without Premium, which Pluma does not sell, and
     the server's limit of reactions on a message for everybody."""
@@ -3754,6 +3887,7 @@ def verify(tree, c):
     verify_birthdays(tree)
     verify_read_date(tree)
     verify_saved_tags(tree)
+    verify_premium_stickers(tree)
     verify_app_update(tree)
     verify_video_quality(tree)
     verify_store(tree, c)
