@@ -1316,6 +1316,12 @@ DAMAGE = (
     (CALLS, "                unfilteredConnections = [connections.primary] + connections.alternatives\n",
      "                unfilteredConnections = connections.alternatives\n"),
     (patch.BAZELRC, "build --action_env=ZERO_AR_DATE=1\n", "build --action_env=ZERO_AR_DATE=1\ntry-import %workspace%/user.bazelrc\n"),
+    # The engine of a build and the sections the server does not turn on.
+    (patch.NETWORK_ENGINE, "        return NetworkEngineSettings(engine: .mtProtoKit)\n", "        return NetworkEngineSettings(engine: .rust)\n"),
+    (patch.WALLET_CONFIGURATION, "            isAvailable: false,\n", "            isAvailable: true,\n"),
+    (patch.SETTINGS_ITEMS, ".isAvailable {\n            let balanceText", " {\n            let balanceText"),
+    (patch.NEWS_CONFIGURATION, "newsFeedSwitch(appConfiguration: appConfiguration) == true\n", "newsFeedSwitch(appConfiguration: appConfiguration) != false\n"),
+    (patch.AGENT_CONFIGURATION, 'data["agent_bot_ids"] as? [Any]', 'data["agent_bots"] as? [Any]'),
     (patch.APP_BUILD, "                <string>tc</string>\n", "                <string>tonconnect</string>\n"),
     # The brand.
     (BUILD, '    "PremiumTurbo",\n]\n', '    "PremiumTurbo",\n    "Premium2",\n]\n'),

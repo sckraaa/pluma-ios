@@ -86,6 +86,17 @@ TELEGRAM_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
     "95.161.76.100/32",
 ))
 
+# The MTProto engine of a build: MtProtoKit, which the edits below are for. The
+# Rust engine of third-party/mtproto-engine is in every build, for macOS and
+# behind Debug Settings; it takes its addresses and keys from MtProtoKit's
+# context, and the patch must stop if it becomes the default on iOS.
+NETWORK_ENGINE = "submodules/TelegramCore/Sources/SyncCore/SyncCore_NetworkEngineSettings.swift"
+NETWORK_ENGINE_DEFAULT = ("        #if os(macOS)\n"
+                          "        return NetworkEngineSettings(engine: .rust)\n"
+                          "        #else\n"
+                          "        return NetworkEngineSettings(engine: .mtProtoKit)\n"
+                          "        #endif\n")
+
 # Where the network code lives: what verify() scans (without the unit tests,
 # which are not in the app and carry Telegram's addresses as fixtures).
 NETWORK_DIRS = ("submodules/MtProtoKit", "submodules/TelegramCore/Sources", "submodules/TelegramVoip/Sources")
@@ -159,6 +170,20 @@ ROUND_VIDEO_RECORDER_NEO = "submodules/Camera/CameraNeo/Sources/VideoRecorder.sw
 GIF_CONVERTER = "submodules/LegacyComponents/Sources/TGGifConverter.m"
 # The quality an edited video is sent at when none was chosen.
 VIDEO_FETCH = "submodules/TelegramUI/Components/Resources/FetchVideoMediaResource/Sources/FetchVideoMediaResource.swift"
+# Sections of 13.2 that Pluma's server does not serve and that a client without
+# the server's app config key does not show (wallet_available, news_feed_enabled,
+# agent_bot_ids):
+# (file, the upstream text that decides).
+WALLET_CONFIGURATION = "submodules/WalletContext/Sources/WalletContext.swift"
+NEWS_CONFIGURATION = "submodules/TelegramUI/Components/News/NewsFeedSupport/Sources/NewsFeedConfiguration.swift"
+AGENT_CONFIGURATION = "submodules/AccountContext/Sources/AgentChat.swift"
+OFF_BY_SERVER = (
+    (WALLET_CONFIGURATION, "    public static var defaultValue: WalletConfiguration {\n        return WalletConfiguration(\n            isAvailable: false,\n"),
+    (WALLET_CONFIGURATION, 'let isAvailable = appConfiguration.data?["wallet_available"] as? Bool ?? self.defaultValue.isAvailable\n'),
+    (SETTINGS_ITEMS, "        if WalletConfiguration.with(appConfiguration: context.currentAppConfiguration.with { $0 }).isAvailable {\n"),
+    (NEWS_CONFIGURATION, "    return isDevAccount(appConfiguration: appConfiguration) || newsFeedSwitch(appConfiguration: appConfiguration) == true\n"),
+    (AGENT_CONFIGURATION, 'guard peerId.namespace == Namespaces.Peer.CloudUser, let data = appConfiguration.data, let botIds = data["agent_bot_ids"] as? [Any] else {\n'),
+)
 MAKE = "build-system/Make/Make.py"
 BUILD_CONFIGURATION = "build-system/Make/BuildConfiguration.py"
 VERSIONS = "versions.json"
@@ -901,7 +926,7 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + tuple(sorted({rel for rel, _, _, _ in LINK_HOSTS} | {rel for rel, _, _ in SHARE_LINKS + SHARE_KEEP}))
                   + (DAY_THEME, DARK_THEME, PRESENTATION_DATA, THEME_SETTINGS, LEGACY_COLORS, AVATAR_NODE)
                   + (PEER_NAME_COLORS, NOTIFICATION_AVATARS, WIDGET_AVATARS, LIVE_STREAM_AVATARS)
-                  + (SETTINGS_ITEMS, SETTINGS_SEARCH)
+                  + (SETTINGS_ITEMS, SETTINGS_SEARCH, WALLET_CONFIGURATION, NEWS_CONFIGURATION, AGENT_CONFIGURATION)
                   + (CHAT_LIST, CHAT_LIST_NOTICE, CHAT_LIST_PANELS, PROFILE_ITEMS, CONTEXT_MENUS)
                   + (CHAT_STATE, CHAT_CONTROLLER, TAG_CONTEXT_MENU, MESSAGE_CONTEXT_MENU, TAG_PANEL, TITLE_PANELS)
                   + (MESSAGE_REACTIONS, UPDATE_INFO)
@@ -1449,6 +1474,13 @@ def patch(tree, c):
                        "    // pluma: the server's key; Telegram's backup address records are off.\n"
                        f"    NSString *keyString = {objc_key(c.rsa_pem, '')};\n",
                        must_contain=(TELEGRAM_KEY_LINES[2],))
+
+    tree.expect(NETWORK_ENGINE, NETWORK_ENGINE_DEFAULT)
+
+    # New sections that open on the server's app config alone, which does not
+    # turn them on: they must stay behind it.
+    for rel, s in OFF_BY_SERVER:
+        tree.expect(rel, s)
 
     # Calls: the reflectors are the server's, none of Telegram's is added.
     tree.expect(CALLS, CALL_CONNECTIONS)
