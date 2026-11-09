@@ -2667,6 +2667,15 @@ APP_UPDATE_EDITS = (
      "            context.sharedContext.applicationBindings.openAppStorePage()\n"
      "        }\n"
      "    }, linkAction: { action, itemLink in\n"),
+    # The placeholder of a message the app cannot show, of a rich or widget
+    # message, Passport and stories open this page, and the update screen does
+    # without a url. appstore_id is 0: the site says how to get the app (its
+    # root is outside the app's universal links).
+    (APP_DELEGATE,
+     "            let appStoreId = buildConfig.appStoreId\n"
+     "            if let url = URL(string: \"itms-apps://itunes.apple.com/app/id\\(appStoreId)\") {\n",
+     "            // pluma: no App Store page; the site says how to get the current build.\n"
+     "            if let url = URL(string: \"https://pluma.chat/\") {\n"),
     (MT_API_ENVIRONMENT,
      "            suffix = [NSString stringWithFormat:@\"%@\", value];\n"
      "        }\n"
@@ -4182,6 +4191,10 @@ def verify(tree, c):
 # would make wrong is edited: the star by every name, the purchase rows that
 # show for anyone with Premium, and what the server does not serve.
 PREMIUM_FOR_EVERYONE_EDITS = (
+    ("submodules/TelegramUI/Sources/Chat/ChatControllerOpenMessageContextMenu.swift",
+     "                        if allReactionsAreAvailable {\n                            let premiumConfiguration = PremiumConfiguration.with(appConfiguration: context.currentAppConfiguration.with { $0 })\n",
+     "                        if allReactionsAreAvailable { // pluma: custom emoji for everybody (ADR 0041)\n",
+     1),
     ("submodules/TelegramUI/Sources/Chat/ChatControllerOpenMessageContextMenu.swift",
      "                                    areCustomEmojiEnabled: !premiumConfiguration.isPremiumDisabled,\n",
      "                                    areCustomEmojiEnabled: true, // pluma: everybody has Premium\n",

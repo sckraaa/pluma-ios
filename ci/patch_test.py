@@ -833,6 +833,8 @@ class AppUpdateTest(unittest.TestCase):
         self.assertIn("    public let url: String?\n", info)
         self.assertIn("                self.url = appUpdateData.url\n", info)
         self.assertIn("            context.sharedContext.applicationBindings.openUrl(url)\n", self.tree.read(patch.UPDATE_INFO))
+        self.assertNotIn("itms-apps:", self.tree.read(patch.APP_DELEGATE))
+        self.assertIn('URL(string: "https://pluma.chat/")', self.tree.read(patch.APP_DELEGATE))
         self.assertIn('            suffix = @"adhoc";\n', self.tree.read(patch.MT_API_ENVIRONMENT))
         # A second run finds none of the upstream texts.
         with self.assertRaises(patch.PatchError):
@@ -1484,6 +1486,7 @@ DAMAGE = (
     (patch.SETTINGS_SEARCH, "        allItems.append(contentsOf: helpItems)\n", "        allItems += helpItems\n"),
     (patch.CRASH_REPORTS, 'text: "Send to Telegram Team"', 'text: "Send to the Telegram Team"'),
     (patch.CRASH_REPORTS, 'Sign in to a Telegram account to share', 'Sign in to Telegram to share'),
+    (patch.APP_DELEGATE, "itms-apps://itunes.apple.com/app/id", "itms-apps://apps.apple.com/app/id"),
     (patch.MAKE_THEME, "neutralNightAccentColor = UIColor(rgb: 0x3e88f7)", "neutralNightAccentColor = UIColor(rgb: 0x3e88f8)"),
     (patch.SEND_BUTTON, "if saturation < 0.2 ||", "if saturation < 0.25 ||"),
     (patch.SEND_BUTTON, "generateTintedImage(image: image, color: .white) else {", "generateTintedImage(image: image, color: .black) else {"),
