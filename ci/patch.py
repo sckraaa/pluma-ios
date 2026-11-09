@@ -4138,7 +4138,7 @@ PREMIUM_FOR_EVERYONE_EDITS = (
      "    if !isPremiumDisabled { // pluma: the row is the purchase; everybody has Premium\n        items[.payment]!.append(PeerInfoScreenDisclosureItem(id: 104,", 1),
     ("submodules/TelegramUI/Components/EntityKeyboard/Sources/EmojiPagerContentSignals.swift",
      "        let isPremiumDisabled = premiumConfiguration.isPremiumDisabled\n",
-     "        // pluma: custom emoji and premium stickers stay in the keyboard: everybody has Premium.\n        let isPremiumDisabled = false\n", 3),
+     "        // pluma: custom emoji and premium stickers stay in the keyboard: everybody has Premium.\n        _ = premiumConfiguration\n        let isPremiumDisabled = false\n", 3),
     ("submodules/TelegramUI/Components/Chat/ChatMessageInteractiveFileNode/Sources/ChatMessageInteractiveFileNode.swift",
      "                if Namespaces.Message.allNonRegular.contains(arguments.message.id.namespace) {\n                    displayTranscribe = false\n",
      "                // pluma: the server has no transcription to offer.\n                if true || Namespaces.Message.allNonRegular.contains(arguments.message.id.namespace) {\n                    displayTranscribe = false\n", 1),
