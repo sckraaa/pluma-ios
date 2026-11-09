@@ -1423,6 +1423,8 @@ DAMAGE = (
     # Telegram's support.
     (patch.SETTINGS_ITEMS, "interaction.openSettings(.faq)", "interaction.openSettings(.faqPage)"),
     (patch.SETTINGS_SEARCH, "        allItems.append(contentsOf: helpItems)\n", "        allItems += helpItems\n"),
+    (patch.CRASH_REPORTS, 'text: "Send to Telegram Team"', 'text: "Send to the Telegram Team"'),
+    (patch.CRASH_REPORTS, 'Sign in to a Telegram account to share', 'Sign in to Telegram to share'),
     ("submodules/QrCodeUI/Sources/QrCodeScanScreen.swift", 'filteredCodes = codes.filter { $0.message.hasPrefix("tg://") }',
      'filteredCodes = codes.filter { $0.message.hasPrefix("tg://login") }'),
     ("submodules/TelegramUI/Components/ShareExtensionContext/Sources/ShareExtensionContext.swift",
@@ -1736,6 +1738,7 @@ class UpstreamTest(unittest.TestCase):
         # No support section.
         self.assertNotIn("Settings_Support", tree.read(patch.SETTINGS_ITEMS))
         self.assertNotIn("let helpItems = ", tree.read(patch.SETTINGS_SEARCH))
+        self.assertNotIn("Send to Telegram Team", tree.read(patch.CRASH_REPORTS))
         # The birthday notice opens the chat, says "Send Message" and no longer
         # offers a gift; closing it still dismisses it.
         chat_list = tree.read(patch.CHAT_LIST)

@@ -134,6 +134,7 @@ INTENT_AVATARS = "Telegram/SiriIntents/IntentHandler.swift"
 LIVE_STREAM_AVATARS = "submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/LiveChatReactionStreamView.swift"
 SETTINGS_ITEMS = "submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoSettingsItems.swift"
 SETTINGS_SEARCH = "submodules/SettingsUI/Sources/Search/SettingsSearchableItems.swift"
+CRASH_REPORTS = "submodules/DebugSettingsUI/Sources/CrashReportsController.swift"
 # The birthday notice of the chat list: what a tap does, its text, its close.
 CHAT_LIST = "submodules/ChatListUI/Sources/ChatListControllerNode.swift"
 CHAT_LIST_NOTICE = "submodules/TelegramUI/Components/ChatList/ChatListHeaderNoticeComponent/Sources/ChatListNoticeItem.swift"
@@ -295,6 +296,8 @@ CODE_NAMES = (
     # The e-mail about a login code that does not arrive.
     ("submodules/AuthorizationUI/Sources/AuthorizationSequenceController.swift",
      'emailBody.append("{name}: \\(appVersion)\\n")', 1),
+    # Crash Logs, which the settings search finds: sharing a log needs an account.
+    (CRASH_REPORTS, '"Sign in to a {name} account to share this log."', 1),
     # The label of the app's entry in a contact of the address book, written
     # and read back: Telegram installed on the same phone writes its own.
     ("submodules/AccountContext/Sources/DeviceContactData.swift",
@@ -1002,7 +1005,7 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + tuple(sorted({rel for rel, _, _, _ in LINK_HOSTS} | {rel for rel, _, _ in SHARE_LINKS + SHARE_KEEP}))
                   + (DAY_THEME, DARK_THEME, PRESENTATION_DATA, THEME_SETTINGS, LEGACY_COLORS, AVATAR_NODE)
                   + (PEER_NAME_COLORS, NOTIFICATION_AVATARS, WIDGET_AVATARS, LIVE_STREAM_AVATARS)
-                  + (SETTINGS_ITEMS, SETTINGS_SEARCH, WALLET_CONFIGURATION, NEWS_CONFIGURATION, AGENT_CONFIGURATION)
+                  + (SETTINGS_ITEMS, SETTINGS_SEARCH, CRASH_REPORTS, WALLET_CONFIGURATION, NEWS_CONFIGURATION, AGENT_CONFIGURATION)
                   + (CHAT_LIST, CHAT_LIST_NOTICE, CHAT_LIST_PANELS, PROFILE_ITEMS, CONTEXT_MENUS)
                   + (CHAT_STATE, CHAT_CONTROLLER, TAG_CONTEXT_MENU, MESSAGE_CONTEXT_MENU, TAG_PANEL, TITLE_PANELS)
                   + (MESSAGE_REACTIONS, UPDATE_INFO)
@@ -3389,6 +3392,20 @@ SUPPORT_SEARCH_OLD = src(" " * 8, """
 """)
 
 
+# The menu of a crash log: this item sends it to a bot of Telegram's team, by a
+# username anybody could take on the server.
+CRASH_REPORT_TEAM_OLD = src(" " * 12, """
+    .action(ContextMenuActionItem(text: "Send to Telegram Team", icon: { theme in
+        return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Forward"), color: theme.contextMenu.primaryColor)
+    }, action: { controller, _ in
+        controller?.dismiss(completion: {
+            self.confirmSend(report)
+        })
+    })),
+""")
+CRASH_REPORT_TEAM = "            // pluma: no item that sends the log to Telegram's team.\n"
+
+
 def patch_support(tree):
     """The last section of Settings leads to Telegram's services only: "Ask a
     Question" asks the server for Telegram's support account (help.getSupport,
@@ -3399,6 +3416,7 @@ def patch_support(tree):
                        "    // pluma: no support section; its items lead to Telegram's support, FAQ and channel.\n")
     tree.replace_lines(SETTINGS_SEARCH, SUPPORT_SEARCH_OLD,
                        "        // pluma: no support, FAQ or features items (see PeerInfoSettingsItems.swift).\n")
+    tree.replace(CRASH_REPORTS, CRASH_REPORT_TEAM_OLD, CRASH_REPORT_TEAM)
 
 
 def verify_support(tree):
@@ -3406,6 +3424,9 @@ def verify_support(tree):
         raise PatchError(f"{SETTINGS_ITEMS}: Settings still lead to Telegram's support")
     if "helpSearchableItems(context: context)" in tree.read(SETTINGS_SEARCH):
         raise PatchError(f"{SETTINGS_SEARCH}: the settings search still leads to Telegram's support")
+    crash_reports = tree.read(CRASH_REPORTS)
+    if crash_reports.count(CRASH_REPORT_TEAM) != 1 or "self.confirmSend(report)" in crash_reports:
+        raise PatchError(f"{CRASH_REPORTS}: a crash log can still be sent to Telegram's team")
 
 
 # --- App Store ---------------------------------------------------------------
