@@ -86,7 +86,8 @@ TELEGRAM_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
     "95.161.76.100/32",
 ))
 
-# Where the network code lives: what verify() scans.
+# Where the network code lives: what verify() scans (without the unit tests,
+# which are not in the app and carry Telegram's addresses as fixtures).
 NETWORK_DIRS = ("submodules/MtProtoKit", "submodules/TelegramCore/Sources", "submodules/TelegramVoip/Sources")
 
 NETWORK = "submodules/TelegramCore/Sources/Network/Network.swift"
@@ -153,7 +154,7 @@ UPDATE_INFO = "submodules/TelegramUpdateUI/Sources/UpdateInfoController.swift"
 # recorder of round videos, GIF files.
 VIDEO_PRESETS_LEGACY = "submodules/LegacyComponents/Sources/TGMediaVideoConverter.m"
 VIDEO_PRESETS = "submodules/TelegramUI/Components/MediaEditor/Sources/MediaEditorValues.swift"
-ROUND_VIDEO_RECORDER = "submodules/Camera/Sources/CameraOutput.swift"
+ROUND_VIDEO_RECORDER = "submodules/Camera/CameraLegacy/Sources/CameraOutput.swift"
 GIF_CONVERTER = "submodules/LegacyComponents/Sources/TGGifConverter.m"
 # The quality an edited video is sent at when none was chosen.
 VIDEO_FETCH = "submodules/TelegramUI/Components/Resources/FetchVideoMediaResource/Sources/FetchVideoMediaResource.swift"
@@ -255,16 +256,13 @@ CODE_NAMES = (
     # The album the app saves photos and videos to.
     ("submodules/TelegramUI/Sources/StoreDownloadedMedia.swift",
      '        let albumName = "{name}"\n', 1),
-    # The name in the system call screen (iOS 13; later ones show the app's).
-    ("submodules/TelegramCallsUI/Sources/CallKitIntegration.swift",
-     'CXProviderConfiguration(localizedName: "{name}")', 1),
     # The widget of a passcode-locked app.
     ("submodules/WidgetItems/Sources/WidgetItems.swift",
      'generalLockedText: "Open {name} and enter passcode to edit widget.",', 1),
     ("Telegram/SiriIntents/IntentHandler.swift",
      'NSLocalizedDescriptionKey: "Open {name} and enter passcode to edit widget."', 1),
     # The service account 777000 until the server's data arrives.
-    ("submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift",
+    ("submodules/TelegramCore/Sources/State/Sync/UpdateInterpreter+Messages.swift",
      'firstName: "{name} Notifications"', 1),
     # The e-mail about a login code that does not arrive.
     ("submodules/AuthorizationUI/Sources/AuthorizationSequenceController.swift",
@@ -356,6 +354,7 @@ CLIENT_SITES = re.compile(r"(?:get)?desktop\.telegram\.org|web\.telegram\.org")
 LINK_HOST = "pluma.chat"
 OPEN_URL = "submodules/TelegramUI/Sources/OpenUrl.swift"
 CHAT_FOLDERS = "submodules/TelegramCore/Sources/TelegramEngine/Peers/ChatFolders.swift"
+WEB_PROXY_LINK = "submodules/TelegramCore/Sources/Settings/ProxySettings.swift"
 _SETTINGS_UI = "submodules/SettingsUI/Sources/"
 _UI_COMPONENTS = "submodules/TelegramUI/Components/"
 _PEER_INFO = _UI_COMPONENTS + "PeerInfo/PeerInfoScreen/Sources/"
@@ -397,6 +396,9 @@ LINK_HOSTS = (
     (_UI_COMPONENTS + "GroupStickerPackSetupController/Sources/GroupStickerPackSetupController.swift",
      'url.host == "t.me" || url.host == "telegram.me" {',
      'url.host == "t.me" || url.host == "telegram.me" || url.host == "pluma.chat" {', 1),
+    # The link of a web proxy, which the app also makes with pluma.chat.
+    (WEB_PROXY_LINK, '&& components.host?.lowercased() == "t.me"\n',
+     '&& (components.host?.lowercased() == "t.me" || components.host?.lowercased() == "pluma.chat")\n', 1),
     # The slug of a shared chat folder's link (the server makes it).
     (CHAT_FOLDERS,
      '            slug = String(slug[slug.index(slug.startIndex, offsetBy: "https://t.me/addlist/".count)...])\n'
@@ -485,6 +487,15 @@ PLUMA_SITE = (
 # set's name: (file, text with {host}, how many times). {host} is t.me
 # upstream.
 SHARE_LINKS = (
+    # The private link of a message in a channel's direct messages; the QR
+    # Studio's code of a profile, a phone number or a channel; a web proxy.
+    (_UI_COMPONENTS + "Chat/ChatMessageItemCommon/Sources/ChatMessageCopyLink.swift",
+     'return "https://{host}/c/\\(messageId.peerId.id._internalGetInt64Value())/\\(messageId.id)"', 1),
+    (_UI_COMPONENTS + "QrStudioScreen/Sources/QrStudioScreen.swift", 'link = "https://{host}/\\(addressName)"', 1),
+    (_UI_COMPONENTS + "QrStudioScreen/Sources/QrStudioScreen.swift", 'link = "https://{host}/+\\(user.phone ?? "")"', 1),
+    (_UI_COMPONENTS + "QrStudioScreen/Sources/QrStudioScreen.swift",
+     'link = "https://{host}/c/\\(peer.id.id._internalGetInt64Value())"', 1),
+    (WEB_PROXY_LINK, 'components.host = "{host}"\n    components.path = "/webproxy"\n', 1),
     # Profiles, channels and groups: share, copy, QR codes, the admin log.
     (_SETTINGS_UI + "UsernameSetupController.swift", 'subject: .url("https://{host}/\\(currentAddressName)")', 1),
     (_PEER_INFO + "PeerInfoScreen.swift", 'strongSelf.openShareLink(url: "https://{host}/\\(username)")', 1),
@@ -579,6 +590,19 @@ SHARE_LINKS = (
 # times). Every other t.me literal of the app's code (TME_LITERAL) is one of
 # SHARE_LINKS, so a new one upstream stops the patch.
 SHARE_KEEP = (
+    # Telegram's own: the wallet, which the server does not offer, and the
+    # link it reads for a transfer; the hosts of a message widget, which the
+    # server does not make; a code generated to warm up the QR code generator,
+    # shown to nobody; the code shown before the real one is ready.
+    ("submodules/InstantPageUI/Sources/InstantPageTextItem.swift", '"https://t.me/sendgrams"', 1),
+    (OPEN_URL, 'handleInternalUrl("https://t.me/sendgrams"', 1),
+    (URL_HANDLING, 'URLComponents(string: "https://t.me/sendgrams")!', 1),
+    ("submodules/WalletContext/Sources/WalletTonConnect.swift", 'host == "t.me"', 1),
+    (_UI_COMPONENTS + "Wallet/WalletCollectibleScreen/Sources/WalletCollectibleScreen.swift", '"https://t.me/nft/\\(slug)"', 1),
+    (_UI_COMPONENTS + "MessageWidget/WidgetRuntime/Sources/Host/Links.cpp", '{"t.me", "telegram.me", "telegram.dog"}', 1),
+    (_UI_COMPONENTS + "MessageWidget/WidgetRuntime/Sources/Host/Links.cpp", 'expected https://t.me/', 1),
+    ("submodules/QrCode/Sources/QrCode.swift", 'qrCode(string: "https://t.me/telegram", ', 1),
+    (_UI_COMPONENTS + "QrStudioScreen/Sources/QrStudioScreen.swift", 'return "https://t.me/contact/" + String(', 1),
     # The host lists above, beside pluma.chat, and the parsers' own forms.
     (URL_HANDLING, '    "t.me", "telegram.dog",\n', 1),
     (URL_HANDLING, '    "t.me/iv?",\n', 1),
@@ -598,6 +622,7 @@ SHARE_KEEP = (
     (_UI_COMPONENTS + "GroupStickerPackSetupController/Sources/GroupStickerPackSetupController.swift",
      'url.host == "t.me"', 1),
     (CHAT_FOLDERS, '"https://t.me/addlist/"', 2),
+    (WEB_PROXY_LINK, '&& (components.host?.lowercased() == "t.me" || ', 1),
     # Links made only to be opened in the app, which still takes t.me.
     (OPEN_URL, 'return appendQueryItems(to: "https://t.me\\(path)", items: queryItems)', 1),
     ("submodules/WebUI/Sources/WebAppUtils.swift", 'let urlString = "https://t.me\\(pathFull)"', 1),
@@ -659,7 +684,6 @@ STRINGS_LINKS = (
     ("Business.Links.SimpleLinkInfoUsernamePhone", 2),
     ("Business.Links.SimpleLinkInfoUsername", 1),
     ("Business.Links.SimpleLinkInfoPhone", 1),
-    ("CreateBot.UsernameStatus.Link", 1),
     # The switch of a proxy's QR code between the app's scheme and an https link.
     ("SocksProxySetup.QrCode.TMeLink", 1),
 )
@@ -738,30 +762,28 @@ SIRI_EXTENSION_INTENTS = ("            <key>IntentsSupported</key>\n"
 # configuration), which take no phrases.
 SIRI_INTENTS = ("INSendMessageIntent", "INStartAudioCallIntent", "INSearchCallHistoryIntent",
                 "INSearchForMessagesIntent", "INSetMessageAttributeIntent")
-_SIRI_ENGLISH = "eb529c93435643cd60ca9bcdb6dc23069bd7c59fb024e884dec78d348807f595"
 SIRI_UPSTREAM = {
-    "ar": "7c27690db9289004832e281f1033f590a2df67958258fdb9c16661a403bd70ba",
-    "be": _SIRI_ENGLISH,
-    "ca": _SIRI_ENGLISH,
-    "de": "4d86522e9f9bd761d1d894ad1794a98620583dce0ef4238f0efed938866d2e0d",
-    "en": _SIRI_ENGLISH,
-    "es": "9c1bb458ee1ab0b323004a987d8baa7a200212bf17222e3c16c4ed1a0d7ee3ec",
-    "fa": _SIRI_ENGLISH,
-    "fr": _SIRI_ENGLISH,
-    "id": _SIRI_ENGLISH,
-    "it": "c2de0830034196c81ae8aabcd217d8d21f04b7afae272dd1b7a39776c7158571",
-    "ko": "a3c3623d6a298e670f707ad36ab27f1105b3bd1fccff7047d5d3650e349c1718",
-    "ms": _SIRI_ENGLISH,
-    "nl": "dc20304adee4e138d0ee7ff25e11c5e9693817dbef60b82bd63c25778d387647",
-    "pl": _SIRI_ENGLISH,
-    "pt": "e8110641eab0da3a89e3c8ce245b9c0d1b68bbf8c2c3cbfb9643b534c63ccfc9",
-    "ru": "58da17b3c6370489ca498af4765a221592b8ccb6d1bcb1539739138b746c0f90",
-    "tr": _SIRI_ENGLISH,
-    "uk": _SIRI_ENGLISH,
-    "uz": _SIRI_ENGLISH,
+    "ar": "822f6056cb74b2b7206c08787a6e6ddf6665712fe5825be113a760df3d119ef1",
+    "be": "9d3469922a0210ba6cf629e8786af757dfd3d9dc2609a878df1a0968b3b9f9d9",
+    "ca": "93dd7e49318b4436040cb1a2a49b8a0255eb6aee7da9911ec60dd63e1060cfc0",
+    "de": "a0390d21e8e0294b1a13015495115dd69db2ce8c10f4e020040d9e650aa00b1a",
+    "en": "31cf9077d2d369d92e73bbf8b1bbebc3f2b6f0abaa059313a6324b390110b673",
+    "es": "8e45479298b1652693fba9ba3e5ab61abf056b9edbfad88f7066cdfdc10bb4fa",
+    "fa": "9a871ac18b17081ada1386b1b8374fd2699cfff33510f6ad39cf1229bd020737",
+    "fr": "61f8002431f4a4a1adfc38bdf2d089a3c3f008d331bf159bf8b2c37540fa6b35",
+    "id": "5a9c092ac8e28a1a1874af9a901958bedcdc5cd4bd6b0cdb38a4627e37055fae",
+    "it": "877e2c8efe8a9af03295a3adac267459994f31b33922f2d929ddaaf98fbe398f",
+    "ko": "71ca8d0cac218bb9f8f55d88db0ddf3f89cc5d5981a645e7af99b1ca88f67ed8",
+    "ms": "eb9b34066d8984444303a31161096a71dead6d87d08016b00cb115a5da46b4d9",
+    "nl": "3855266144d5535dfc5f3e50550af656fa1ac4b8bda0424aadd5606e1f750720",
+    "pl": "2c63f0616b8daecc3e641ac1f63ac8fb298e0e6671247dbc83f7dcbd7c9301c2",
+    "pt": "d9dcd4acb1320852fffca437e849fa6cfe56217d91c302b38b8623d9919012d8",
+    "ru": "8d139f7dd9aa1701e9abf37c791d4aa6f68ffe1488c0bf3be5963a50a49eb6e9",
+    "tr": "bafb5e672f1376dbb0ea5e613cd3219218cc58925507a2868e1e16331e37ee9d",
+    "uk": "fb4ce7af212dab518d143b4d9eccfc453c78fb485f3a7106844bd2e4602dfb62",
+    "uz": "f685d6c0110c9fadae04ca07ccccf2cd1c1f29c802b1051115571cb351b784a8",
 }
-# Where upstream has a phrase of its own language (ar, de, es, it, ko, nl, pt,
-# ru), the message phrase is upstream's with the app's name.
+# The phrases are Pluma's own, in each language: upstream's name Telegram.
 SIRI_PHRASES = {
     "ar": ("أرسل رسالة لخالد عبر {name} وأخبره أن هديته وصلت إلى المنزل",
            "اتصل بخالد عبر {name}",
@@ -984,6 +1006,12 @@ def objc_key(pem, indent):
 # --- edits -------------------------------------------------------------------
 
 
+def is_unit_test(rel):
+    """Whether a source file belongs to the unit tests, none of which are in
+    the app: the directories Tests, RichTextEditorCoreTests, SiriIntentsTests."""
+    return any(part.endswith("Tests") for part in rel.split("/")[:-1])
+
+
 class Tree:
     def __init__(self, root):
         self.root = pathlib.Path(root)
@@ -1098,8 +1126,9 @@ class Tree:
             if not base.is_dir():
                 raise PatchError(f"{d}: missing; not a full checkout of the network code")
             for p in sorted(base.rglob("*")):
-                if p.is_file() and p.suffix in (".swift", ".m", ".h", ".mm", ".c", ".cpp"):
-                    yield p.relative_to(self.root).as_posix()
+                rel = p.relative_to(self.root).as_posix()
+                if p.is_file() and p.suffix in (".swift", ".m", ".h", ".mm", ".c", ".cpp") and not is_unit_test(rel):
+                    yield rel
 
 
 # --- configuration -----------------------------------------------------------
@@ -1189,8 +1218,7 @@ class Config:
             "api_id": str(self.api_id),
             "api_hash": self.api_hash,
             "team_id": self.team_id,
-            # No App Center crash reports, no App Store or in-app purchases.
-            "app_center_id": "0",
+            # No App Store or in-app purchases.
             # A public build, as the App Store's: no internal debug features,
             # and among them the reflector benchmark against Telegram's
             # servers (TelegramUI AppDelegate).
@@ -1282,28 +1310,17 @@ WARMUP_OLD = src(" " * 12, """
     }
 """)
 
-CALL_REFLECTOR_OLD = src(" " * 16, """
-    var unfilteredConnections: [CallSessionConnection]
-    unfilteredConnections = [connections.primary] + connections.alternatives
+# Upstream's list of a call's connections, with no reflector of Telegram's
+# added (12.9.2 added one for the 12.0.0 protocol; the release dropped it).
+CALL_CONNECTIONS = ("                let unfilteredConnections: [CallSessionConnection]\n"
+                    "                unfilteredConnections = [connections.primary] + connections.alternatives\n"
+                    "\n"
+                    "                var reflectorIdList: [Int64] = []\n")
 
-    if version == "12.0.0" {
-        for connection in unfilteredConnections {
-            if case let .reflector(reflector) = connection {
-                unfilteredConnections.append(.reflector(CallSessionConnection.Reflector(
-                    id: 123456,
-                    ip: "91.108.9.38",
-                    ipv6: "",
-                    isTcp: true,
-                    port: 595,
-                    peerTag: reflector.peerTag
-                )))
-            }
-        }
-    }
-""")
-
-DNS_OLD = ("    return [[self resolveHostname:hostname] timeout:10.0 onQueue:[MTQueue concurrentDefaultQueue] "
-           "orSignal:[self resolveHostnameNative:hostname port:port]];\n")
+# How a proxy's host name resolves: the system resolver, with the host name
+# itself after 10 s; the release dropped the query to Google's DNS-over-HTTPS.
+DNS_NATIVE = ("    return [[[self resolveHostnameNative:hostname port:port] timeout:10.0 onQueue:[MTQueue concurrentDefaultQueue] "
+              "orSignal:[MTSignal single:hostname]] take:1];\n")
 
 BACKUP_HEAD = ("+ (MTSignal * _Nonnull)fetchBackupIps:(bool)isTestingEnvironment currentContext:(MTContext * _Nonnull)currentContext "
                "additionalSource:(MTSignal * _Nullable)additionalSource phoneNumber:(NSString * _Nullable)phoneNumber "
@@ -1361,7 +1378,7 @@ def patch(tree, c):
         tree.expect(BUILD_CONFIGURATION, f"'{suffix}': '{name}'")
     tree.expect(APP_BUILD, EXTENSIONS)
     tree.expect(APP_BUILD, '    name = "disableProvisioningProfiles",\n')
-    tree.expect(APP_BUILD, '        ":disableProvisioningProfilesSetting": None,\n', count=10)
+    tree.expect(APP_BUILD, '        ":disableProvisioningProfilesSetting": None,\n', count=9)
     tree.expect(APP_BUILD, "        <string>group.{telegram_bundle_id}</string>\n")
 
     # MtProtoKit: one datacenter, the Pluma server, for the production and
@@ -1400,10 +1417,9 @@ def patch(tree, c):
                  "                // pluma: no backup addresses; Telegram's DNS and CloudKit records point at Telegram.\n")
     tree.replace_body(BACKUP, BACKUP_HEAD, "\n}\n\n@end\n", BACKUP_BODY,
                       must_contain=("fetchBackupIpsResolveGoogle:", "fetchConfigFromAddress:"))
-    # Proxy host names resolve through the system, not Google's DNS-over-HTTPS.
-    tree.replace(DNS, DNS_OLD,
-                 "    // pluma: the system resolver only, no DNS-over-HTTPS at Google.\n"
-                 "    return [self resolveHostnameNative:hostname port:port];\n")
+    # Proxy host names resolve through the system, not Google's DNS-over-HTTPS:
+    # upstream's code already, and it must stay so.
+    tree.expect(DNS, DNS_NATIVE)
 
     # MtProtoKit: the server key replaces Telegram's production and test
     # keys (the key is chosen by the fingerprint the server announces).
@@ -1428,12 +1444,8 @@ def patch(tree, c):
                        f"    NSString *keyString = {objc_key(c.rsa_pem, '')};\n",
                        must_contain=(TELEGRAM_KEY_LINES[2],))
 
-    # Calls: no extra TCP reflector of Telegram's for the 12.0.0 protocol.
-    tree.replace_lines(CALLS, CALL_REFLECTOR_OLD,
-                 src(" " * 16, """
-                     // pluma: the reflectors are the server's; no extra one of Telegram's.
-                     let unfilteredConnections: [CallSessionConnection] = [connections.primary] + connections.alternatives
-                 """))
+    # Calls: the reflectors are the server's, none of Telegram's is added.
+    tree.expect(CALLS, CALL_CONNECTIONS)
 
     # The name under the icon and in the share sheet, and the URL scheme of
     # the app's own links (the widget opens the app with it). The bundle ID,
@@ -1740,7 +1752,7 @@ INTRO_HEADER_MARK = "\n" + src("", """
     @property (class, nonatomic, readonly) CGSize firstPageMarkSize;
 """)
 
-INTRO_IVARS_ANCHOR = "    bool _loadedView;\n}\n@end\n"
+INTRO_IVARS_ANCHOR = "    bool _loadedView;\n"
 INTRO_IVARS = src(" " * 4, """
     bool _loadedView;
 
@@ -1751,7 +1763,7 @@ INTRO_IVARS = src(" " * 4, """
     bool _firstPageMarkOnScreen;
     bool _firstPageMarkShown;
     bool _firstPageMarkWritePending;
-""") + "}\n@end\n"
+""")
 
 # animateIn: the mark comes in as the GL view does, and writes itself from its
 # start as it fades in: (upstream's line, what follows it).
@@ -2908,7 +2920,7 @@ LEGACY_AUDIO_KBPS = (("CompressedVeryLow", 32, 64), ("CompressedLow", 32, 64), (
 LEGACY_AUDIO_CHANNELS = (("CompressedVeryLow", 1, 2), ("CompressedLow", 1, 2))
 # (case, Telegram's value, Pluma's) for MediaQualityPreset.videoBitrateKbps.
 VIDEO_KBPS = (("compressedVeryLow", 400, 800), ("compressedLow", 700, 1500), ("compressedMedium", 1600, 2500),
-              ("compressedHigh", 3000, 5000), ("compressedVeryHigh", 6600, 12000), ("videoMessage", 1000, 2000))
+              ("compressedHigh", 3000, 5000), ("compressedVeryHigh", 6600, 12000), ("videoMessage", 1200, 2000))
 ANIMATION_KBPS = (900, 1800)
 # The default preset of an edited video, capped by the source's size.
 VIDEO_DEFAULT_PRESET_OLD = src(" " * 8, """
@@ -3585,7 +3597,7 @@ TELEGRAM_WORD = re.compile(r"(?:(?<![0-9A-Za-z_])|(?<=\\n))(Telegram|TELEGRAM)(?
 # they do, in the pinned commit. Keys never change (the code refers to them),
 # nor do URLs, user names or link targets: they are lower case or part of
 # another word (telegram.org, t.me, TelegramTips, (telegram)).
-STRINGS_RENAMED = (556, 609)
+STRINGS_RENAMED = (585, 638)
 
 
 def rename_strings(text, name):
@@ -3640,8 +3652,11 @@ def patch_scheme(tree, c):
     between Pluma clients only. Links of Telegram's scheme inside the app
     (in messages, from bots) still open in the app, as they always did."""
     # The scheme of the app's own links (the build configuration) already
-    # replaces telegram:// (patch()); tg:// is no longer registered beside it.
-    tree.replace(APP_BUILD, "                <string>tg</string>\n                <string>tonsite</string>\n",
+    # replaces telegram:// (patch()); tg:// is no longer registered beside it,
+    # nor TON's ton:// and tc://, which open the wallet Pluma's server does not
+    # offer (wallet_available) and are for the apps that have one.
+    tree.replace(APP_BUILD, "                <string>tg</string>\n                <string>tonsite</string>\n"
+                 "                <string>ton</string>\n                <string>tc</string>\n",
                  "                <string>tonsite</string>\n")
     for rel, text, count in SCHEME_LINKS:
         tree.replace(rel, text.replace("{scheme}", "tg"), text.replace("{scheme}", c.url_scheme), count=count)
@@ -3706,7 +3721,7 @@ def link_sources(tree):
     """The app's source files in the tree (all of them in a full checkout)."""
     for top in ("submodules", "Telegram"):
         for p in sorted((tree.root / top).rglob("*")):
-            if p.suffix in (".swift", ".m", ".mm", ".h") and p.is_file():
+            if p.suffix in (".swift", ".m", ".mm", ".h", ".cpp") and p.is_file() and not is_unit_test(p.relative_to(tree.root).as_posix()):
                 yield p.relative_to(tree.root).as_posix()
 
 

@@ -111,7 +111,7 @@ def config(**over):
 class ConfigTest(unittest.TestCase):
     def test_repository_config(self):
         c = config(server_ipv6="2001:db8:0:0::1")
-        self.assertEqual((c.bundle_id, c.app_name, c.api_id, c.layer), ("chat.pluma.app", "Pluma", 10002, 228))
+        self.assertEqual((c.bundle_id, c.app_name, c.api_id, c.layer), ("chat.pluma.app", "Pluma", 10002, 233))
         self.assertEqual(c.ipv6, "2001:db8::1")
         conf = c.build_configuration()
         self.assertEqual((conf["bundle_id"], conf["api_id"], conf["team_id"]), ("chat.pluma.app", "10002", "ABCDE12345"))
@@ -1281,10 +1281,10 @@ DAMAGE = (
     (patch.ROUND_VIDEO_RECORDER, "AVVideoAverageBitRateKey: 1000 * 1000,", "AVVideoAverageBitRateKey: 1500 * 1000,"),
     (patch.GIF_CONVERTER, "AVVideoAverageBitRateKey: @(500000),", "AVVideoAverageBitRateKey: @(750000),"),
     (patch.VIDEO_FETCH, "            qualityPreset = defaultPreset\n", "            qualityPreset = .compressedMedium\n"),
-    (patch.SERIALIZATION, "        return 228\n", "        return 229\n"),
-    (patch.VERSIONS, '"app": "12.9.2"', '"app": "12.9.3"'),
-    (patch.VERSIONS, '"xcode": "26.2"', '"xcode": "26.3"'),
-    (patch.VERSIONS, '"bazel": "8.4.2:', '"bazel": "8.5.0:'),
+    (patch.SERIALIZATION, "        return 233\n", "        return 234\n"),
+    (patch.VERSIONS, '"app": "13.2"', '"app": "13.2.1"'),
+    (patch.VERSIONS, '"xcode": "27.1"', '"xcode": "27.2"'),
+    (patch.VERSIONS, '"bazel": "9.2.0:', '"bazel": "9.3.0:'),
     (MAKE, "elif configuration == 'debug_sim_arm64':", "elif configuration == 'debug_sim':"),
     (MAKE, "codesigning_group.add_argument(\n        '--xcodeManagedCodesigning',",
      "codesigning_group.add_argument(\n        '--xcodeManaged',"),
@@ -1310,11 +1310,13 @@ DAMAGE = (
     (ENCRYPTION, "MIIBCgKCAQEAyr+18Rex2ohtVy8sroGPBwXD3DOoKCSpjDqYoXgCqB7ioln4eDCF",
      "MIIBCgKCAQEAyr+18Rex2ohtVy8sroGPBwXD3DOoKCSpjDqYoXgCqB7ioln4eDCG"),
     (BACKUP, "MTSignal *signal = [self fetchConfigFromAddress:address", "MTSignal *signal = [self fetchConfigFrom:address"),
-    (BACKUP, "mainDatacenterId:(NSInteger)mainDatacenterId {\n    NSMutableArray",
-     "mainDatacenterId:(NSInteger)mainDatacenterId delay:(double)delay {\n    NSMutableArray"),
+    (BACKUP, "mainDatacenterId:(NSInteger)mainDatacenterId {\n    __weak MTContext",
+     "mainDatacenterId:(NSInteger)mainDatacenterId delay:(double)delay {\n    __weak MTContext"),
     (DNS, "timeout:10.0 onQueue:[MTQueue concurrentDefaultQueue] orSignal", "timeout:5.0 onQueue:[MTQueue concurrentDefaultQueue] orSignal"),
-    (CALLS, 'ip: "91.108.9.38",', 'ip: "91.108.9.39",'),
+    (CALLS, "                unfilteredConnections = [connections.primary] + connections.alternatives\n",
+     "                unfilteredConnections = connections.alternatives\n"),
     (patch.BAZELRC, "build --action_env=ZERO_AR_DATE=1\n", "build --action_env=ZERO_AR_DATE=1\ntry-import %workspace%/user.bazelrc\n"),
+    (patch.APP_BUILD, "                <string>tc</string>\n", "                <string>tonconnect</string>\n"),
     # The brand.
     (BUILD, '    "PremiumTurbo",\n]\n', '    "PremiumTurbo",\n    "Premium2",\n]\n'),
     (APP_DELEGATE, 'PresentationAppIcon(name: "New2", imageName: "New2"),', 'PresentationAppIcon(name: "New3", imageName: "New3"),'),
@@ -1329,7 +1331,7 @@ DAMAGE = (
     (patch.INTRO_HEADER, "@property (nonatomic, copy) UIView *(^createStartButton)(CGFloat);",
      "@property (nonatomic, copy) UIView *(^createStartButton)(CGFloat width);"),
     (patch.INTRO_CONTROLLER, "} DeviceScreen;", "} RMDeviceScreen;"),
-    (patch.INTRO_CONTROLLER, "    bool _loadedView;\n}\n@end\n", "    bool _loadedView;\n    bool _loadedGL;\n}\n@end\n"),
+    (patch.INTRO_CONTROLLER, "    bool _loadedView;\n", "    BOOL _loadedView;\n"),
     (patch.INTRO_CONTROLLER, "    _glkView.transform = CGAffineTransformMakeScale(0.66, 0.66);",
      "    _glkView.transform = CGAffineTransformMakeScale(0.7, 0.7);"),
     (patch.INTRO_CONTROLLER, "        _startButton.alpha = 1.0;\n    } completion:nil];",
@@ -1563,7 +1565,7 @@ class UpstreamTest(unittest.TestCase):
         self.assertEqual(keys.count(c.rsa_pem[1]), 2)
         self.assertEqual(tree.read(ENCRYPTION).count(c.rsa_pem[1]), 1)
         self.assertIn("    return [MTSignal complete];\n}\n\n@end\n", tree.read(BACKUP))
-        self.assertIn("    return [self resolveHostnameNative:hostname port:port];\n", tree.read(DNS))
+        self.assertIn(patch.DNS_NATIVE, tree.read(DNS))
         self.assertNotIn("CallSessionConnection.Reflector(", tree.read(CALLS))
         build = tree.read(BUILD)
         self.assertEqual(build.count("<string>Pluma</string>"), 9)
@@ -1633,10 +1635,10 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn('"CFBundleDisplayName" = "Pluma";', tree.read(patch.INFOPLIST_STRINGS.format("ko")))
         self.assertIn("위치를 지도에 표시하기 위해 Pluma가 위치", tree.read(patch.INFOPLIST_STRINGS.format("ko")))
         self.assertIn("<string>Pluma stores your contacts heavily encrypted", build)
-        self.assertIn('CXProviderConfiguration(localizedName: "Pluma")',
-                      tree.read("submodules/TelegramCallsUI/Sources/CallKitIntegration.swift"))
-        # plm:// instead of tg://.
+        # plm:// instead of tg://; the wallet's schemes stay with the apps that have one.
         self.assertNotIn("<string>tg</string>", build)
+        self.assertNotIn("<string>ton</string>", build)
+        self.assertNotIn("<string>tc</string>", build)
         self.assertIn('let urlString = "plm://login?token=\\(tokenString)"',
                       tree.read("submodules/AuthorizationUI/Sources/AuthorizationSequencePhoneEntryControllerNode.swift"))
         self.assertIn('codes.filter { $0.message.hasPrefix("plm://") }', tree.read("submodules/QrCodeUI/Sources/QrCodeScanScreen.swift"))
@@ -1787,7 +1789,7 @@ class UpstreamTest(unittest.TestCase):
             self.assertNotIn(value + "\n", legacy)
         presets = tree.read(patch.VIDEO_PRESETS)
         self.assertIn("        case .compressedHigh:\n            return 5000 // pluma: 3000 in Telegram (task 052)\n", presets)
-        self.assertIn("        case .videoMessage:\n            return 2000 // pluma: 1000 in Telegram (task 052)\n", presets)
+        self.assertIn("        case .videoMessage:\n            return 2000 // pluma: 1200 in Telegram (task 052)\n", presets)
         self.assertIn("        case .sticker:\n            return 1000\n", presets)  # not a video message, kept
         self.assertIn("        case .animation:\n            return 1800", presets)
         self.assertIn("        case .compressedMedium, .compressedHigh, .compressedVeryHigh:\n            return 128\n", presets)
@@ -1881,7 +1883,7 @@ class UpstreamTest(unittest.TestCase):
             (patch.URL_HANDLING, '"iphone", ', ""),
             (patch.OPEN_URL, ", !isPlumaSiteLink(parsedUrl.absoluteString) {", " {"),
             (patch.OPEN_LINK_MENU, '(host == "pluma.chat" && !isPlumaSiteLink(parsedUrl.absoluteString))', 'host == "pluma.chat"'),
-            (patch.STRINGS, '"Link: pluma.chat/%@"', '"Link: t.me/%@"'),
+            (patch.STRINGS, '"pluma.chat link"', '"t.me link"'),
             (patch.STRINGS, '"Settings.FAQ" = "Pluma FAQ";', '"Settings.FAQ" = "Pluma FAQ at t.me/faq";'),
         ):
             with self.subTest(rel=rel, old=(old or new)[:60]):
