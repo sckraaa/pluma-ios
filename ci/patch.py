@@ -1459,6 +1459,7 @@ def patch(tree, c):
     patch_read_date(tree)
     patch_saved_tags(tree)
     patch_premium_stickers(tree)
+    premium_for_everyone(tree)
     patch_app_update(tree)
     patch_video_quality(tree)
     patch_store(tree, c)
@@ -3888,6 +3889,7 @@ def verify(tree, c):
     verify_read_date(tree)
     verify_saved_tags(tree)
     verify_premium_stickers(tree)
+    verify_premium_for_everyone(tree)
     verify_app_update(tree)
     verify_video_quality(tree)
     verify_store(tree, c)
@@ -3899,6 +3901,77 @@ def verify(tree, c):
     if (conf["bundle_id"], conf["api_id"], conf["team_id"]) != (c.bundle_id, str(c.api_id), c.team_id):
         raise PatchError(f"{CONFIGURATION}: not the Pluma app")
 
+
+
+# --- Premium for everyone -----------------------------------------------------
+# Task 071 (ADR 0041): every user has Premium and every boost-gated feature is
+# open, so the server sends the Premium flag for everybody. Only what the flag
+# would make wrong is edited: the star by every name, the purchase rows that
+# show for anyone with Premium, and what the server does not serve.
+PREMIUM_FOR_EVERYONE_EDITS = (
+    ("submodules/TelegramUI/Sources/Chat/ChatControllerOpenMessageContextMenu.swift",
+     "                                    areCustomEmojiEnabled: !premiumConfiguration.isPremiumDisabled,\n",
+     "                                    areCustomEmojiEnabled: true, // pluma: everybody has Premium\n",
+     1),
+    ("submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoSettingsItems.swift",
+     "    if !isPremiumDisabled || context.isPremium {\n        items[.payment]!.append(PeerInfoScreenDisclosureItem(id: 100,",
+     "    if !isPremiumDisabled { // pluma: the row is the purchase; everybody has Premium\n        items[.payment]!.append(PeerInfoScreenDisclosureItem(id: 100,", 1),
+    ("submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoSettingsItems.swift",
+     "    if !isPremiumDisabled || context.isPremium {\n        items[.payment]!.append(PeerInfoScreenDisclosureItem(id: 104,",
+     "    if !isPremiumDisabled { // pluma: the row is the purchase; everybody has Premium\n        items[.payment]!.append(PeerInfoScreenDisclosureItem(id: 104,", 1),
+    ("submodules/TelegramUI/Components/EntityKeyboard/Sources/EmojiPagerContentSignals.swift",
+     "        let isPremiumDisabled = premiumConfiguration.isPremiumDisabled\n",
+     "        // pluma: custom emoji and premium stickers stay in the keyboard: everybody has Premium.\n        let isPremiumDisabled = false\n", 3),
+    ("submodules/TelegramUI/Components/Chat/ChatMessageInteractiveFileNode/Sources/ChatMessageInteractiveFileNode.swift",
+     "                if Namespaces.Message.allNonRegular.contains(arguments.message.id.namespace) {\n                    displayTranscribe = false\n",
+     "                // pluma: the server has no transcription to offer.\n                if true || Namespaces.Message.allNonRegular.contains(arguments.message.id.namespace) {\n                    displayTranscribe = false\n", 1),
+    ("submodules/TelegramUI/Components/Chat/ChatMessageInteractiveInstantVideoNode/Sources/ChatMessageInteractiveInstantVideoNode.swift",
+     "                    if item.message.id.peerId.namespace != Namespaces.Peer.SecretChat && statusDisplayType == .free && !isViewOnceMessage && !item.presentationData.isPreview {\n                        let premiumConfiguration",
+     "                    // pluma: the server has no transcription to offer.\n                    if false && item.message.id.peerId.namespace != Namespaces.Peer.SecretChat && statusDisplayType == .free && !isViewOnceMessage && !item.presentationData.isPreview {\n                        let premiumConfiguration", 1),
+    # Boosts do not exist here: nothing waits for a level of a channel, no
+    # screen, prompt or link offers one.
+    ("submodules/TelegramUI/Components/PeerAllowedReactionsScreen/Sources/PeerAllowedReactionsScreen.swift",
+     "            if let boostStatus = self.boostStatus, !customReactions.isEmpty, customReactions.count > boostStatus.level {\n",
+     "            if let boostStatus = self.boostStatus, false && !customReactions.isEmpty && customReactions.count > boostStatus.level { // pluma: custom reactions need no boost level\n", 1),
+    ("submodules/TelegramUI/Components/PeerAllowedReactionsScreen/Sources/PeerAllowedReactionsScreen.swift",
+     "                                        if nextCustomReactionCount > boostStatus.level {\n",
+     "                                        if false && nextCustomReactionCount > boostStatus.level { // pluma: custom reactions need no boost level\n", 1),
+    ("submodules/TelegramUI/Components/PeerAllowedReactionsScreen/Sources/PeerAllowedReactionsScreen.swift",
+     "            if let boostStatus = self.boostStatus, customReactionCount > boostStatus.level {\n",
+     "            if let boostStatus = self.boostStatus, false && customReactionCount > boostStatus.level { // pluma: custom reactions need no boost level\n", 1),
+    ("submodules/PremiumUI/Sources/PremiumBoostLevelsScreen.swift",
+     "func requiredBoostSubjectLevel(subject: BoostSubject, group: Bool, context: AccountContext, configuration: PremiumConfiguration) -> Int32 {\n    switch subject {\n",
+     "func requiredBoostSubjectLevel(subject: BoostSubject, group: Bool, context: AccountContext, configuration: PremiumConfiguration) -> Int32 {\n    // pluma: nothing needs a boost level, colours included: some have none in the\n    // server's list and fall back to 1 below (ADR 0041).\n    if true || group {\n        return 0\n    }\n    switch subject {\n", 1),
+    ("submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreenPerformButtonAction.swift",
+     "                        let boostTitle: String\n                        switch channel.info {\n                        case .group:\n                            boostTitle = presentationData.strings.PeerInfo_Group_Boost\n                        case .broadcast:\n                            boostTitle = presentationData.strings.PeerInfo_Channel_Boost\n                        }\n                        items.append(.action(ContextMenuActionItem(text: boostTitle, badge: nil, icon: { theme in\n                            generateTintedImage(image: UIImage(bundleImageName: \"Chat/Context Menu/Boost\"), color: theme.contextMenu.primaryColor)\n                        }, action: { [weak self] _, f in\n                            f(.dismissWithoutContent)\n                            \n                            self?.openBoost()\n                        })))\n",
+     "                        // pluma: boosts do not exist here (ADR 0041), no item to boost.\n", 1),
+    ("submodules/UrlHandling/Sources/UrlHandling.swift",
+     "                            case .boost:\n                                return .single(.progress) \n                                |> then(\n                                    combineLatest(\n                                        context.engine.peers.getChannelBoostStatus(peerId: peer.id),\n                                        context.engine.peers.getMyBoostStatus()\n                                    )\n                                    |> map { boostStatus, myBoostStatus -> ResolveInternalUrlResult in\n                                        return .result(.boost(peerId: peer.id, status: boostStatus, myBoostStatus: myBoostStatus))\n                                    }\n                                )\n",
+     "                            case .boost:\n                                // pluma: a boost link opens the channel.\n                                return .single(.result(.peer(peer._asPeer(), .chat(textInputState: nil, subject: nil, peekData: nil))))\n", 1),
+    ("submodules/UrlHandling/Sources/UrlHandling.swift",
+     "                    if case .boost = parameter {\n                        return .single(.result(.boost(peerId: nil, status: nil, myBoostStatus: nil)))\n                    } else {\n                        return .single(.result(.peer(nil, .info(nil))))\n                    }\n",
+     "                    // pluma: a boost link of an unknown channel is a link to nothing, like any other.\n                    return .single(.result(.peer(nil, .info(nil))))\n", 1),
+    ("submodules/PeerInfoUI/Sources/ChannelPermissionsController.swift",
+     "        if !canSendText || !canSendMedia || slowModeTimeout > 0 {\n            let unrestrictBoosters = state.modifiedUnrestrictBoosters ?? (cachedData.boostsToUnrestrict ?? 0)\n",
+     "        if false && (!canSendText || !canSendMedia || slowModeTimeout > 0) { // pluma: boosts do not exist here (ADR 0041)\n            let unrestrictBoosters = state.modifiedUnrestrictBoosters ?? (cachedData.boostsToUnrestrict ?? 0)\n", 1),
+    ("submodules/TelegramUI/Components/Settings/PeerNameColorScreen/Sources/ChannelAppearanceScreen.swift",
+     "            let boostSectionFrame = CGRect(origin: CGPoint(x: sideInset, y: contentHeight), size: boostSectionSize)\n            if let boostSectionView = self.boostSection.view {\n                if boostSectionView.superview == nil {\n                    self.scrollView.addSubview(boostSectionView)\n                }\n                transition.setFrame(view: boostSectionView, frame: boostSectionFrame)\n            }\n            contentHeight += boostSectionSize.height\n            contentHeight += sectionSpacing - 8.0\n",
+     "            // pluma: boosts do not exist here (ADR 0041), the section is never added.\n            let _ = boostSectionSize\n", 1),
+)
+# The check job fetches only the paths the patch reads (ci/fetch-upstream.sh sparse).
+UPSTREAM_PATHS += tuple(sorted({edit[0] for edit in PREMIUM_FOR_EVERYONE_EDITS} - set(UPSTREAM_PATHS)))
+
+
+def premium_for_everyone(tree):
+    for rel, old, new, count in PREMIUM_FOR_EVERYONE_EDITS:
+        tree.replace(rel, old, new, count=count)
+
+
+def verify_premium_for_everyone(tree):
+    for rel, old, new, count in PREMIUM_FOR_EVERYONE_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != count or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the edit of task 071 is not there")
 
 def main(argv=None):
     if (argv if argv is not None else sys.argv[1:]) == ["--paths"]:
