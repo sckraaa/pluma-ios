@@ -3928,6 +3928,32 @@ PREMIUM_FOR_EVERYONE_EDITS = (
     ("submodules/TelegramUI/Components/Chat/ChatMessageInteractiveInstantVideoNode/Sources/ChatMessageInteractiveInstantVideoNode.swift",
      "                    if item.message.id.peerId.namespace != Namespaces.Peer.SecretChat && statusDisplayType == .free && !isViewOnceMessage && !item.presentationData.isPreview {\n                        let premiumConfiguration",
      "                    // pluma: the server has no transcription to offer.\n                    if false && item.message.id.peerId.namespace != Namespaces.Peer.SecretChat && statusDisplayType == .free && !isViewOnceMessage && !item.presentationData.isPreview {\n                        let premiumConfiguration", 1),
+    # Boosts do not exist here: nothing waits for a level of a channel, no
+    # screen, prompt or link offers one.
+    ("submodules/TelegramUI/Components/PeerAllowedReactionsScreen/Sources/PeerAllowedReactionsScreen.swift",
+     "            if let boostStatus = self.boostStatus, !customReactions.isEmpty, customReactions.count > boostStatus.level {\n",
+     "            if let boostStatus = self.boostStatus, false && !customReactions.isEmpty && customReactions.count > boostStatus.level { // pluma: custom reactions need no boost level\n", 1),
+    ("submodules/TelegramUI/Components/PeerAllowedReactionsScreen/Sources/PeerAllowedReactionsScreen.swift",
+     "                                        if nextCustomReactionCount > boostStatus.level {\n",
+     "                                        if false && nextCustomReactionCount > boostStatus.level { // pluma: custom reactions need no boost level\n", 1),
+    ("submodules/TelegramUI/Components/PeerAllowedReactionsScreen/Sources/PeerAllowedReactionsScreen.swift",
+     "            if let boostStatus = self.boostStatus, customReactionCount > boostStatus.level {\n",
+     "            if let boostStatus = self.boostStatus, false && customReactionCount > boostStatus.level { // pluma: custom reactions need no boost level\n", 1),
+    ("submodules/PremiumUI/Sources/PremiumBoostLevelsScreen.swift",
+     "func requiredBoostSubjectLevel(subject: BoostSubject, group: Bool, context: AccountContext, configuration: PremiumConfiguration) -> Int32 {\n    switch subject {\n",
+     "func requiredBoostSubjectLevel(subject: BoostSubject, group: Bool, context: AccountContext, configuration: PremiumConfiguration) -> Int32 {\n    // pluma: nothing needs a boost level, colours included: some have none in the\n    // server's list and fall back to 1 below (ADR 0041).\n    if true || group {\n        return 0\n    }\n    switch subject {\n", 1),
+    ("submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreenPerformButtonAction.swift",
+     "                        let boostTitle: String\n                        switch channel.info {\n                        case .group:\n                            boostTitle = presentationData.strings.PeerInfo_Group_Boost\n                        case .broadcast:\n                            boostTitle = presentationData.strings.PeerInfo_Channel_Boost\n                        }\n                        items.append(.action(ContextMenuActionItem(text: boostTitle, badge: nil, icon: { theme in\n                            generateTintedImage(image: UIImage(bundleImageName: \"Chat/Context Menu/Boost\"), color: theme.contextMenu.primaryColor)\n                        }, action: { [weak self] _, f in\n                            f(.dismissWithoutContent)\n                            \n                            self?.openBoost()\n                        })))\n",
+     "                        // pluma: boosts do not exist here (ADR 0041), no item to boost.\n", 1),
+    ("submodules/UrlHandling/Sources/UrlHandling.swift",
+     "                            case .boost:\n                                return .single(.progress) \n                                |> then(\n                                    combineLatest(\n                                        context.engine.peers.getChannelBoostStatus(peerId: peer.id),\n                                        context.engine.peers.getMyBoostStatus()\n                                    )\n                                    |> map { boostStatus, myBoostStatus -> ResolveInternalUrlResult in\n                                        return .result(.boost(peerId: peer.id, status: boostStatus, myBoostStatus: myBoostStatus))\n                                    }\n                                )\n",
+     "                            case .boost:\n                                // pluma: a boost link opens the channel.\n                                return .single(.result(.peer(peer._asPeer(), .chat(textInputState: nil, subject: nil, peekData: nil))))\n", 1),
+    ("submodules/UrlHandling/Sources/UrlHandling.swift",
+     "                    if case .boost = parameter {\n                        return .single(.result(.boost(peerId: nil, status: nil, myBoostStatus: nil)))\n                    } else {\n                        return .single(.result(.peer(nil, .info(nil))))\n                    }\n",
+     "                    // pluma: a boost link of an unknown channel is a link to nothing, like any other.\n                    return .single(.result(.peer(nil, .info(nil))))\n", 1),
+    ("submodules/PeerInfoUI/Sources/ChannelPermissionsController.swift",
+     "        if !canSendText || !canSendMedia || slowModeTimeout > 0 {\n            let unrestrictBoosters = state.modifiedUnrestrictBoosters ?? (cachedData.boostsToUnrestrict ?? 0)\n",
+     "        if false && (!canSendText || !canSendMedia || slowModeTimeout > 0) { // pluma: boosts do not exist here (ADR 0041)\n            let unrestrictBoosters = state.modifiedUnrestrictBoosters ?? (cachedData.boostsToUnrestrict ?? 0)\n", 1),
 )
 
 
