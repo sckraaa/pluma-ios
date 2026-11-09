@@ -3909,6 +3909,10 @@ def verify(tree, c):
 # would make wrong is edited: the star by every name, the purchase rows that
 # show for anyone with Premium, and what the server does not serve.
 PREMIUM_FOR_EVERYONE_EDITS = (
+    ("submodules/TelegramUI/Sources/Chat/ChatControllerOpenMessageContextMenu.swift",
+     "                                    areCustomEmojiEnabled: !premiumConfiguration.isPremiumDisabled,\n",
+     "                                    areCustomEmojiEnabled: true, // pluma: everybody has Premium\n",
+     1),
     ("submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoSettingsItems.swift",
      "    if !isPremiumDisabled || context.isPremium {\n        items[.payment]!.append(PeerInfoScreenDisclosureItem(id: 100,",
      "    if !isPremiumDisabled { // pluma: the row is the purchase; everybody has Premium\n        items[.payment]!.append(PeerInfoScreenDisclosureItem(id: 100,", 1),
