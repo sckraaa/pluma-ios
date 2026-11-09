@@ -3109,6 +3109,9 @@ def video_quality_edits():
         default:
             return 2
     """)))
+    # A round video is exported with these two, not with the preset's bitrate.
+    edits.append((VIDEO_PRESETS, "        self.bitrateKbps = max(self.dimensions.width, self.dimensions.height) <= 400.0 ? 1000 : 1200\n",
+                  "        self.bitrateKbps = 2000 // pluma: 1000 up to 400 px and 1200 above in Telegram (task 052)\n"))
     edits.append((ROUND_VIDEO_RECORDER, "                AVVideoAverageBitRateKey: 1000 * 1000,\n",
                    "                AVVideoAverageBitRateKey: 2000 * 1000, // pluma: 1000 kbit/s in Telegram (task 052)\n"))
     edits.append((ROUND_VIDEO_RECORDER_NEO, "            AVVideoAverageBitRateKey: 1_200_000,\n",

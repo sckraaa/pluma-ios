@@ -1278,6 +1278,7 @@ DAMAGE = (
      "        case .compressedMedium, .compressedHigh, .compressedVeryHigh, .videoMessage:\n            return 96\n"),
     (patch.VIDEO_PRESETS, "        case .compressedVeryLow, .compressedLow:\n            return 1\n",
      "        case .compressedVeryLow:\n            return 1\n"),
+    (patch.VIDEO_PRESETS, "<= 400.0 ? 1000 : 1200\n", "<= 400.0 ? 1000 : 1500\n"),
     (patch.ROUND_VIDEO_RECORDER, "AVVideoAverageBitRateKey: 1000 * 1000,", "AVVideoAverageBitRateKey: 1500 * 1000,"),
     (patch.GIF_CONVERTER, "AVVideoAverageBitRateKey: @(500000),", "AVVideoAverageBitRateKey: @(750000),"),
     (patch.VIDEO_FETCH, "            qualityPreset = defaultPreset\n", "            qualityPreset = .compressedMedium\n"),
@@ -1802,6 +1803,7 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn("        case .animation:\n            return 1800", presets)
         self.assertIn("        case .compressedMedium, .compressedHigh, .compressedVeryHigh:\n            return 128\n", presets)
         self.assertNotIn("            return 1\n", presets)
+        self.assertIn("        self.bitrateKbps = 2000 //", presets)
         self.assertIn("AVVideoAverageBitRateKey: 2000 * 1000,", tree.read(patch.ROUND_VIDEO_RECORDER))
         self.assertIn("AVVideoAverageBitRateKey: 2_000_000,", tree.read(patch.ROUND_VIDEO_RECORDER_NEO))
         self.assertIn("AVVideoAverageBitRateKey: @(1000000),", tree.read(patch.GIF_CONVERTER))
