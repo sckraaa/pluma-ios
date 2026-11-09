@@ -329,6 +329,7 @@ SCHEME_LINKS = (
     ("submodules/TelegramUI/Components/ShareExtensionContext/Sources/ShareExtensionContext.swift",
      'self.openUrl("{scheme}://shareStory?session=\\(sessionId)")', 1),
 )
+SCHEME_TEXT = '"SocksProxySetup.QrCode.TgLink" = "{scheme}:// link";'
 # Links the app reads: proxies, sticker sets, wallpapers and ads given as
 # links take the app's own scheme as well as tg:// (OpenUrl.swift does so for
 # every link already).
@@ -370,6 +371,81 @@ CLIENT_TEXTS = (
      '"AuthSessions.AddDevice.ScanInstallInfo" = "Go to [pluma.chat](desktop) or '
      '[web.pluma.chat](web) to get the QR code";', 1),
 )
+# tg:// literals and Telegram's hosts that stay in the app's code: (file, how many
+# times). The tg:// ones are not links the app makes for people (those are in
+# SCHEME_LINKS) but what it reads: prefixes of messages, the fallback markers
+# of custom emoji, mentions and dates; the hosts are the lists of link parsers,
+# the terms, the privacy policy and the FAQ (README, Links). A new one means a
+# new place to decide about, so verify stops on it.
+KEPT_TG_LINKS = {
+    "Telegram/WatchApp/tgwatch Watch App/Auth/QrLoginView.swift": 1,
+    "submodules/BrowserUI/Sources/BrowserWebContent.swift": 3,
+    "submodules/ChatListUI/Sources/ChatListController.swift": 1,
+    "submodules/Pasteboard/Sources/Pasteboard.swift": 1,
+    "submodules/PremiumUI/Sources/PremiumIntroScreen.swift": 1,
+    "submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift": 1,
+    "submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift": 1,
+    "submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreenSettingsActions.swift": 1,
+    "submodules/TelegramUI/Components/RichTextEditor/Sources/RichTextEditorCore/Serialization/RTFImport.swift": 1,
+    "submodules/TelegramUI/Components/RichTextEditor/Sources/RichTextEditorUIKit/Canvas/RTFConversion.swift": 1,
+    "submodules/TelegramUI/Sources/ChatPinnedMessageTitlePanelNode.swift": 2,
+    "submodules/TextFormat/Sources/CustomEmojiMarkdownMarker.swift": 2,
+    "submodules/TextFormat/Sources/MentionDateMarkers.swift": 4,
+    "submodules/UrlWhitelist/Sources/UrlWhitelist.swift": 2,
+}
+KEPT_TELEGRAM_SITES = {
+    "Telegram/NotificationService/Sources/NotificationRecipientAccount.swift": 1,
+    "Telegram/NotificationService/Sources/NotificationService.swift": 1,
+    "Telegram/SiriIntents/MessageSearchScope.swift": 1,
+    "Telegram/Watch/Extension/TGMessageViewController.m": 1,
+    "Telegram/Watch/Extension/TGNeoConversationController.m": 1,
+    "Telegram/WatchApp/Packages/TDShim/Sources/TDShim/Generated/API/TDLibApi.swift": 4,
+    "Telegram/WatchApp/Packages/TDShim/Sources/TDShim/Generated/Models/GetOption.swift": 1,
+    "Telegram/WatchApp/Packages/TDShim/Sources/TDShim/Generated/Models/PhotoSize.swift": 1,
+    "Telegram/WatchApp/Packages/TDShim/Sources/TDShim/Generated/Models/SetOption.swift": 1,
+    "Telegram/WatchApp/Packages/TDShim/Sources/TDShim/Generated/Models/UserType.swift": 2,
+    "Telegram/WatchApp/Packages/TDShim/Sources/TDShim/Transport/TDLibClientManager.swift": 2,
+    "submodules/BotPaymentsUI/Sources/BotCheckoutWebInteractionControllerNode.swift": 1,
+    "submodules/BrowserUI/Sources/BrowserAddressListComponent.swift": 2,
+    "submodules/ChatListUI/Sources/ChatListSearchListPaneNode.swift": 2,
+    "submodules/ContactListUI/Sources/ContactsController.swift": 1,
+    "submodules/InstantPageCache/Sources/CachedInternalInstantPages.swift": 4,
+    "submodules/LanguageLinkPreviewUI/Sources/LanguageLinkPreviewContentNode.swift": 1,
+    "submodules/MtProtoKit/PublicHeaders/MtProtoKit/MTQuickAck.h": 1,
+    "submodules/MtProtoKit/Sources/MTDNS.m": 1,
+    "submodules/MtProtoKit/Sources/MTDiscoverConnectionSignals.m": 1,
+    "submodules/PeerAvatarGalleryUI/Sources/AvatarGalleryController.swift": 1,
+    "submodules/PeerInfoUI/Sources/SecretChatKeyControllerNode.swift": 2,
+    "submodules/SettingsUI/Sources/Data and Storage/WebBrowserSettingsController.swift": 1,
+    "submodules/SettingsUI/Sources/DeleteAccountOptionsController.swift": 2,
+    "submodules/SettingsUI/Sources/LogoutOptionsController.swift": 1,
+    "submodules/SettingsUI/Sources/Privacy and Security/PrivacyAndSecurityController.swift": 1,
+    "submodules/SettingsUI/Sources/Privacy and Security/Recent Sessions/RecentSessionsController.swift": 1,
+    "submodules/TelegramAudio/Sources/ManagedAudioSession.swift": 1,
+    "submodules/TelegramCore/Sources/PendingMessages/OutgoingReplyPeer.swift": 1,
+    "submodules/TelegramCore/Sources/State/Sync/SyncSequencing.swift": 1,
+    "submodules/TelegramPermissionsUI/Sources/PermissionController.swift": 1,
+    "submodules/TelegramUI/Components/Chat/ChatMessageRichDataBubbleContentNode/Sources/ChatMessageRichDataBubbleContentNode.swift": 1,
+    "submodules/TelegramUI/Components/GroupStickerPackSetupController/Sources/GroupStickerPackSetupController.swift": 1,
+    "submodules/TelegramUI/Components/HorizontalTabsComponent/Sources/HorizontalTabsComponent.swift": 1,
+    "submodules/TelegramUI/Components/MessageWidget/WidgetRuntime/Sources/Host/Links.cpp": 2,
+    "submodules/TelegramUI/Components/Settings/PasskeysScreen/Sources/PasskeysScreen.swift": 1,
+    "submodules/TelegramUI/Sources/Chat/ChatControllerOpenLinkContextMenu.swift": 2,
+    "submodules/TelegramUI/Sources/Chat/ChatControllerOpenPeer.swift": 1,
+    "submodules/TelegramUI/Sources/ChatInterfaceTitlePanelNodes.swift": 1,
+    "submodules/TelegramUI/Sources/OpenUrl.swift": 2,
+    "submodules/TextFormat/Sources/GenerateTextEntities.swift": 4,
+    "submodules/TgVoipWebrtc/Sources/OngoingCallThreadLocalContext.mm": 1,
+    "submodules/UrlHandling/Sources/UrlHandling.swift": 5,
+    "submodules/UrlWhitelist/Sources/UrlWhitelist.swift": 4,
+    "submodules/WalletContext/Sources/WalletOperations.swift": 1,
+    "submodules/WalletContext/Sources/WalletTonConnect.swift": 1,
+}
+TG_LITERAL = re.compile(rb'"tg://')
+TELEGRAM_SITE = re.compile(rb'(?:"|://|\.)(?:telegram\.(?:org|me|dog)|telegra\.ph|telesco\.pe)(?=[/"\\?#])')
+# Entries of the built-in strings that name one of Telegram's sites.
+STRINGS_TELEGRAM_SITES = 33
+
 # Telegram's client sites, which none of those files may open after the edits.
 CLIENT_SITES = re.compile(r"(?:get)?desktop\.telegram\.org|web\.telegram\.org")
 
@@ -3704,6 +3780,8 @@ def patch_scheme(tree, c):
                  "                <string>tonsite</string>\n")
     for rel, text, count in SCHEME_LINKS:
         tree.replace(rel, text.replace("{scheme}", "tg"), text.replace("{scheme}", c.url_scheme), count=count)
+    # The switch of a proxy's QR code names the scheme of the link it makes.
+    tree.replace(STRINGS, SCHEME_TEXT.format(scheme="tg"), SCHEME_TEXT.format(scheme=c.url_scheme))
     tree.replace(URL_HANDLING, URL_HANDLING_TG, URL_HANDLING_OWN, count=4)
 
 
@@ -3797,10 +3875,19 @@ def verify_links(tree):
         if found != kept.get(rel, 0):
             raise PatchError(f"{rel}: {found} t.me links, {kept.get(rel, 0)} of them kept (SHARE_KEEP); "
                              f"the links the app makes are {LINK_HOST}'s")
+    for rel in link_sources(tree):
+        data = (tree.root / rel).read_bytes()
+        for literal, kept_table, what in ((TG_LITERAL, KEPT_TG_LINKS, "tg://"), (TELEGRAM_SITE, KEPT_TELEGRAM_SITES, "telegram.org")):
+            found = len(literal.findall(data))
+            if found != kept_table.get(rel, 0):
+                raise PatchError(f"{rel}: {found} {what} literals, {kept_table.get(rel, 0)} of them kept; upstream changed them")
     strings = tree.read(STRINGS)
     for m in STRINGS_ENTRY.finditer(strings):
         if STRINGS_TME.search(m.group(2)) and m.group(1).split('"')[1] not in STRINGS_KEEP:
             raise PatchError(f"{STRINGS}: {m.group(0)[:80]!r} still shows a t.me link")
+    sites = sum(1 for m in STRINGS_ENTRY.finditer(strings) if TELEGRAM_SITE.search(m.group(2).encode("utf-8")))
+    if sites != STRINGS_TELEGRAM_SITES:
+        raise PatchError(f"{STRINGS}: {sites} entries name Telegram's sites, expected {STRINGS_TELEGRAM_SITES}; upstream changed them")
     for key, count in STRINGS_LINKS:
         lines = [line for line in strings.split("\n") if line.startswith(f'"{key}" = "')]
         if len(lines) != 1 or lines[0].count(LINK_HOST) != count:
@@ -3817,6 +3904,8 @@ def verify_scheme(tree, c):
         text = tree.read(rel)
         if '"tg://' in text or 'appSpecificScheme: "tg"' in text:
             raise PatchError(f"{rel}: still makes tg:// links")
+    if SCHEME_TEXT.format(scheme=c.url_scheme) not in tree.read(STRINGS):
+        raise PatchError(f"{STRINGS}: the QR code of a proxy does not name {c.url_scheme}://")
 
 
 def verify_names(tree, c):

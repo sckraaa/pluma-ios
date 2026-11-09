@@ -1323,6 +1323,7 @@ DAMAGE = (
     (patch.NEWS_CONFIGURATION, "newsFeedSwitch(appConfiguration: appConfiguration) == true\n", "newsFeedSwitch(appConfiguration: appConfiguration) != false\n"),
     (patch.AGENT_CONFIGURATION, 'data["agent_bot_ids"] as? [Any]', 'data["agent_bots"] as? [Any]'),
     (patch.APP_BUILD, "                <string>tc</string>\n", "                <string>tonconnect</string>\n"),
+    (patch.STRINGS, '"SocksProxySetup.QrCode.TgLink" = "tg:// link";', '"SocksProxySetup.QrCode.TgLink" = "tg link";'),
     # The brand.
     (BUILD, '    "PremiumTurbo",\n]\n', '    "PremiumTurbo",\n    "Premium2",\n]\n'),
     (APP_DELEGATE, 'PresentationAppIcon(name: "New2", imageName: "New2"),', 'PresentationAppIcon(name: "New3", imageName: "New3"),'),
@@ -1645,6 +1646,7 @@ class UpstreamTest(unittest.TestCase):
         self.assertNotIn("<string>tg</string>", build)
         self.assertNotIn("<string>ton</string>", build)
         self.assertNotIn("<string>tc</string>", build)
+        self.assertIn('"SocksProxySetup.QrCode.TgLink" = "plm:// link";', tree.read(patch.STRINGS))
         self.assertIn('let urlString = "plm://login?token=\\(tokenString)"',
                       tree.read("submodules/AuthorizationUI/Sources/AuthorizationSequencePhoneEntryControllerNode.swift"))
         self.assertIn('codes.filter { $0.message.hasPrefix("plm://") }', tree.read("submodules/QrCodeUI/Sources/QrCodeScanScreen.swift"))
@@ -1891,6 +1893,7 @@ class UpstreamTest(unittest.TestCase):
             (patch.OPEN_URL, ", !isPlumaSiteLink(parsedUrl.absoluteString) {", " {"),
             (patch.OPEN_LINK_MENU, '(host == "pluma.chat" && !isPlumaSiteLink(parsedUrl.absoluteString))', 'host == "pluma.chat"'),
             (patch.STRINGS, '"pluma.chat link"', '"t.me link"'),
+            (patch.STRINGS, '"plm:// link"', '"tg:// link"'),
             (patch.STRINGS, '"Settings.FAQ" = "Pluma FAQ";', '"Settings.FAQ" = "Pluma FAQ at t.me/faq";'),
         ):
             with self.subTest(rel=rel, old=(old or new)[:60]):
@@ -1905,6 +1908,35 @@ class UpstreamTest(unittest.TestCase):
                 with self.assertRaises(patch.PatchError) as e:
                     patch.verify(tree, c)
                 self.assertIn(rel, str(e.exception))
+
+    def test_new_links_stop_the_patch(self):
+        # A new tg:// literal or a new host of Telegram's is a new place to
+        # decide about, in the app's code and in its strings; a unit test is
+        # not in the app.
+        target = patch.URL_HANDLING
+        for text in ('let a = "tg://resolve?domain=x"\n', 'let a = "https://telegram.org/new"\n',
+                     'let a = "https://t.me/new"\n', 'let a = "http://telesco.pe/x"\n'):
+            with self.subTest(text=text):
+                self.tearDown()
+                tree, c = self.run_patch()
+                tree.write(target, tree.read(target) + text)
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify(tree, c)
+                self.assertIn(target, str(e.exception))
+        self.tearDown()
+        tree, c = self.run_patch()
+        tree.write(patch.STRINGS, tree.read(patch.STRINGS) + '"Pluma.New" = "See https://telegram.org/new";\n')
+        with self.assertRaises(patch.PatchError) as e:
+            patch.verify(tree, c)
+        self.assertIn(patch.STRINGS, str(e.exception))
+
+        self.tearDown()
+        tree, c = self.run_patch()
+        for rel in ("submodules/TextFormat/Tests/New.swift", "Telegram/SiriIntentsTests/New.swift"):
+            tree.write(rel, 'let a = "tg://resolve?domain=x", b = "https://telegram.org", c = "https://t.me/x"\n')
+        patch.verify(tree, c)
+        self.assertTrue(patch.is_unit_test("submodules/TelegramUI/Components/RichTextEditor/Tests/RichTextEditorCoreTests/A.swift"))
+        self.assertFalse(patch.is_unit_test("submodules/TelegramUI/Components/Tests.swift"))
 
     def test_every_siri_vocabulary_is_replaced(self):
         tree, c = self.run_patch()
