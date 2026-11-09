@@ -444,7 +444,51 @@ KEPT_TELEGRAM_SITES = {
     "submodules/WalletContext/Sources/WalletOperations.swift": 1,
     "submodules/WalletContext/Sources/WalletTonConnect.swift": 1,
 }
+# String literals that still name Telegram in the app's code, after CODE_NAMES:
+# identifiers, the partner names other apps ask for, debug text, and texts
+# behind what the server does not offer. A new one is a new place to decide
+# about, as with the links above.
+KEPT_TELEGRAM_NAMES = {
+    "Telegram/WatchApp/Packages/TDShim/Sources/TDShim/Generated/Models/InternalLinkType.swift": 1,
+    "Telegram/WatchApp/Packages/TDShim/Sources/TDShim/Generated/Models/SettingsSection.swift": 4,
+    "Telegram/WatchApp/tgwatch Watch App/Auth/QrLoginView.swift": 1,
+    "Telegram/WatchApp/tgwatch Watch App/AuthStateMapping.swift": 1,
+    "Telegram/WatchApp/tgwatch Watch App/Messages/ServiceLineFormatter.swift": 1,
+    "submodules/BrowserUI/Sources/BrowserAddressListComponent.swift": 3,
+    "submodules/BrowserUI/Sources/BrowserWebContent.swift": 1,
+    "submodules/ChatListUI/Sources/ChatListSearchListPaneNode.swift": 3,
+    "submodules/DebugSettingsUI/Sources/CrashReportsController.swift": 2,
+    "submodules/DebugSettingsUI/Sources/DebugController.swift": 11,
+    "submodules/LegacyComponents/Sources/TGLocalization.m": 2,
+    "submodules/MTProtoRustEngine/Sources/MTProtoRustEngine/RustNetworkIdentity.swift": 2,
+    "submodules/OpenInExternalAppUI/Sources/OpenInOptions.swift": 4,
+    "submodules/PaymentMethodUI/Sources/AddPaymentMethodSheetScreen.swift": 1,
+    "submodules/PaymentMethodUI/Sources/PaymentMethodListScreen.swift": 1,
+    "submodules/QrCodeUI/Sources/QrCodeScanScreen.swift": 1,
+    "submodules/SettingsUI/Sources/Privacy and Security/Recent Sessions/ItemListRecentSessionItem.swift": 1,
+    "submodules/SettingsUI/Sources/Themes/EditThemeController.swift": 1,
+    "submodules/ShareController/Sources/ShareController.swift": 1,
+    "submodules/Stripe/Sources/STPPaymentConfiguration.m": 1,
+    "submodules/TelegramCore/Sources/Utils/Log.swift": 2,
+    "submodules/TelegramUI/Components/Chat/ChatMessageWidgetBubbleContentNode/Sources/ChatMessageWidgetBubbleContentNode.swift": 1,
+    "submodules/TelegramUI/Components/MessageWidget/MessageWidgetStress/Sources/MessageWidgetStressRunner.swift": 1,
+    "submodules/TelegramUI/Components/PeerInfo/PeerCopyProtectionInfoScreen/Sources/PeerCopyProtectionInfoScreen.swift": 1,
+    "submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoSettingsItems.swift": 1,
+    "submodules/TelegramUI/Components/RichTextEditor/Sources/RichTextEditorUIKit/InputBackend/InputDec/Upstream/IDUpstreamInputBackend+Responder.swift": 1,
+    "submodules/TelegramUI/Components/RichTextEditor/Sources/RichTextEditorUIKit/InputBackend/InputDec/Upstream/IDUpstreamInputBackend+Unwitnessed.swift": 7,
+    "submodules/TelegramUI/Components/RichTextEditor/Sources/RichTextEditorUIKit/InputBackend/InputDec/Upstream/IDUpstreamInputBackend.swift": 2,
+    "submodules/TelegramUI/Components/RichTextEditor/Sources/RichTextEditorUIKit/InputBackend/LegacyRichTextInputBackend.swift": 1,
+    "submodules/TelegramUI/Components/ShareWithPeersScreen/Sources/CategoryListItemComponent.swift": 1,
+    "submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/Sources/StarsTransactionsScreen.swift": 1,
+    "submodules/TelegramUI/Components/StorageUsageScreen/Sources/StorageUsageScreen.swift": 1,
+    "submodules/TelegramUI/Sources/Chat/ChatControllerOpenPhoneContextMenu.swift": 1,
+    "submodules/TelegramUI/Sources/Chat/ChatMessageActionOptions.swift": 1,
+    "submodules/TelegramUI/Sources/ContextMenuMorphDebugController.swift": 1,
+    "submodules/WalletContext/Sources/WalletTonConnect.swift": 1,
+    "submodules/WalletContext/Sources/WalletToncenter.swift": 2,
+}
 TG_LITERAL = re.compile(rb'"tg://')
+TELEGRAM_NAME_LITERAL = re.compile(rb'"[^"\n]*(?<![0-9A-Za-z_])Telegram(?![0-9A-Za-z_])[^"\n]*"')
 TELEGRAM_SITE = re.compile(rb'(?:"|://|\.)(?:telegram\.(?:org|me|dog)|telegra\.ph|telesco\.pe)(?=[/"\\?#])')
 # Entries of the built-in strings that name one of Telegram's sites.
 STRINGS_TELEGRAM_SITES = 33
@@ -3901,7 +3945,8 @@ def verify_links(tree):
                              f"the links the app makes are {LINK_HOST}'s")
     for rel in link_sources(tree):
         data = (tree.root / rel).read_bytes()
-        for literal, kept_table, what in ((TG_LITERAL, KEPT_TG_LINKS, "tg://"), (TELEGRAM_SITE, KEPT_TELEGRAM_SITES, "telegram.org")):
+        for literal, kept_table, what in ((TG_LITERAL, KEPT_TG_LINKS, "tg://"), (TELEGRAM_SITE, KEPT_TELEGRAM_SITES, "telegram.org"),
+                                          (TELEGRAM_NAME_LITERAL, KEPT_TELEGRAM_NAMES, "Telegram")):
             found = len(literal.findall(data))
             if found != kept_table.get(rel, 0):
                 raise PatchError(f"{rel}: {found} {what} literals, {kept_table.get(rel, 0)} of them kept; upstream changed them")

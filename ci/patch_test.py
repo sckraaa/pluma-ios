@@ -1920,7 +1920,7 @@ class UpstreamTest(unittest.TestCase):
         # not in the app.
         target = patch.URL_HANDLING
         for text in ('let a = "tg://resolve?domain=x"\n', 'let a = "https://telegram.org/new"\n',
-                     'let a = "https://t.me/new"\n', 'let a = "http://telesco.pe/x"\n'):
+                     'let a = "https://t.me/new"\n', 'let a = "http://telesco.pe/x"\n', 'let a = "Send to Telegram"\n'):
             with self.subTest(text=text):
                 self.tearDown()
                 tree, c = self.run_patch()
@@ -1938,7 +1938,7 @@ class UpstreamTest(unittest.TestCase):
         self.tearDown()
         tree, c = self.run_patch()
         for rel in ("submodules/TextFormat/Tests/New.swift", "Telegram/SiriIntentsTests/New.swift"):
-            tree.write(rel, 'let a = "tg://resolve?domain=x", b = "https://telegram.org", c = "https://t.me/x"\n')
+            tree.write(rel, 'let a = "tg://resolve?domain=x", b = "https://telegram.org", c = "https://t.me/x", d = "Telegram"\n')
         patch.verify(tree, c)
         self.assertTrue(patch.is_unit_test("submodules/TelegramUI/Components/RichTextEditor/Tests/RichTextEditorCoreTests/A.swift"))
         self.assertFalse(patch.is_unit_test("submodules/TelegramUI/Components/Tests.swift"))
