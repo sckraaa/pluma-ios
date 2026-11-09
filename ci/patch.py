@@ -766,6 +766,7 @@ SIRI_EXTENSION_INTENTS = ("            <key>IntentsSupported</key>\n"
 SIRI_INTENTS = ("INSendMessageIntent", "INStartAudioCallIntent", "INSearchCallHistoryIntent",
                 "INSearchForMessagesIntent", "INSetMessageAttributeIntent")
 SIRI_UPSTREAM = {
+    "Base": "31cf9077d2d369d92e73bbf8b1bbebc3f2b6f0abaa059313a6324b390110b673",
     "ar": "822f6056cb74b2b7206c08787a6e6ddf6665712fe5825be113a760df3d119ef1",
     "be": "9d3469922a0210ba6cf629e8786af757dfd3d9dc2609a878df1a0968b3b9f9d9",
     "ca": "93dd7e49318b4436040cb1a2a49b8a0255eb6aee7da9911ec60dd63e1060cfc0",
@@ -884,6 +885,8 @@ SIRI_PHRASES = {
            "{name}da Alidan kelgan xabarlarni qidir",
            "{name}da Alidan kelgan xabarlarni o‘qilgan deb belgila"),
 }
+# Upstream's fallback for a language without its own vocabulary (13.2).
+SIRI_PHRASES["Base"] = SIRI_PHRASES["en"]
 
 # Everything the patch reads, edits or checks: the check job fetches only
 # these (ci/fetch-upstream.sh sparse).
@@ -3360,6 +3363,10 @@ def verify_store(tree, c):
     assets = tree.read(CAMERA_ASSETS)
     if any(new not in assets for _, new in CAMERA_ASSETS_FALLBACKS):
         raise PatchError(f"{CAMERA_ASSETS}: the camera's font has no fallback without SF Camera")
+    bundled = (p.parent.name.removesuffix(".lproj") for p in (tree.root / SIRI_VOCABULARY).parent.parent.glob("*.lproj/AppIntentVocabulary.plist"))
+    unknown = sorted(set(bundled) - set(SIRI_PHRASES))
+    if unknown:
+        raise PatchError(f"{SIRI_VOCABULARY.format(unknown[0])}: a vocabulary the patch does not replace")
     for lang, phrases in SIRI_PHRASES.items():
         rel = SIRI_VOCABULARY.format(lang)
         text = tree.read(rel)

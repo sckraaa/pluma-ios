@@ -1900,6 +1900,15 @@ class UpstreamTest(unittest.TestCase):
                     patch.verify(tree, c)
                 self.assertIn(rel, str(e.exception))
 
+    def test_every_siri_vocabulary_is_replaced(self):
+        tree, c = self.run_patch()
+        self.assertNotIn("Telegram", tree.read(patch.SIRI_VOCABULARY.format("Base")))
+        rel = patch.SIRI_VOCABULARY.format("xx")
+        tree.write(rel, "<plist></plist>")
+        with self.assertRaises(patch.PatchError) as e:
+            patch.verify(tree, c)
+        self.assertIn(rel, str(e.exception))
+
     def test_intro_without_wordmark(self):
         # The check after the edits finds a first page of the intro without
         # the wordmark.
