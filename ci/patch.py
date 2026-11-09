@@ -3448,6 +3448,13 @@ CRASH_REPORT_TEAM_OLD = src(" " * 12, """
     })),
 """)
 CRASH_REPORT_TEAM = "            // pluma: no item that sends the log to Telegram's team.\n"
+# The prompt after a crash (off by default, a switch on the Crash Logs screen)
+# sent to the same bot. Its button lets the user pick the chat, as "Share Log".
+CRASH_REPORT_SHARE_OLD = "    private func share(_ report: CrashReport) {\n"
+CRASH_REPORT_SHARE = "    func share(_ report: CrashReport) {\n"
+CRASH_REPORT_PROMPT_OLD = "                actions.send(pending[0], context: context)\n"
+CRASH_REPORT_PROMPT = ("                // pluma: to a chat the user picks; the username of Telegram's crash bot is anybody's here.\n"
+                       "                actions.share(pending[0])\n")
 
 
 def patch_support(tree):
@@ -3461,6 +3468,17 @@ def patch_support(tree):
     tree.replace_lines(SETTINGS_SEARCH, SUPPORT_SEARCH_OLD,
                        "        // pluma: no support, FAQ or features items (see PeerInfoSettingsItems.swift).\n")
     tree.replace(CRASH_REPORTS, CRASH_REPORT_TEAM_OLD, CRASH_REPORT_TEAM)
+    tree.replace(CRASH_REPORTS, CRASH_REPORT_SHARE_OLD, CRASH_REPORT_SHARE)
+    tree.replace(CRASH_REPORTS, CRASH_REPORT_PROMPT_OLD, CRASH_REPORT_PROMPT)
+
+
+def verify_crash_reports(tree):
+    """Nothing may reach the send to the bot: confirmSend has no caller, and
+    the one call of send left is its own."""
+    text = tree.read(CRASH_REPORTS)
+    if (text.count(CRASH_REPORT_TEAM) != 1 or text.count(CRASH_REPORT_PROMPT) != 1
+            or ".confirmSend(" in text or len(re.findall(r"\.send\(", text)) != 1):
+        raise PatchError(f"{CRASH_REPORTS}: a crash log can still be sent to Telegram's team")
 
 
 def verify_support(tree):
@@ -3468,9 +3486,7 @@ def verify_support(tree):
         raise PatchError(f"{SETTINGS_ITEMS}: Settings still lead to Telegram's support")
     if "helpSearchableItems(context: context)" in tree.read(SETTINGS_SEARCH):
         raise PatchError(f"{SETTINGS_SEARCH}: the settings search still leads to Telegram's support")
-    crash_reports = tree.read(CRASH_REPORTS)
-    if crash_reports.count(CRASH_REPORT_TEAM) != 1 or "self.confirmSend(report)" in crash_reports:
-        raise PatchError(f"{CRASH_REPORTS}: a crash log can still be sent to Telegram's team")
+    verify_crash_reports(tree)
 
 
 # --- App Store ---------------------------------------------------------------

@@ -748,6 +748,38 @@ class BirthdayTest(unittest.TestCase):
                          [patch.CHAT_LIST, patch.CHAT_LIST_NOTICE, patch.CHAT_LIST_PANELS])
 
 
+class CrashReportsTest(unittest.TestCase):
+    PATCHED = (patch.CRASH_REPORT_TEAM + patch.CRASH_REPORT_PROMPT
+               + "                TextAlertAction(type: .defaultAction, title: \"Send\", action: { self.send(report, context: context) })\n")
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.dir.name)
+        (root / "Telegram").mkdir()
+        (root / "Telegram/BUILD").write_text("")
+        (root / "versions.json").write_text("{}")
+        self.tree = patch.Tree(root)
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_only_the_dead_confirmation_calls_send(self):
+        self.tree.write(patch.CRASH_REPORTS, self.PATCHED)
+        patch.verify_crash_reports(self.tree)
+
+    def test_a_new_path_to_the_bot_stops_the_patch(self):
+        for extra in ("actions.send(report, context: context)\n", "self.confirmSend(report)\n"):
+            with self.subTest(extra=extra):
+                self.tree.write(patch.CRASH_REPORTS, self.PATCHED + extra)
+                with self.assertRaisesRegex(patch.PatchError, "can still be sent"):
+                    patch.verify_crash_reports(self.tree)
+
+    def test_the_prompt_goes_to_the_bot_again(self):
+        self.tree.write(patch.CRASH_REPORTS, self.PATCHED.replace(patch.CRASH_REPORT_PROMPT, patch.CRASH_REPORT_PROMPT_OLD))
+        with self.assertRaisesRegex(patch.PatchError, "can still be sent"):
+            patch.verify_crash_reports(self.tree)
+
+
 class AppUpdateTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
@@ -1425,6 +1457,8 @@ DAMAGE = (
     (patch.SETTINGS_SEARCH, "        allItems.append(contentsOf: helpItems)\n", "        allItems += helpItems\n"),
     (patch.CRASH_REPORTS, 'text: "Send to Telegram Team"', 'text: "Send to the Telegram Team"'),
     (patch.CRASH_REPORTS, 'Sign in to a Telegram account to share', 'Sign in to Telegram to share'),
+    (patch.CRASH_REPORTS, "actions.send(pending[0], context: context)", "actions.send(pending.first!, context: context)"),
+    (patch.CRASH_REPORTS, "    private func share(_ report: CrashReport) {", "    fileprivate func share(_ report: CrashReport) {"),
     ("submodules/QrCodeUI/Sources/QrCodeScanScreen.swift", 'filteredCodes = codes.filter { $0.message.hasPrefix("tg://") }',
      'filteredCodes = codes.filter { $0.message.hasPrefix("tg://login") }'),
     ("submodules/TelegramUI/Components/ShareExtensionContext/Sources/ShareExtensionContext.swift",
@@ -1738,7 +1772,10 @@ class UpstreamTest(unittest.TestCase):
         # No support section.
         self.assertNotIn("Settings_Support", tree.read(patch.SETTINGS_ITEMS))
         self.assertNotIn("let helpItems = ", tree.read(patch.SETTINGS_SEARCH))
-        self.assertNotIn("Send to Telegram Team", tree.read(patch.CRASH_REPORTS))
+        crash_reports = tree.read(patch.CRASH_REPORTS)
+        self.assertNotIn("Send to Telegram Team", crash_reports)
+        self.assertNotIn("actions.send(", crash_reports)
+        self.assertIn("                actions.share(pending[0])\n", crash_reports)
         # The birthday notice opens the chat, says "Send Message" and no longer
         # offers a gift; closing it still dismisses it.
         chat_list = tree.read(patch.CHAT_LIST)
