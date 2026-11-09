@@ -171,6 +171,9 @@ ROUND_VIDEO_RECORDER_NEO = "submodules/Camera/CameraNeo/Sources/VideoRecorder.sw
 GIF_CONVERTER = "submodules/LegacyComponents/Sources/TGGifConverter.m"
 # The quality an edited video is sent at when none was chosen.
 VIDEO_FETCH = "submodules/TelegramUI/Components/Resources/FetchVideoMediaResource/Sources/FetchVideoMediaResource.swift"
+# Night without bubbles: its accent, and the colour of the send button.
+MAKE_THEME = "submodules/TelegramPresentationData/Sources/MakePresentationTheme.swift"
+SEND_BUTTON = "submodules/TelegramUI/Components/Chat/ChatTextInputActionButtonsNode/Sources/ChatTextInputActionButtonsNode.swift"
 # The media editors' send and done buttons, Telegram's blue in any theme.
 CHAT_EDITOR_CONTROLS = "submodules/TelegramUI/Components/ChatMediaEditorScreen/Sources/ChatMediaEditorBottomControlsComponent.swift"
 CHAT_EDITOR_COVER = "submodules/TelegramUI/Components/ChatMediaEditorScreen/Sources/ChatMediaEditorCover.swift"
@@ -1065,7 +1068,7 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + (MESSAGE_REACTIONS, UPDATE_INFO)
                   + (MEDIA_FILE, SEARCH_STICKERS, ENTITY_KEYBOARD_INPUT, ENTITY_KEYBOARD_SIGNALS, STICKER_PACK_SCREEN)
                   + (VIDEO_PRESETS_LEGACY, VIDEO_PRESETS, ROUND_VIDEO_RECORDER, ROUND_VIDEO_RECORDER_NEO, GIF_CONVERTER, VIDEO_FETCH)
-                  + tuple(rel for rel, _ in MEDIA_EDITOR_ACCENTS)
+                  + tuple(rel for rel, _ in MEDIA_EDITOR_ACCENTS) + (MAKE_THEME, SEND_BUTTON)
                   + (FONT, CAMERA_ASSETS) + tuple(CAMERA_FONTS) + tuple(SIRI_VOCABULARY.format(lang) for lang in SIRI_PHRASES))
 
 
@@ -3220,6 +3223,15 @@ AVATAR_SAVED_MESSAGES = ("    static let savedMessagesColors: [UIColor] = [\n"
 AVATAR_REPOST = ("    static let repostColors: [UIColor] = [\n"
                  "        UIColor(rgb: 0x3DA1FD), UIColor(rgb: 0x34C76F)\n")
 
+# Sage is pale enough (HSB saturation 0.16) for the send button without bubbles
+# to take it for a black or white accent and turn system blue.
+SEND_GLASS_OLD = "    if saturation < 0.2 || builtInBlues.contains(accentColor.rgb) {\n"
+SEND_GLASS = ("    // pluma: Night's sage is the accent, not a colourless one.\n"
+              "    if accentColor.rgb != 0x9dbb9f && (saturation < 0.2 || builtInBlues.contains(accentColor.rgb)) {\n")
+SEND_GLASS_ICON_OLD = "        guard let tinted = generateTintedImage(image: image, color: .white) else {\n"
+SEND_GLASS_ICON = ("        // pluma: a dark glyph on Night's sage, as on every control of that accent.\n"
+                   "        guard let tinted = generateTintedImage(image: image, color: interfaceState.theme.chat.inputPanel.panelControlAccentColor.rgb == 0x9dbb9f ? UIColor(rgb: 0x131513) : .white) else {\n")
+
 # (file, text, replacement, how many times).
 PALETTE_EDITS = (
     # Day Classic (and Day): the accent, the source of 64 colours.
@@ -3393,6 +3405,13 @@ PALETTE_EDITS = (
     (AVATAR_NODE, AVATAR_REPOST, AVATAR_REPOST.replace(
         "UIColor(rgb: 0x3DA1FD), UIColor(rgb: 0x34C76F)\n",
         "UIColor(rgb: 0x4f6e52), UIColor(rgb: 0x9dbb9f) // pluma: sage\n"), 1),
+    # Night without bubbles (13.2).
+    (MAKE_THEME, "/// Only the bubbles are gray: the night half keeps Telegram's blue accent instead of Night's white.\n"
+     "private let neutralNightAccentColor = UIColor(rgb: 0x3e88f7)\n",
+     "/// Only the bubbles are gray: the night half keeps Night's accent.\n"
+     "private let neutralNightAccentColor = UIColor(rgb: 0x9dbb9f) // pluma: sage\n", 1),
+    (SEND_BUTTON, SEND_GLASS_OLD, SEND_GLASS, 1),
+    (SEND_BUTTON, SEND_GLASS_ICON_OLD, SEND_GLASS_ICON, 1),
 ) + tuple((rel, "UIColor(rgb: 0x0088ff)", "UIColor(rgb: 0x5b7a5e)", count) for rel, count in MEDIA_EDITOR_ACCENTS)
 
 # Night's message colours, each kind on one long line: (file, a text that
@@ -3591,12 +3610,15 @@ def verify_media_editor_accent(tree):
 
 
 def verify_palette(tree):
-    for rel in (DAY_THEME, DARK_THEME):
+    for rel in (DAY_THEME, DARK_THEME, MAKE_THEME):
         text = tree.read(rel)
         for blue in TELEGRAM_BLUES:
             if blue in text:
                 raise PatchError(f"{rel}: Telegram's blue {blue} is still there")
     verify_media_editor_accent(tree)
+    send_button = tree.read(SEND_BUTTON)
+    if send_button.count(SEND_GLASS) != 1 or send_button.count(SEND_GLASS_ICON) != 1:
+        raise PatchError(f"{SEND_BUTTON}: Night's sage does not reach the send button")
     if "PresentationThemeAccentColor(baseColor: .blue)" in tree.read(PRESENTATION_DATA):
         raise PatchError(f"{PRESENTATION_DATA}: Night still gets the blue accent")
     # The other avatar colours are the peer colours, one per user

@@ -1484,6 +1484,9 @@ DAMAGE = (
     (patch.SETTINGS_SEARCH, "        allItems.append(contentsOf: helpItems)\n", "        allItems += helpItems\n"),
     (patch.CRASH_REPORTS, 'text: "Send to Telegram Team"', 'text: "Send to the Telegram Team"'),
     (patch.CRASH_REPORTS, 'Sign in to a Telegram account to share', 'Sign in to Telegram to share'),
+    (patch.MAKE_THEME, "neutralNightAccentColor = UIColor(rgb: 0x3e88f7)", "neutralNightAccentColor = UIColor(rgb: 0x3e88f8)"),
+    (patch.SEND_BUTTON, "if saturation < 0.2 ||", "if saturation < 0.25 ||"),
+    (patch.SEND_BUTTON, "generateTintedImage(image: image, color: .white) else {", "generateTintedImage(image: image, color: .black) else {"),
     (patch.CHAT_EDITOR_CONTROLS, "UIColor(rgb: 0x0088ff)", "UIColor(rgb: 0x0088FE)"),
     (patch.CHAT_EDITOR_COVER, "UIColor(rgb: 0x0088ff)", "UIColor(rgb: 0x0088FE)"),
     (patch.MEDIA_EDITOR, "pressedColor: UIColor(rgb: 0x0088ff)", "pressedColor: UIColor(rgb: 0x0088FE)"),
@@ -1807,6 +1810,9 @@ class UpstreamTest(unittest.TestCase):
         self.assertNotIn("let helpItems = ", tree.read(patch.SETTINGS_SEARCH))
         for rel, count in patch.MEDIA_EDITOR_ACCENTS:
             self.assertEqual(tree.read(rel).count("UIColor(rgb: 0x5b7a5e)"), count, rel)
+        self.assertIn("neutralNightAccentColor = UIColor(rgb: 0x9dbb9f)", tree.read(patch.MAKE_THEME))
+        self.assertIn(patch.SEND_GLASS, tree.read(patch.SEND_BUTTON))
+        self.assertIn(patch.SEND_GLASS_ICON, tree.read(patch.SEND_BUTTON))
         crash_reports = tree.read(patch.CRASH_REPORTS)
         self.assertNotIn("Send to Telegram Team", crash_reports)
         self.assertNotIn("actions.send(", crash_reports)
