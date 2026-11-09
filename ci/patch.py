@@ -3910,6 +3910,10 @@ def verify(tree, c):
 # show for anyone with Premium, and what the server does not serve.
 PREMIUM_FOR_EVERYONE_EDITS = (
     ("submodules/TelegramUI/Sources/Chat/ChatControllerOpenMessageContextMenu.swift",
+     "                        if allReactionsAreAvailable {\n                            let premiumConfiguration = PremiumConfiguration.with(appConfiguration: context.currentAppConfiguration.with { $0 })\n",
+     "                        if allReactionsAreAvailable { // pluma: custom emoji for everybody (ADR 0041)\n",
+     1),
+    ("submodules/TelegramUI/Sources/Chat/ChatControllerOpenMessageContextMenu.swift",
      "                                    areCustomEmojiEnabled: !premiumConfiguration.isPremiumDisabled,\n",
      "                                    areCustomEmojiEnabled: true, // pluma: everybody has Premium\n",
      1),
