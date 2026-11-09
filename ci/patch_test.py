@@ -1957,6 +1957,10 @@ class PremiumForEveryoneTest(unittest.TestCase):
             (root / rel).write_text(text, encoding="utf-8")
         return patch.Tree(root)
 
+    def test_upstream_paths_cover_the_edits(self):
+        for edit in patch.PREMIUM_FOR_EVERYONE_EDITS:
+            self.assertIn(edit[0], patch.UPSTREAM_PATHS)
+
     def test_applies(self):
         with tempfile.TemporaryDirectory() as d:
             tree = self.tree(pathlib.Path(d))

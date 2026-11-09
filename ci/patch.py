@@ -3955,6 +3955,8 @@ PREMIUM_FOR_EVERYONE_EDITS = (
      "        if !canSendText || !canSendMedia || slowModeTimeout > 0 {\n            let unrestrictBoosters = state.modifiedUnrestrictBoosters ?? (cachedData.boostsToUnrestrict ?? 0)\n",
      "        if false && (!canSendText || !canSendMedia || slowModeTimeout > 0) { // pluma: boosts do not exist here (ADR 0041)\n            let unrestrictBoosters = state.modifiedUnrestrictBoosters ?? (cachedData.boostsToUnrestrict ?? 0)\n", 1),
 )
+# The check job fetches only the paths the patch reads (ci/fetch-upstream.sh sparse).
+UPSTREAM_PATHS += tuple(sorted({edit[0] for edit in PREMIUM_FOR_EVERYONE_EDITS} - set(UPSTREAM_PATHS)))
 
 
 def premium_for_everyone(tree):
