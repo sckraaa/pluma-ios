@@ -155,6 +155,7 @@ UPDATE_INFO = "submodules/TelegramUpdateUI/Sources/UpdateInfoController.swift"
 VIDEO_PRESETS_LEGACY = "submodules/LegacyComponents/Sources/TGMediaVideoConverter.m"
 VIDEO_PRESETS = "submodules/TelegramUI/Components/MediaEditor/Sources/MediaEditorValues.swift"
 ROUND_VIDEO_RECORDER = "submodules/Camera/CameraLegacy/Sources/CameraOutput.swift"
+ROUND_VIDEO_RECORDER_NEO = "submodules/Camera/CameraNeo/Sources/VideoRecorder.swift"
 GIF_CONVERTER = "submodules/LegacyComponents/Sources/TGGifConverter.m"
 # The quality an edited video is sent at when none was chosen.
 VIDEO_FETCH = "submodules/TelegramUI/Components/Resources/FetchVideoMediaResource/Sources/FetchVideoMediaResource.swift"
@@ -902,7 +903,7 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + (CHAT_STATE, CHAT_CONTROLLER, TAG_CONTEXT_MENU, MESSAGE_CONTEXT_MENU, TAG_PANEL, TITLE_PANELS)
                   + (MESSAGE_REACTIONS, UPDATE_INFO)
                   + (MEDIA_FILE, SEARCH_STICKERS, ENTITY_KEYBOARD_INPUT, ENTITY_KEYBOARD_SIGNALS, STICKER_PACK_SCREEN)
-                  + (VIDEO_PRESETS_LEGACY, VIDEO_PRESETS, ROUND_VIDEO_RECORDER, GIF_CONVERTER, VIDEO_FETCH)
+                  + (VIDEO_PRESETS_LEGACY, VIDEO_PRESETS, ROUND_VIDEO_RECORDER, ROUND_VIDEO_RECORDER_NEO, GIF_CONVERTER, VIDEO_FETCH)
                   + (FONT, CAMERA_ASSETS) + tuple(CAMERA_FONTS) + tuple(SIRI_VOCABULARY.format(lang) for lang in SIRI_PHRASES))
 
 
@@ -2999,6 +3000,8 @@ def video_quality_edits():
     """)))
     edits.append((ROUND_VIDEO_RECORDER, "                AVVideoAverageBitRateKey: 1000 * 1000,\n",
                    "                AVVideoAverageBitRateKey: 2000 * 1000, // pluma: 1000 kbit/s in Telegram (task 052)\n"))
+    edits.append((ROUND_VIDEO_RECORDER_NEO, "            AVVideoAverageBitRateKey: 1_200_000,\n",
+                   "            AVVideoAverageBitRateKey: 2_000_000, // pluma: 1200 kbit/s in Telegram (task 052)\n"))
     edits.append((GIF_CONVERTER, "              AVVideoAverageBitRateKey: @(500000),\n",
                    "              AVVideoAverageBitRateKey: @(1000000), // pluma: 500000 in Telegram (task 052)\n"))
     edits.append((VIDEO_FETCH, VIDEO_DEFAULT_PRESET_OLD, VIDEO_DEFAULT_PRESET))

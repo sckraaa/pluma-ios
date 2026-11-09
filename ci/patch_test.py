@@ -1795,6 +1795,7 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn("        case .compressedMedium, .compressedHigh, .compressedVeryHigh:\n            return 128\n", presets)
         self.assertNotIn("            return 1\n", presets)
         self.assertIn("AVVideoAverageBitRateKey: 2000 * 1000,", tree.read(patch.ROUND_VIDEO_RECORDER))
+        self.assertIn("AVVideoAverageBitRateKey: 2_000_000,", tree.read(patch.ROUND_VIDEO_RECORDER_NEO))
         self.assertIn("AVVideoAverageBitRateKey: @(1000000),", tree.read(patch.GIF_CONVERTER))
         self.assertIn(patch.VIDEO_DEFAULT_PRESET, tree.read(patch.VIDEO_FETCH))
         # What App Store Connect asks: the purpose of background location,
