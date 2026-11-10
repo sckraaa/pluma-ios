@@ -290,7 +290,7 @@ The jobs run on GitHub's `macos-26` runners with Xcode 26.2 selected explicitly,
 The Bazel disk cache and Bazel's downloads are kept in the GitHub Actions cache, one entry for the simulator app and one for the IPA (the TestFlight build reads the IPA's and saves none):
 - the entry is saved even when a build fails, so a re-run continues from where it stopped;
 - before saving, the disk cache is trimmed to 12 GB (`PLUMA_BAZEL_CACHE_GB`), least recently used entries first;
-- a pull request saves its own entry, so its next push finds what the last one compiled; it reads its own entries and those of `main`;
+- a pull request saves its own entry (not one of a fork or Dependabot), so its next push finds what the last one compiled; it reads its own entries and those of `main`, and `cache-cleanup` deletes them when it closes;
 - older entries of each kind on a branch are deleted after the run. The repository's cache limit is 40 GB (*Settings → Actions → General*; above 10 GB it is paid, ADR 0010 of the server repository).
 
 A cold build takes about an hour. A repeat build without changes takes minutes. An edit of TelegramCore or MtProtoKit, which most of the app depends on, compiles nearly everything again.

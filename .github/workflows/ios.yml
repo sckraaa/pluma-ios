@@ -122,7 +122,7 @@ jobs:
           MAX_GB: ${{ vars.PLUMA_BAZEL_CACHE_GB || '12' }}
         run: python3 -I ci/cache_gc.py ~/pluma-bazel/disk --max-gb "$MAX_GB"
       - name: Save the Bazel cache
-        if: always() && steps.build.outcome != 'skipped'
+        if: always() && steps.build.outcome != 'skipped' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'))
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/pluma-bazel
@@ -397,8 +397,8 @@ jobs:
 
   prune-caches:
     needs: [build-sim, build-ipa]
-    # A fork's token cannot delete entries.
-    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    # The token of a fork or of Dependabot cannot delete entries.
+    if: always() && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
