@@ -1468,6 +1468,11 @@ DAMAGE = (
     ("submodules/MtProtoKit/Sources/MTContext.m", "@implementation MTContext\n",
      '@implementation MTContext\nstatic NSString *extraKey = @"-----BEGIN RSA PUBLIC KEY-----\\n"\n'
      + "".join(f'"{l}\\n"\n' for l in DEV_KEY.strip().splitlines()[1:-1]) + '"-----END RSA PUBLIC KEY-----";\n'),
+    # The login code screens.
+    (patch.LOGIN_CODE_NODE, '                animationName = "IntroFragment"\n', '                animationName = "IntroFragmentNew"\n'),
+    (patch.APP_DELEGATE, '                if parsed.scheme == "tg" {\n', '                if parsed.scheme == "tg" || parsed.scheme == "ton" {\n'),
+    (patch.STRINGS, '"Login.EnterCodeSMSTitle" = "Enter Code";\n',
+     '"Login.EnterCodeSMSTitle" = "Enter Code";\n"Pluma.Login.SendAgain" = "Send again";\n'),
 )
 
 
@@ -1635,8 +1640,11 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn("<string>Pluma stores your contacts heavily encrypted", build)
         self.assertIn('CXProviderConfiguration(localizedName: "Pluma")',
                       tree.read("submodules/TelegramCallsUI/Sources/CallKitIntegration.swift"))
-        # plm:// instead of tg://.
-        self.assertNotIn("<string>tg</string>", build)
+        # plm:// instead of tg://, which the app only asks about (whether the
+        # Telegram app is installed, for the login code screens).
+        self.assertNotIn("                <string>tg</string>\n", build)
+        self.assertEqual(build.count("<string>tg</string>"), 1)
+        self.assertIn("        <string>rizogo</string>\n        <string>tg</string>\n    </array>\n", build)
         self.assertIn('let urlString = "plm://login?token=\\(tokenString)"',
                       tree.read("submodules/AuthorizationUI/Sources/AuthorizationSequencePhoneEntryControllerNode.swift"))
         self.assertIn('codes.filter { $0.message.hasPrefix("plm://") }', tree.read("submodules/QrCodeUI/Sources/QrCodeScanScreen.swift"))
@@ -1897,6 +1905,25 @@ class UpstreamTest(unittest.TestCase):
                     patch.verify(tree, c)
                 self.assertIn(rel, str(e.exception))
 
+    def test_login_code_texts(self):
+        # The texts of the login code screens name the Telegram app exactly as
+        # the patch writes them; any other text that names Telegram, or one of
+        # theirs changed, fails the check of the names.
+        for old, new in (
+            ('"Pluma.Login.CheckTelegramTitle" = "Check Telegram";', '"Pluma.Login.CheckTelegramTitle" = "Open Telegram now";'),
+            ('"Pluma.Login.SendAgain" = "Send again";', '"Pluma.Login.SendAgain" = "Send again to Telegram";'),
+            ('"Pluma.Login.SendAgain" = "Send again";',
+             '"Pluma.Login.SendAgain" = "Send again";\n"Pluma.Login.SendAgainTelegram" = "Send again to Telegram";'),
+        ):
+            with self.subTest(new=new):
+                self.tearDown()
+                tree, c = self.run_patch()
+                text = tree.read(patch.STRINGS)
+                self.assertEqual(text.count(old), 1)
+                tree.write(patch.STRINGS, text.replace(old, new))
+                with self.assertRaisesRegex(patch.PatchError, "still names Telegram"):
+                    patch.verify_names(tree, c)
+
     def test_intro_without_wordmark(self):
         # The check after the edits finds a first page of the intro without
         # the wordmark.
@@ -1993,6 +2020,191 @@ class PremiumForEveryoneTest(unittest.TestCase):
                     patch.verify_premium_for_everyone(tree)
                 tree.write(rel, patched)
             patch.verify_premium_for_everyone(tree)
+
+
+class LoginCodesTest(unittest.TestCase):
+    STRINGS = '"Login.EnterCodeSMSTitle" = "Enter Code";\n"Login.EnterCodeTelegramText" = "In the **Pluma app**.";'
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.dir.name)
+        self.c = config()
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    # The upstream files, made of the texts the edits expect.
+    def tree(self, edits=patch.LOGIN_CODE_EDITS, strings=STRINGS):
+        (self.root / "versions.json").write_text("{}")
+        files = {patch.APP_BUILD: "", patch.STRINGS: strings}
+        for rel, old, _ in edits:
+            files[rel] = files.get(rel, "") + old + "x\n"
+        for rel, text in files.items():
+            (self.root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(self.root)
+
+    def test_upstream_paths_cover_the_edits(self):
+        for rel, _, _ in patch.LOGIN_CODE_EDITS:
+            self.assertIn(rel, patch.UPSTREAM_PATHS)
+
+    def test_applies(self):
+        tree = self.tree()
+        with self.assertRaises(patch.PatchError):
+            patch.verify_login_codes(tree, self.c)
+        patch.patch_login_codes(tree, self.c)
+        patch.verify_login_codes(tree, self.c)
+        # The texts follow the strings of upstream, after its last entry
+        # (which has no line break), in the English of the brief of task 076.
+        strings = tree.read(patch.STRINGS)
+        self.assertTrue(strings.startswith(self.STRINGS + "\n\n// pluma: the login code screens (task 076);"))
+        for line in ('"Pluma.Login.CheckTelegramTitle" = "Check Telegram";\n',
+                     '"Pluma.Login.CheckTelegramText" = "We\'ve sent the code for **%@** to your Telegram, '
+                     'in a message from the Pluma account.";\n',
+                     '"Pluma.Login.OpenTelegram" = "Open Telegram";\n',
+                     '"Pluma.Login.DidNotGetCode" = "Didn\'t get the code?";\n',
+                     '"Pluma.Login.NotDeliveredTitle" = "Code didn\'t reach Telegram";\n',
+                     '"Pluma.Login.NotDeliveredText" = "The code for **%@** didn\'t reach your Telegram. Let Telegram '
+                     'find you by your number: **Settings → Privacy and Security → Phone Number → Who can find me '
+                     'by my number? → Everybody**.\\n\\nNo Telegram? Ask the administrator for the code and enter it here.";\n',
+                     '"Pluma.Login.OpenTelegramSettings" = "Open Telegram settings";\n',
+                     '"Pluma.Login.SendAgainIn" = "Send again in %@";\n',
+                     '"Pluma.Login.SendAgain" = "Send again";\n',
+                     '"Pluma.Login.AskAdministratorTitle" = "Ask the administrator";\n',
+                     '"Pluma.Login.AskAdministratorText" = "Ask the Pluma administrator for your code and enter it here.";\n'):
+            self.assertEqual(strings.count(line), 1, line)
+        self.assertEqual(len(patch.LOGIN_CODE_STRINGS), 11)
+        # The code reads each text by its generated name, and only those.
+        used = set(re.findall(r"\bPluma_Login_(\w+)", "".join(new for _, _, new in patch.LOGIN_CODE_EDITS)))
+        self.assertEqual(used, {key.split(".")[-1] for key, _ in patch.LOGIN_CODE_STRINGS})
+        # Every entry parses as the strings generator of upstream reads them.
+        entries = [m.group(0) for m in patch.STRINGS_ENTRY.finditer(strings)]
+        self.assertEqual(entries[2:], patch.login_code_entries(self.c))
+        # The app's name follows the configuration.
+        self.assertIn('"Ask the Plume administrator for your code', "".join(
+            patch.login_code_entries(config(app={"PLUMA_APP_NAME": "Plume"}))))
+        # The guard of openUrl lets Telegram's two links through, nothing else.
+        delegate = tree.read(patch.APP_DELEGATE)
+        self.assertIn('parsed.host == "resolve" && parsed.path.isEmpty && parsed.query?.range(of: "^domain=[A-Za-z0-9_]+$", '
+                      'options: .regularExpression) != nil', delegate)
+        self.assertIn('(parsed.host == "settings" && parsed.path == "/phone_privacy" && parsed.query == nil)', delegate)
+        self.assertIn('                if parsed.scheme == "tg" && !opensTelegram {\n                    return\n', delegate)
+        self.assertIn("        <string>rizogo</string>\n        <string>tg</string>\n    </array>\n", tree.read(patch.APP_BUILD))
+        # A second run is refused: the texts are there, nothing is left to edit.
+        with self.assertRaises(patch.PatchError):
+            patch.patch_login_codes(tree, self.c)
+
+    def test_resend(self):
+        tree = self.tree()
+        patch.patch_login_codes(tree, self.c)
+        sequence = tree.read(patch.LOGIN_SEQUENCE)
+        # Each answer restarts the countdown, also Sms after Sms with the same data.
+        self.assertIn("startStrict(next: { result in\n                        controller?.inProgress = false\n"
+                      "                        // pluma: the countdown starts anew, also on the same screen (task 076).\n"
+                      "                        controller?.restartCountdown(afterFloodWait: false)\n", sequence)
+        controller = tree.read(patch.LOGIN_CODE_CONTROLLER)
+        self.assertIn("            countdown = 60\n", controller)
+        self.assertIn("self.controllerNode.updateData(number: number, email: email, codeType: codeType, nextType: nextType, "
+                      "timeout: countdown, appleSignInAllowed: appleSignInAllowed, previousCodeType: previousCodeType, "
+                      "isPrevious: isPrevious)\n        self.requestLayout(transition: .immediate)\n", controller)
+        # The errors, before upstream's alert: an expired code goes back to the
+        # phone number, SEND_CODE_UNAVAILABLE asks the administrator, FLOOD_WAIT
+        # holds the link and keeps upstream's text.
+        failed = sequence[sequence.index("controller.inProgress = false\n                            \n"):]
+        failed = failed[:failed.index("var actions: [TextAlertAction]")]
+        expired = failed[failed.index('if description == "PHONE_CODE_EXPIRED" {'):failed.index('if description == "SEND_CODE_UNAVAILABLE" {')]
+        self.assertIn("contents: .empty)).startStandalone()\n", expired)
+        self.assertIn("text: strongSelf.presentationData.strings.Login_CodeExpired,", expired)
+        self.assertTrue(expired.rstrip().endswith("return\n                                }"), expired)
+        unavailable = failed[failed.index('if description == "SEND_CODE_UNAVAILABLE" {'):]
+        self.assertIn("title: strongSelf.presentationData.strings.Pluma_Login_AskAdministratorTitle, "
+                      "text: strongSelf.presentationData.strings.Pluma_Login_AskAdministratorText,", unavailable)
+        self.assertIn("if case .limitExceeded = error {\n                                controller.restartCountdown(afterFloodWait: true)\n", failed)
+        # The link: no second request while one is awaited, and inactive while
+        # it waits after FLOOD_WAIT on a screen without a countdown.
+        node = tree.read(patch.LOGIN_CODE_NODE)
+        self.assertIn("    @objc func nextOptionNodePressed() {\n"
+                      "        // pluma: one request at a time from the link of a code screen of task 076.\n"
+                      "        if self.hasResendLink && self.inProgress {\n            return\n        }\n", node)
+        self.assertIn("                self.nextOptionButtonNode.alpha = self.inProgress ? 0.6 : 1.0\n", node)
+        self.assertIn("        if nextType != nil, let timeout, timeout > 0 {\n"
+                      "            return (NSAttributedString(string: strings.Pluma_Login_DidNotGetCode, font: font, "
+                      "textColor: primaryColor, paragraphAlignment: .center), false)\n", tree.read(patch.LOGIN_OPTION_TEXT))
+
+    def test_fit(self):
+        tree = self.tree()
+        patch.patch_login_codes(tree, self.c)
+        node = tree.read(patch.LOGIN_CODE_NODE)
+        # The screen fits before the items are laid out: the sticker goes, then
+        # the text scrolls.
+        self.assertIn("        self.fitTelegramCodeScreen(items: &items, insets: &insets, layoutHeight: layout.size.height, "
+                      "additionalBottomInset: additionalBottomInset, navigationBarHeight: navigationBarHeight, "
+                      "textSize: currentOptionSize)\n        let _ = layoutAuthorizationItems(", node)
+        fit = node[node.index("    private func fitTelegramCodeScreen("):node.index("    func updateData(number: String,")]
+        self.assertIn("            items.removeFirst()\n            textIndex -= 1\n            insets.top = navigationBarHeight\n"
+                      "            self.animationNode.isHidden = true\n", fit)
+        self.assertIn("        items[textIndex].node = scrollNode\n"
+                      "        items[textIndex].size = CGSize(width: textSize.width, height: textHeight)\n", fit)
+        self.assertIn("        scrollNode.view.contentSize = textSize\n", fit)
+        # Under the code, room for the error line, not Fragment's 104 pt.
+        self.assertIn("let codeSpacingAfter = self.isTelegramCodeScreen ? AuthorizationLayoutItemSpacing(weight: 30.0, maxValue: 30.0) : "
+                      "AuthorizationLayoutItemSpacing(weight: canReset || pendingDate != nil ? 0.0 : 104.0, maxValue: canReset ? 0.0 : 104.0)\n", node)
+        self.assertIn("spacingAfter: codeSpacingAfter))\n", node)
+        self.assertIn("self.currentOptionActivateAreaNode.frame = self.currentOptionNode.supernode === self.currentOptionScrollNode ? "
+                      "self.currentOptionScrollNode.frame : self.currentOptionNode.frame\n", node)
+
+    def test_upstream_changed(self):
+        for i, (rel, old, new) in enumerate(patch.LOGIN_CODE_EDITS):
+            changed = old[:-2] + "~" + old[-1]
+            edits = [e if j != i else (rel, changed, new) for j, e in enumerate(patch.LOGIN_CODE_EDITS)]
+            with self.subTest(edit=i):
+                tree = self.tree(edits)
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.patch_login_codes(tree, self.c)
+                self.assertIn(rel, str(e.exception))
+        # Upstream's strings with a key of Pluma's.
+        tree = self.tree(strings=self.STRINGS + '\n"Pluma.Login.SendAgain" = "Send Again";\n')
+        with self.assertRaisesRegex(patch.PatchError, "Pluma.Login.SendAgain"):
+            patch.patch_login_codes(tree, self.c)
+
+    def test_check(self):
+        tree = self.tree()
+        patch.patch_login_codes(tree, self.c)
+        # Each edit undone.
+        for rel, old, new in patch.LOGIN_CODE_EDITS:
+            patched = tree.read(rel)
+            tree.write(rel, patched.replace(new, old))
+            with self.subTest(file=rel, new=new.strip()[:60]), self.assertRaises(patch.PatchError) as e:
+                patch.verify_login_codes(tree, self.c)
+            self.assertIn(rel, str(e.exception))
+            tree.write(rel, patched)
+        # A text changed, missing or twice; the support and Fragment back
+        # (old None: new is added at the end).
+        for rel, old, new in (
+            (patch.STRINGS, '"Send again";', '"Send Again";'),
+            (patch.STRINGS, '"Pluma.Login.AskAdministratorTitle" = "Ask the administrator";\n', ""),
+            (patch.STRINGS, None, '"Pluma.Login.OpenTelegram" = "Open";\n'),
+            (patch.LOGIN_SEQUENCE, None, "let _ = strongSelf.engine.auth.reportMissingCode(phoneNumber: number, "
+                                         "phoneCodeHash: phoneCodeHash, mnc: mnc).start()\n"),
+            (patch.CHANGE_PHONE, None, "AuthorizationSequenceController.presentDidNotGetCodeUI(sharedContext: context.sharedContext, "
+                                       "controller: codeController, presentationData: presentationData, phoneNumber: phoneNumber, mnc: mnc)\n"),
+            (patch.LOGIN_CODE_NODE, None, '                animationName = "IntroFragment"\n'),
+            (patch.LOGIN_CODE_NODE, None, "                self.proceedNode.title = self.strings.Login_OpenFragment\n"),
+            (patch.LOGIN_OPTION_TEXT, None, "        return parseMarkdownIntoAttributedString(strings.Login_EnterCodeFragmentText(phoneNumber).string, "
+                                            "attributes: attributes, textAlignment: .center)\n"),
+        ):
+            with self.subTest(rel=rel, new=new[:60]):
+                patched = tree.read(rel)
+                if old is None:
+                    tree.write(rel, patched + new)
+                else:
+                    self.assertEqual(patched.count(old), 1)
+                    tree.write(rel, patched.replace(old, new))
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify_login_codes(tree, self.c)
+                self.assertIn(rel, str(e.exception))
+                tree.write(rel, patched)
+        patch.verify_login_codes(tree, self.c)
 
 
 if __name__ == "__main__":
