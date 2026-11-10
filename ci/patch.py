@@ -23,6 +23,9 @@ Telegram gives users and chats by their id, blue is sage and cyan a teal.
 The first page of the intro shows the mark writing itself, and the intro's
 pages are laid out around it.
 Settings no longer lead to Telegram's support, FAQ and feature channel.
+The login code screens say where the code went: the person's other
+sessions, the person's Telegram (with a button that opens it), or nowhere,
+when the administrator issues it; none speaks of SMS or Telegram's support.
 
 What App Store Connect warns about on upload is settled too: the app names
 the purpose of background location, carries no Apple font, and gives Siri an
@@ -390,11 +393,14 @@ CLIENT_TEXTS = (
 # tg:// literals and Telegram's hosts that stay in the app's code: (file, how many
 # times). The tg:// ones are not links the app makes for people (those are in
 # SCHEME_LINKS) but what it reads: prefixes of messages, the fallback markers
-# of custom emoji, mentions and dates; the hosts are the lists of link parsers,
-# the terms, the privacy policy and the FAQ (README, Links). A new one means a
-# new place to decide about, so verify stops on it.
+# of custom emoji, mentions and dates, and Telegram's privacy settings, which
+# the login code screen opens in the Telegram app (patch_login_codes); the hosts
+# are the lists of link parsers, the terms, the privacy policy and the FAQ
+# (README, Links). A new one means a new place to decide about, so verify stops
+# on it.
 KEPT_TG_LINKS = {
     "Telegram/WatchApp/tgwatch Watch App/Auth/QrLoginView.swift": 1,
+    "submodules/AuthorizationUI/Sources/AuthorizationSequenceCodeEntryControllerNode.swift": 1,
     "submodules/BrowserUI/Sources/BrowserWebContent.swift": 3,
     "submodules/ChatListUI/Sources/ChatListController.swift": 1,
     "submodules/Pasteboard/Sources/Pasteboard.swift": 1,
@@ -1637,6 +1643,7 @@ def patch(tree, c):
     patch_intro_mark(tree)
     patch_names(tree, c)
     patch_scheme(tree, c)
+    patch_login_codes(tree, c)
     patch_client_links(tree)
     patch_links(tree)
     patch_palette(tree)
@@ -3537,6 +3544,585 @@ def verify_support(tree):
     verify_crash_reports(tree)
 
 
+# --- login code screens ----------------------------------------------------------
+#
+# Task 076 of the server repository (ADR 0044). Pluma sends no SMS: a login
+# code goes to the person's other Pluma sessions (auth.sentCodeTypeApp), or to
+# the person's own Telegram account, written by an account of Pluma's there
+# (auth.sentCodeTypeFragmentSms, its url "tg://resolve?domain=<that account>"
+# or "" when unknown), or nowhere, and the administrator issues it
+# (auth.sentCodeTypeSms, the screen of a code that did not reach Telegram).
+# next_type is codeTypeSms whenever auth.resendCode can move on: from a code
+# in the app or in Telegram to the screen of one that did not reach Telegram,
+# and from that one (after a countdown, the timeout) to a new delivery
+# through Telegram. The screens say so:
+#   - the App screen stays as it is (Login_EnterCodeTelegramText, "the Pluma
+#     app on your other device"); its link, "Get the code via SMS" upstream
+#     (AuthorizationOptionText.swift 109, 122), is "Didn't get the code?";
+#   - FragmentSms keeps the layout of Fragment's screen
+#     (AuthorizationSequenceCodeEntryControllerNode.swift 546-555, 759-762):
+#     the title "Check Telegram", the text naming the phone, and the big
+#     button "Open Telegram", which opens the chat with the account in the
+#     Telegram app; not Fragment's sticker, icon and colours but the sticker
+#     of the other code screens (played three times, as Fragment's is) and
+#     the accent of the app. Fragment's screen has no link; it gets "Didn't
+#     get the code?" over the button, laid out as the word and phrase codes
+#     lay out theirs (780-792);
+#   - Sms takes the same layout: "Code didn't reach Telegram", the way to let
+#     Telegram find the person by number, the button "Open Telegram settings"
+#     (tg://settings/phone_privacy, which Telegram opens on that setting:
+#     OpenUrl.swift 1025-1026), and "Send again in m:ss", then "Send again";
+#   - with no next_type, "Didn't get the code?" shows "Ask the administrator"
+#     instead of a mail to Telegram's sms@telegram.org with
+#     auth.reportMissingCode (AuthorizationSequenceController.swift 642-649,
+#     presentDidNotGetCodeUI 1453-1475), in the login and in the change of the
+#     phone number (ChangePhoneNumberController.swift 104-113), which shows
+#     the same screen and never offers a next_type.
+# A new type after auth.resendCode is a new screen: the sequence controller
+# reuses the code screen only for the same type (AuthorizationSequence-
+# Controller.swift 366-373), so the button, the texts and the countdown follow
+# each answer. The same type with the same data (Sms after Sms) keeps the
+# screen and its data, and updateData passes it over (AuthorizationSequence-
+# CodeEntryController.swift 204); so each answer also restarts the countdown
+# of the screen it reaches: "Send again in 0:30" again.
+#
+# The link asks for one resend at a time: while the answer is awaited it is
+# dimmed, as the code is, and a tap does nothing. The answers it may get:
+#   - PHONE_CODE_EXPIRED: back to the phone number, as a code that expired at
+#     sign in goes (AuthorizationSequenceController.swift 612-615);
+#   - SEND_CODE_UNAVAILABLE (nothing more can be sent): "Ask the
+#     administrator", as "Didn't get the code?" says without a next_type;
+#   - FLOOD_WAIT: upstream's "Too many attempts" (Login_CodeFloodError), and
+#     the link waits before it offers another try: the screen's countdown, or
+#     60 s on a screen without one, the default of Telegram's Android app
+#     (LoginActivity.java 1903-1905): TelegramCore keeps no seconds of
+#     FLOOD_WAIT (Authorization.swift 550-551).
+#
+# The text of a code that did not reach Telegram is long. Upstream makes
+# every code screen fit between the bars and the keyboard (Authorization-
+# SequenceCodeEntryControllerNode.swift 813-822): the sticker goes when the
+# content does not fit, and the navigation bar becomes the top. What still
+# does not fit on the screens of task 076 (an iPhone SE or mini with the
+# keyboard up) is the text: it scrolls between the title and the code, so
+# the field, the link and the button stay in view. Under the
+# code there is room for the error line (40 pt: animateError puts it 24 pt
+# under the field), not Fragment's 104 pt for a screen without a link.
+#
+# The buttons open Telegram's links in the Telegram app: Pluma does not
+# register tg:// (patch_scheme). openUrl drops every tg:// link
+# (AppDelegate.swift 851-853); it lets these two through and nothing else.
+# Each button shows only when the Telegram app is there to open its link
+# (canOpenURL, with tg in LSApplicationQueriesSchemes), checked again in the
+# login when the app becomes active (the change of the phone number checks it
+# when its code screen opens).
+#
+# The texts are the Telegram app's, not Pluma's: added after the rename
+# (patch_names) and kept by verify_names exactly as they are. English is
+# bundled; the other languages come with the server's language pack, under
+# the same keys (the generated strings fall back to English).
+LOGIN_OPTION_TEXT = "submodules/AuthorizationUtils/Sources/AuthorizationOptionText.swift"
+LOGIN_CODE_NODE = "submodules/AuthorizationUI/Sources/AuthorizationSequenceCodeEntryControllerNode.swift"
+LOGIN_CODE_CONTROLLER = "submodules/AuthorizationUI/Sources/AuthorizationSequenceCodeEntryController.swift"
+LOGIN_SEQUENCE = "submodules/AuthorizationUI/Sources/AuthorizationSequenceController.swift"
+CHANGE_PHONE = "submodules/SettingsUI/Sources/ChangePhoneNumberController.swift"
+# (key, value with {name} for the app's name), as the entries of the English
+# strings write them.
+LOGIN_CODE_STRINGS = (
+    ("Pluma.Login.CheckTelegramTitle", "Check Telegram"),
+    ("Pluma.Login.CheckTelegramText",
+     "We've sent the code for **%@** to your Telegram, in a message from the {name} account."),
+    ("Pluma.Login.OpenTelegram", "Open Telegram"),
+    ("Pluma.Login.DidNotGetCode", "Didn't get the code?"),
+    ("Pluma.Login.NotDeliveredTitle", "Code didn't reach Telegram"),
+    ("Pluma.Login.NotDeliveredText",
+     "The code for **%@** didn't reach your Telegram. Let Telegram find you by your number: "
+     "**Settings → Privacy and Security → Phone Number → Who can find me by my number? → Everybody**."
+     "\\n\\nNo Telegram? Ask the administrator for the code and enter it here."),
+    ("Pluma.Login.OpenTelegramSettings", "Open Telegram settings"),
+    ("Pluma.Login.SendAgainIn", "Send again in %@"),
+    ("Pluma.Login.SendAgain", "Send again"),
+    ("Pluma.Login.AskAdministratorTitle", "Ask the administrator"),
+    ("Pluma.Login.AskAdministratorText", "Ask the {name} administrator for your code and enter it here."),
+)
+LOGIN_CODE_STRINGS_HEAD = "\n// pluma: the login code screens (task 076); Telegram here is the Telegram app.\n"
+TELEGRAM_PHONE_PRIVACY = "tg://settings/phone_privacy"
+
+LOGIN_ALERT = ("title: {strings}.Pluma_Login_AskAdministratorTitle, text: {strings}.Pluma_Login_AskAdministratorText, "
+               "actions: [TextAlertAction(type: .defaultAction, title: {strings}.Common_OK, action: {{}})]), in: .window(.root))\n")
+LOGIN_CODE_EDITS = (
+    # The texts under the title.
+    (LOGIN_OPTION_TEXT,
+     "    case .sms:\n"
+     "        return parseMarkdownIntoAttributedString(strings.Login_EnterCodeSMSText(phoneNumber).string, attributes: attributes, textAlignment: .center)\n"
+     "    case .otherSession:\n",
+     "    case .sms:\n"
+     "        // pluma: no code goes by SMS; this one did not reach the person's Telegram (task 076).\n"
+     "        return parseMarkdownIntoAttributedString(strings.Pluma_Login_NotDeliveredText(phoneNumber).string, attributes: attributes, textAlignment: .center)\n"
+     "    case .otherSession:\n"),
+    (LOGIN_OPTION_TEXT,
+     "    case .fragment:\n"
+     "        return parseMarkdownIntoAttributedString(strings.Login_EnterCodeFragmentText(phoneNumber).string, attributes: attributes, textAlignment: .center)\n",
+     "    case .fragment:\n"
+     "        // pluma: no Fragment numbers; this code went to the person's Telegram (task 076).\n"
+     "        return parseMarkdownIntoAttributedString(strings.Pluma_Login_CheckTelegramText(phoneNumber).string, attributes: attributes, textAlignment: .center)\n"),
+    # The link under the code.
+    (LOGIN_OPTION_TEXT,
+     "    if let nextType = nextType, let timeout = timeout, timeout > 0 {\n",
+     src(" " * 4, """
+         // pluma: no code goes by SMS (task 076). A code in the app or in Telegram (FragmentSms)
+         // offers "Didn't get the code?", which leads to the screen of a code that did not reach
+         // Telegram (Sms); that one counts down to "Send again", which tries Telegram anew.
+         // Without a next type "Didn't get the code?" tells where else the code comes from.
+         // A countdown on a screen that has none from the server is the wait after FLOOD_WAIT:
+         // the link is inactive until it ends.
+         switch currentType {
+         case .otherSession, .fragment, .sms:
+             if case .sms = currentType, nextType != nil {
+                 if let timeout, timeout > 0 {
+                     let timeString = NSString(format: "%d:%.02d", Int(timeout / 60), Int(timeout % 60))
+                     return (NSAttributedString(string: strings.Pluma_Login_SendAgainIn(timeString as String).string, font: font, textColor: primaryColor, paragraphAlignment: .center), false)
+                 }
+                 return (NSAttributedString(string: strings.Pluma_Login_SendAgain, font: font, textColor: accentColor, paragraphAlignment: .center), true)
+             }
+             if nextType != nil, let timeout, timeout > 0 {
+                 return (NSAttributedString(string: strings.Pluma_Login_DidNotGetCode, font: font, textColor: primaryColor, paragraphAlignment: .center), false)
+             }
+             return (NSAttributedString(string: strings.Pluma_Login_DidNotGetCode, font: font, textColor: accentColor, paragraphAlignment: .center), true)
+         default:
+             break
+         }
+
+         if let nextType = nextType, let timeout = timeout, timeout > 0 {
+     """)),
+    # The screen: whether Telegram can open the button's link, and the link.
+    (LOGIN_CODE_NODE,
+     "    var openFragment: ((String) -> Void)?\n",
+     "    var openFragment: ((String) -> Void)?\n"
+     "    // pluma: whether another app (the Telegram app, which owns tg://) opens a link (task 076).\n"
+     "    var canOpenUrl: ((String) -> Bool)?\n"
+     "    private var telegramUrl: String?\n"
+     "    // pluma: the text of a screen of a code in Telegram or of one that did not reach it, scrolled\n"
+     "    // when the screen cannot show it whole (task 076).\n"
+     "    private let currentOptionScrollNode = ASScrollNode()\n"),
+    (LOGIN_CODE_NODE,
+     "    func updateData(number: String, email: String?, codeType: SentAuthorizationCodeType, nextType: AuthorizationCodeNextType?, timeout: Int32?, appleSignInAllowed: Bool, previousCodeType: SentAuthorizationCodeType?, isPrevious: Bool) {\n",
+     src(" " * 4, """
+         // pluma: the screens of a code sent to the person's Telegram (FragmentSms) and of one
+         // that did not reach it (Sms): Fragment's layout, with a button that opens the Telegram
+         // app (task 076).
+         private var isTelegramCodeScreen: Bool {
+             switch self.codeType {
+             case .fragment, .sms:
+                 return true
+             default:
+                 return false
+             }
+         }
+
+         // pluma: the button's link: the chat with the account that wrote the code, or Telegram's
+         // privacy settings of the phone number; nil, and no button, without a link or without the
+         // Telegram app to open it.
+         private func currentTelegramUrl() -> String? {
+             let url: String
+             switch self.codeType {
+             case let .fragment(chatUrl, _):
+                 url = chatUrl
+             case .sms:
+                 url = "tg://settings/phone_privacy"
+             default:
+                 return nil
+             }
+             if url.isEmpty || self.canOpenUrl?(url) != true {
+                 return nil
+             }
+             return url
+         }
+
+         // pluma: Telegram may have been installed or removed while the app was in the background.
+         func updateTelegramUrl() {
+             let url = self.currentTelegramUrl()
+             if url != self.telegramUrl {
+                 self.telegramUrl = url
+                 if let (layout, navigationHeight) = self.layoutArguments {
+                     self.containerLayoutUpdated(layout, navigationBarHeight: navigationHeight, transition: .immediate)
+                 }
+             }
+         }
+
+         // pluma: the screens whose link asks the server for the code anew: a code in the other
+         // sessions, in Telegram, or one that did not reach Telegram (task 076).
+         private var hasResendLink: Bool {
+             switch self.codeType {
+             case .otherSession, .fragment, .sms:
+                 return true
+             default:
+                 return false
+             }
+         }
+
+         // pluma: a screen of a code in Telegram or of one that did not reach it fits between the
+         // bars and the keyboard (task 076). Without the sticker, which goes as on every code screen
+         // when the content does not fit at half its spacing (authorizationLayoutItemsFit), what
+         // still does not fit is the text: it scrolls between the title and the code, so the field,
+         // the link and the button stay in view. Its spacing goes too when it would leave less than
+         // three lines of the text.
+         private func fitTelegramCodeScreen(items: inout [AuthorizationLayoutItem], height: CGFloat, textSize: CGSize) {
+             guard self.isTelegramCodeScreen, let textIndex = items.firstIndex(where: { $0.node === self.currentOptionNode }) else {
+                 return
+             }
+             func spacing(_ items: [AuthorizationLayoutItem]) -> CGFloat {
+                 return items.reduce(0.0, { $0 + (min($1.spacingBefore.weight, $1.spacingBefore.maxValue) + min($1.spacingAfter.weight, $1.spacingAfter.maxValue)) * 0.5 })
+             }
+             func heights(_ items: [AuthorizationLayoutItem]) -> CGFloat {
+                 return items.reduce(0.0, { $0 + $1.size.height })
+             }
+             let otherHeights = heights(items) - textSize.height
+             var textHeight = height - otherHeights - spacing(items)
+             if textHeight < min(textSize.height, ceil(Font.regular(17.0).lineHeight * 3.0)) {
+                 textHeight = height - otherHeights
+             }
+             textHeight = max(0.0, min(textSize.height, floorToScreenPixels(textHeight)))
+
+             let scrollNode = self.currentOptionScrollNode
+             if self.currentOptionNode.supernode !== scrollNode {
+                 self.insertSubnode(scrollNode, aboveSubnode: self.currentOptionNode)
+                 scrollNode.addSubnode(self.currentOptionNode)
+                 scrollNode.view.showsHorizontalScrollIndicator = false
+                 scrollNode.view.contentInsetAdjustmentBehavior = .never
+             }
+             let scrolled = scrollNode.view.contentSize.height > scrollNode.bounds.height
+             self.currentOptionNode.frame = CGRect(origin: CGPoint(), size: textSize)
+             scrollNode.view.contentSize = textSize
+             let maxOffset = textSize.height - textHeight
+             if scrollNode.view.contentOffset.y > maxOffset {
+                 scrollNode.view.contentOffset = CGPoint(x: 0.0, y: maxOffset)
+             }
+             if maxOffset > 0.0 && !scrolled {
+                 Queue.mainQueue().justDispatch { [weak self] in
+                     self?.currentOptionScrollNode.view.flashScrollIndicators()
+                 }
+             }
+             items[textIndex].node = scrollNode
+             items[textIndex].size = CGSize(width: textSize.width, height: textHeight)
+         }
+
+         func updateData(number: String, email: String?, codeType: SentAuthorizationCodeType, nextType: AuthorizationCodeNextType?, timeout: Int32?, appleSignInAllowed: Bool, previousCodeType: SentAuthorizationCodeType?, isPrevious: Bool) {
+     """)),
+    (LOGIN_CODE_NODE,
+     "        self.nextOptionArrowNode.isHidden = previousCodeType == nil || !isPrevious\n",
+     "        self.nextOptionArrowNode.isHidden = previousCodeType == nil || !isPrevious\n"
+     "        // pluma: the link of the button of a code in Telegram or of one that did not reach it (task 076).\n"
+     "        self.telegramUrl = self.currentTelegramUrl()\n"),
+    # The titles and the buttons.
+    (LOGIN_CODE_NODE,
+     "            case .sms:\n"
+     "                self.titleNode.attributedText = NSAttributedString(string: self.strings.Login_EnterCodeSMSTitle, font: Font.semibold(28.0), textColor: self.theme.list.itemPrimaryTextColor)\n"
+     "            case .fragment:\n"
+     "                self.titleNode.attributedText = NSAttributedString(string: self.strings.Login_EnterCodeFragmentTitle, font: Font.semibold(28.0), textColor: self.theme.list.itemPrimaryTextColor)\n"
+     "               \n"
+     "                self.proceedNode.title = self.strings.Login_OpenFragment\n"
+     "                self.proceedNode.updateTheme(SolidRoundedButtonTheme(backgroundColor: UIColor(rgb: 0x37475a), foregroundColor: .white))\n"
+     "                self.proceedNode.isEnabled = true\n"
+     "                \n"
+     "                animationName = \"IntroFragment\"\n"
+     "                animationPlaybackMode = .count(3)\n"
+     "                self.proceedNode.animation = \"anim_fragment\"\n",
+     "            case .sms:\n"
+     "                // pluma: no code goes by SMS; this one did not reach the person's Telegram. Fragment's\n"
+     "                // layout and its sticker's playback, with the sticker and the accent of the other code\n"
+     "                // screens; the button opens Telegram's privacy settings of the phone number (task 076).\n"
+     "                self.titleNode.attributedText = NSAttributedString(string: self.strings.Pluma_Login_NotDeliveredTitle, font: Font.semibold(28.0), textColor: self.theme.list.itemPrimaryTextColor)\n"
+     "                \n"
+     "                self.proceedNode.title = self.strings.Pluma_Login_OpenTelegramSettings\n"
+     "                self.proceedNode.isEnabled = true\n"
+     "                \n"
+     "                animationPlaybackMode = .count(3)\n"
+     "            case .fragment:\n"
+     "                // pluma: no Fragment numbers; this code went to the person's Telegram. Fragment's\n"
+     "                // layout without its sticker, icon and colours; the button opens the chat with the\n"
+     "                // account that wrote the code in the Telegram app (task 076).\n"
+     "                self.titleNode.attributedText = NSAttributedString(string: self.strings.Pluma_Login_CheckTelegramTitle, font: Font.semibold(28.0), textColor: self.theme.list.itemPrimaryTextColor)\n"
+     "                \n"
+     "                self.proceedNode.title = self.strings.Pluma_Login_OpenTelegram\n"
+     "                self.proceedNode.isEnabled = true\n"
+     "                \n"
+     "                animationPlaybackMode = .count(3)\n"),
+    # The button stands over the keyboard, as Fragment's does.
+    (LOGIN_CODE_NODE,
+     "            case .email, .fragment:\n"
+     "                insets.bottom = max(inputHeight, insets.bottom)\n",
+     "            case .email, .fragment, .sms: // pluma: .sms has Fragment's button (task 076).\n"
+     "                insets.bottom = max(inputHeight, insets.bottom)\n"),
+    # The link over the button.
+    (LOGIN_CODE_NODE,
+     "                if case .fragment = codeType {\n"
+     "                    self.proceedNode.isHidden = false\n",
+     src(" " * 16, """
+         if self.isTelegramCodeScreen {
+             // pluma: "Didn't get the code?" or "Send again" over the button, as the word and phrase
+             // codes lay them out (Fragment's screen has no link); the button only when the
+             // Telegram app is there to open its link (task 076).
+             self.nextOptionButtonNode.isHidden = false
+             items.append(AuthorizationLayoutItem(node: self.nextOptionButtonNode, size: nextOptionSize, spacingBefore: AuthorizationLayoutItemSpacing(weight: 50.0, maxValue: 120.0), spacingAfter: AuthorizationLayoutItemSpacing(weight: 0.0, maxValue: 0.0)))
+             self.proceedNode.isHidden = self.telegramUrl == nil
+             if !self.proceedNode.isHidden {
+                 additionalBottomInset = 100.0
+             }
+     """)),
+    (LOGIN_CODE_NODE,
+     "        case let .fragment(url, _):\n"
+     "            self.openFragment?(url)\n",
+     "        case .fragment, .sms:\n"
+     "            // pluma: the link of the Telegram app (task 076).\n"
+     "            if let url = self.telegramUrl {\n"
+     "                self.openFragment?(url)\n"
+     "            }\n"),
+    # Under the code, room for the error line instead of Fragment's room for a
+    # screen without a link.
+    (LOGIN_CODE_NODE,
+     "                    items.append(AuthorizationLayoutItem(node: self.codeInputView, size: codeFieldSize, spacingBefore: AuthorizationLayoutItemSpacing(weight: 30.0, maxValue: 30.0), spacingAfter: AuthorizationLayoutItemSpacing(weight: canReset || pendingDate != nil ? 0.0 : 104.0, maxValue: canReset ? 0.0 : 104.0)))\n",
+     "                    // pluma: the screens of a code in Telegram and of one that did not reach it keep room for\n"
+     "                    // the error line under the code (24 pt under it, animateError) over their link, not\n"
+     "                    // Fragment's 104 pt for a screen without one (task 076).\n"
+     "                    let codeSpacingAfter = self.isTelegramCodeScreen ? AuthorizationLayoutItemSpacing(weight: 30.0, maxValue: 30.0) : AuthorizationLayoutItemSpacing(weight: canReset || pendingDate != nil ? 0.0 : 104.0, maxValue: canReset ? 0.0 : 104.0)\n"
+     "                    items.append(AuthorizationLayoutItem(node: self.codeInputView, size: codeFieldSize, spacingBefore: AuthorizationLayoutItemSpacing(weight: 30.0, maxValue: 30.0), spacingAfter: codeSpacingAfter))\n"),
+    # The screen fits between the bars and the keyboard.
+    (LOGIN_CODE_NODE,
+     "        let _ = layoutAuthorizationItems(bounds: CGRect(origin: CGPoint(x: bandMinX, y: insets.top), size: CGSize(width: bandWidth, height: layout.size.height - insets.top - insets.bottom - additionalBottomInset)), items: items, transition: transition, failIfDoesNotFit: false)\n",
+     "        // pluma: with the text scrolled when the content does not fit without the sticker either (task 076).\n"
+     "        self.fitTelegramCodeScreen(items: &items, height: layout.size.height - insets.top - insets.bottom - additionalBottomInset, textSize: currentOptionSize)\n"
+     "        let _ = layoutAuthorizationItems(bounds: CGRect(origin: CGPoint(x: bandMinX, y: insets.top), size: CGSize(width: bandWidth, height: layout.size.height - insets.top - insets.bottom - additionalBottomInset)), items: items, transition: transition, failIfDoesNotFit: false)\n"),
+    (LOGIN_CODE_NODE,
+     "        self.currentOptionActivateAreaNode.frame = self.currentOptionNode.frame\n",
+     "        // pluma: the text of a screen of task 076 lies in its scroll node.\n"
+     "        self.currentOptionActivateAreaNode.frame = self.currentOptionNode.supernode === self.currentOptionScrollNode ? self.currentOptionScrollNode.frame : self.currentOptionNode.frame\n"),
+    # One resend at a time.
+    (LOGIN_CODE_NODE,
+     "            self.codeInputView.alpha = self.inProgress ? 0.6 : 1.0\n",
+     "            self.codeInputView.alpha = self.inProgress ? 0.6 : 1.0\n"
+     "            // pluma: the link waits for the answer it asked for, dimmed as the code is; a tap does\n"
+     "            // nothing meanwhile (nextOptionNodePressed) (task 076).\n"
+     "            if self.hasResendLink {\n"
+     "                self.nextOptionButtonNode.alpha = self.inProgress ? 0.6 : 1.0\n"
+     "            }\n"),
+    (LOGIN_CODE_NODE,
+     "    @objc func nextOptionNodePressed() {\n"
+     "        self.requestAnotherOption?()\n",
+     "    @objc func nextOptionNodePressed() {\n"
+     "        // pluma: one request at a time from the link of a code screen of task 076.\n"
+     "        if self.hasResendLink && self.inProgress {\n"
+     "            return\n"
+     "        }\n"
+     "        self.requestAnotherOption?()\n"),
+    # The controller of the screen passes the check through.
+    (LOGIN_CODE_CONTROLLER,
+     "    public var openFragment: ((String) -> Void)?\n",
+     "    public var openFragment: ((String) -> Void)?\n"
+     "    // pluma: whether the Telegram app opens a link of the screen (task 076).\n"
+     "    public var canOpenUrl: ((String) -> Bool)?\n"),
+    (LOGIN_CODE_CONTROLLER,
+     "        self.controllerNode.openFragment = { [weak self] url in\n"
+     "            self?.openFragment?(url)\n"
+     "        }\n",
+     "        self.controllerNode.openFragment = { [weak self] url in\n"
+     "            self?.openFragment?(url)\n"
+     "        }\n"
+     "        \n"
+     "        self.controllerNode.canOpenUrl = { [weak self] url in\n"
+     "            return self?.canOpenUrl?(url) ?? false\n"
+     "        }\n"),
+    (LOGIN_CODE_CONTROLLER,
+     "    func updateAppIsActive(_ isActive: Bool) {\n"
+     "        self.controllerNode.updatePasteVisibility()\n",
+     "    func updateAppIsActive(_ isActive: Bool) {\n"
+     "        self.controllerNode.updatePasteVisibility()\n"
+     "        self.controllerNode.updateTelegramUrl() // pluma: Telegram may have been installed meanwhile (task 076).\n"),
+    (LOGIN_CODE_CONTROLLER,
+     "    public func updateData(number: String, email: String?, codeType: SentAuthorizationCodeType, nextType: AuthorizationCodeNextType?, timeout: Int32?, termsOfService: (UnauthorizedAccountTermsOfService, Bool)?, previousCodeType: SentAuthorizationCodeType?, isPrevious: Bool) {\n",
+     src(" " * 4, """
+         // pluma: an answer of auth.resendCode restarts the countdown of the screen it reaches, also
+         // when that is this screen with the same data, which updateData passes over (Sms after Sms
+         // counts down to "Send again" anew). After FLOOD_WAIT the link waits the screen's countdown,
+         // or 60 s without one, the default of Telegram's Android app (LoginActivity.java 1903-1905):
+         // TelegramCore keeps no seconds of FLOOD_WAIT (task 076).
+         func restartCountdown(afterFloodWait: Bool) {
+             guard let (number, email, codeType, nextType, timeout, previousCodeType, isPrevious) = self.data, self.isNodeLoaded else {
+                 return
+             }
+             var countdown = timeout
+             if afterFloodWait && (timeout ?? 0) <= 0 {
+                 countdown = 60
+             }
+             var appleSignInAllowed = false
+             if case let .email(_, _, _, _, appleSignInAllowedValue, _) = codeType {
+                 appleSignInAllowed = appleSignInAllowedValue
+             }
+             self.controllerNode.updateData(number: number, email: email, codeType: codeType, nextType: nextType, timeout: countdown, appleSignInAllowed: appleSignInAllowed, previousCodeType: previousCodeType, isPrevious: isPrevious)
+             self.requestLayout(transition: .immediate)
+         }
+
+         public func updateData(number: String, email: String?, codeType: SentAuthorizationCodeType, nextType: AuthorizationCodeNextType?, timeout: Int32?, termsOfService: (UnauthorizedAccountTermsOfService, Bool)?, previousCodeType: SentAuthorizationCodeType?, isPrevious: Bool) {
+     """)),
+    # The login: "Didn't get the code?" with nothing more to send, and the check.
+    (LOGIN_SEQUENCE,
+     "                if nextType == nil {\n"
+     "                    if let controller {\n"
+     "                        let carrier = CTCarrier()\n"
+     "                        let mnc = carrier.mobileNetworkCode ?? \"none\"\n"
+     "                        let _ = strongSelf.engine.auth.reportMissingCode(phoneNumber: number, phoneCodeHash: phoneCodeHash, mnc: mnc).start()\n"
+     "                        \n"
+     "                        AuthorizationSequenceController.presentDidNotGetCodeUI(sharedContext: strongSelf.sharedContext, controller: controller, presentationData: strongSelf.presentationData, phoneNumber: number, mnc: mnc)\n"
+     "                    }\n",
+     "                if nextType == nil {\n"
+     "                    // pluma: nothing more can be sent; the administrator issues the code. No mail to\n"
+     "                    // Telegram's support about a missing SMS, no auth.reportMissingCode (task 076).\n"
+     "                    if let controller {\n"
+     "                        controller.present(textAlertController(sharedContext: strongSelf.sharedContext, "
+     + LOGIN_ALERT.format(strings="strongSelf.presentationData.strings") +
+     "                    }\n"),
+    # The answers of auth.resendCode.
+    (LOGIN_SEQUENCE,
+     "                    |> deliverOnMainQueue).startStrict(next: { result in\n"
+     "                        controller?.inProgress = false\n",
+     "                    |> deliverOnMainQueue).startStrict(next: { result in\n"
+     "                        controller?.inProgress = false\n"
+     "                        // pluma: the countdown starts anew, also on the same screen (task 076).\n"
+     "                        controller?.restartCountdown(afterFloodWait: false)\n"),
+    (LOGIN_SEQUENCE,
+     "                            controller.inProgress = false\n"
+     "                            \n"
+     "                            var actions: [TextAlertAction] = [TextAlertAction(type: .defaultAction, title: strongSelf.presentationData.strings.Common_OK, action: {})]\n",
+     "                            controller.inProgress = false\n"
+     "                            \n"
+     + src(" " * 28, """
+         // pluma: a code that expired goes back to the phone number, as at sign in (codeExpired
+         // above); with nothing more to send, the administrator issues the code; after FLOOD_WAIT
+         // the link waits before it offers another try (task 076).
+         if case let .generic(info) = error, let description = info?.1 {
+             if description == "PHONE_CODE_EXPIRED" {
+                 let account = strongSelf.account
+                 let _ = strongSelf.engine.auth.setState(state: UnauthorizedAccountState(isTestingEnvironment: account.testingEnvironment, masterDatacenterId: account.masterDatacenterId, contents: .empty)).startStandalone()
+                 controller.present(textAlertController(sharedContext: strongSelf.sharedContext, title: nil, text: strongSelf.presentationData.strings.Login_CodeExpired, actions: [TextAlertAction(type: .defaultAction, title: strongSelf.presentationData.strings.Common_OK, action: {})]), in: .window(.root))
+                 return
+             }
+             if description == "SEND_CODE_UNAVAILABLE" {
+                 controller.present(textAlertController(sharedContext: strongSelf.sharedContext, %s
+                 return
+             }
+         }
+         if case .limitExceeded = error {
+             controller.restartCountdown(afterFloodWait: true)
+         }
+
+         var actions: [TextAlertAction] = [TextAlertAction(type: .defaultAction, title: strongSelf.presentationData.strings.Common_OK, action: {})]
+     """) % LOGIN_ALERT.format(strings="strongSelf.presentationData.strings").rstrip("\n")),
+    (LOGIN_SEQUENCE,
+     "        controller.openFragment = { [weak self] url in\n"
+     "            if let strongSelf = self {\n"
+     "                strongSelf.sharedContext.applicationBindings.openUrl(url)\n"
+     "            }\n"
+     "        }\n",
+     "        controller.openFragment = { [weak self] url in\n"
+     "            if let strongSelf = self {\n"
+     "                strongSelf.sharedContext.applicationBindings.openUrl(url)\n"
+     "            }\n"
+     "        }\n"
+     "        // pluma: the button of a code in Telegram or of one that did not reach it shows when the\n"
+     "        // Telegram app is there to open its link (task 076).\n"
+     "        controller.canOpenUrl = { [weak self] url in\n"
+     "            return self?.sharedContext.applicationBindings.canOpenUrl(url) ?? false\n"
+     "        }\n"),
+    # The change of the phone number: the same screen, never a next type.
+    (CHANGE_PHONE,
+     "                let carrier = CTCarrier()\n"
+     "                let mnc = carrier.mobileNetworkCode ?? \"none\"\n"
+     "                let _ = context.engine.auth.reportMissingCode(phoneNumber: phoneNumber, phoneCodeHash: next.hash, mnc: mnc).start()\n"
+     "                \n"
+     "                AuthorizationSequenceController.presentDidNotGetCodeUI(sharedContext: context.sharedContext, controller: codeController, presentationData: context.sharedContext.currentPresentationData.with({ $0 }), phoneNumber: phoneNumber, mnc: mnc)\n"
+     "            }\n"
+     "            codeController.openFragment = { url in\n"
+     "                context.sharedContext.applicationBindings.openUrl(url)\n"
+     "            }\n",
+     "                // pluma: the administrator issues the code that does not come. No mail to Telegram's\n"
+     "                // support about a missing SMS, no auth.reportMissingCode (task 076).\n"
+     "                codeController.present(textAlertController(context: context, "
+     + LOGIN_ALERT.format(strings="presentationData.strings") +
+     "            }\n"
+     "            codeController.openFragment = { url in\n"
+     "                context.sharedContext.applicationBindings.openUrl(url)\n"
+     "            }\n"
+     "            // pluma: the button of a code that did not reach Telegram, when the Telegram app is there (task 076).\n"
+     "            codeController.canOpenUrl = { url in\n"
+     "                return context.sharedContext.applicationBindings.canOpenUrl(url)\n"
+     "            }\n"),
+    # Telegram's two links open the Telegram app; any other tg:// link is dropped.
+    (APP_DELEGATE,
+     "                if parsed.scheme == \"tg\" {\n"
+     "                    return\n"
+     "                }\n",
+     src(" " * 16, """
+         // pluma: tg:// is Telegram's scheme, not Pluma's (patch_scheme). Two links of the login
+         // code screen open the Telegram app: the chat with the account that wrote the code and
+         // the privacy settings of the phone number (task 076). Any other one is dropped.
+         let opensTelegram = (parsed.host == "resolve" && parsed.path.isEmpty && parsed.query?.range(of: "^domain=[A-Za-z0-9_]+$", options: .regularExpression) != nil) || (parsed.host == "settings" && parsed.path == "/phone_privacy" && parsed.query == nil)
+         if parsed.scheme == "tg" && !opensTelegram {
+             return
+         }
+     """)),
+    # canOpenURL answers for the schemes the app declares only.
+    (APP_BUILD,
+     "        <string>rizogo</string>\n"
+     "    </array>\n",
+     "        <string>rizogo</string>\n"
+     "        <string>tg</string>\n"
+     "    </array>\n"),
+)
+# The check job fetches only the paths the patch reads (ci/fetch-upstream.sh sparse).
+UPSTREAM_PATHS += tuple(sorted({rel for rel, _, _ in LOGIN_CODE_EDITS} - set(UPSTREAM_PATHS)))
+
+
+def login_code_entries(c):
+    """The entries of the English strings, as the file writes them."""
+    return [f'"{key}" = "{value.replace("{name}", c.app_name)}";' for key, value in LOGIN_CODE_STRINGS]
+
+
+def patch_login_codes(tree, c):
+    """The login code screens tell where the code went: the other sessions,
+    the person's Telegram, or nowhere, and the administrator issues it; no
+    SMS and no Telegram's support. After patch_names: the texts name the
+    Telegram app."""
+    for key, _ in LOGIN_CODE_STRINGS:
+        tree.expect(STRINGS, f'"{key}" = ', 0)
+    text = tree.read(STRINGS)
+    tree.write(STRINGS, text + ("" if text.endswith("\n") else "\n") + LOGIN_CODE_STRINGS_HEAD
+               + "".join(entry + "\n" for entry in login_code_entries(c)))
+    for rel, old, new in LOGIN_CODE_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_login_codes(tree, c):
+    strings = tree.read(STRINGS)
+    for (key, _), entry in zip(LOGIN_CODE_STRINGS, login_code_entries(c)):
+        if strings.count(f'"{key}" = ') != 1 or entry + "\n" not in strings:
+            raise PatchError(f"{STRINGS}: {key} is not the text of the login code screens")
+    for rel, old, new in LOGIN_CODE_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the login code edit {new.strip().splitlines()[0]!r} is not there")
+    # Nothing leads to Telegram's support: presentDidNotGetCodeUI stays
+    # defined, with no caller.
+    for rel in (LOGIN_SEQUENCE, CHANGE_PHONE):
+        text = tree.read(rel)
+        if "reportMissingCode(" in text or text.count("presentDidNotGetCodeUI(") != text.count("func presentDidNotGetCodeUI("):
+            raise PatchError(f"{rel}: \"Didn't get the code?\" still writes to Telegram's support")
+    node = tree.read(LOGIN_CODE_NODE)
+    for fragment in ("Login_OpenFragment", "IntroFragment", "anim_fragment", "0x37475a"):
+        if fragment in node:
+            raise PatchError(f"{LOGIN_CODE_NODE}: the code screen still shows Fragment ({fragment})")
+    options = tree.read(LOGIN_OPTION_TEXT)
+    if "Login_EnterCodeFragmentText" in options:
+        raise PatchError(f"{LOGIN_OPTION_TEXT}: a code in Telegram still reads as Fragment's")
+
 # --- App Store ---------------------------------------------------------------
 
 
@@ -4052,8 +4638,11 @@ def verify_scheme(tree, c):
 
 
 def verify_names(tree, c):
+    # The texts of the login code screens name the Telegram app, exactly as
+    # patch_login_codes writes them; no other entry names Telegram.
+    telegram_app = set(login_code_entries(c))
     for m in STRINGS_ENTRY.finditer(tree.read(STRINGS)):
-        if TELEGRAM_WORD.search(m.group(2)):
+        if TELEGRAM_WORD.search(m.group(2)) and m.group(0) not in telegram_app:
             raise PatchError(f"{STRINGS}: {m.group(0)[:80]!r} still names Telegram")
     for lang, names in INFOPLIST_NAMES.items():
         rel = INFOPLIST_STRINGS.format(lang)
@@ -4171,6 +4760,7 @@ def verify(tree, c):
     verify_intro_mark(tree)
     verify_names(tree, c)
     verify_scheme(tree, c)
+    verify_login_codes(tree, c)
     verify_client_links(tree)
     verify_links(tree)
     verify_palette(tree)
