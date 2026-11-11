@@ -162,6 +162,13 @@ ROUND_VIDEO_RECORDER = "submodules/Camera/Sources/CameraOutput.swift"
 GIF_CONVERTER = "submodules/LegacyComponents/Sources/TGGifConverter.m"
 # The quality an edited video is sent at when none was chosen.
 VIDEO_FETCH = "submodules/TelegramUI/Components/Resources/FetchVideoMediaResource/Sources/FetchVideoMediaResource.swift"
+# tgcalls, a submodule of upstream's at the commit the checkout pins: the
+# engine of 1:1 calls and the camera of every call.
+TGCALLS = "submodules/TgVoipWebrtc/tgcalls"
+TGCALLS_URL = "https://github.com/TelegramMessenger/tgcalls.git"
+CALL_ENGINE = TGCALLS + "/tgcalls/v2/InstanceV2Impl.cpp"
+CALL_CAPTURE = TGCALLS + "/tgcalls/VideoCaptureInterfaceImpl.cpp"
+CALL_CAPTURE_HEADER = TGCALLS + "/tgcalls/VideoCaptureInterfaceImpl.h"
 MAKE = "build-system/Make/Make.py"
 BUILD_CONFIGURATION = "build-system/Make/BuildConfiguration.py"
 VERSIONS = "versions.json"
@@ -886,6 +893,9 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + (VIDEO_PRESETS_LEGACY, VIDEO_PRESETS, ROUND_VIDEO_RECORDER, GIF_CONVERTER, VIDEO_FETCH)
                   + (ACCOUNT_MANAGER,)
                   + (FONT, CAMERA_ASSETS) + tuple(CAMERA_FONTS) + tuple(SIRI_VOCABULARY.format(lang) for lang in SIRI_PHRASES))
+# The same inside upstream's submodules: (submodule, its repository, the
+# files), each fetched at the commit the checkout pins for it.
+SUBMODULES = ((TGCALLS, TGCALLS_URL, (CALL_ENGINE, CALL_CAPTURE, CALL_CAPTURE_HEADER)),)
 
 
 class PatchError(Exception):
@@ -1472,6 +1482,7 @@ def patch(tree, c):
     patch_video_quality(tree)
     patch_store(tree, c)
     patch_account_cleanup(tree)
+    patch_call_parameters(tree)
 
     # The build configuration of Make.py, with exactly the keys it reads.
     conf = c.build_configuration()
@@ -4652,6 +4663,7 @@ def verify(tree, c):
     verify_video_quality(tree)
     verify_store(tree, c)
     verify_account_cleanup(tree)
+    verify_call_parameters(tree)
 
     build = tree.read(APP_BUILD)
     if "<string>Telegram</string>" in build or "<string>telegram</string>" in build:
@@ -4916,12 +4928,377 @@ def verify_account_cleanup(tree):
         raise PatchError(f"{ACCOUNT_MANAGER}: the account directories are still matched with a view of the records")
 
 
+# --- call quality from the server ---------------------------------------------
+#
+# Task 077 of the server repository, stage 2 (research in
+# docs/tasks/077-research/{audio,video}.md there). The quality of a 1:1 call
+# is fixed in tgcalls; the server can set none of it (phone.getCallConfig is
+# stored and never applied: OngoingCallContext.swift 944,
+# OngoingCallThreadLocalContext.mm applyServerConfig). phoneCall.custom_parameters
+# does reach the engine: CallSessionManager.swift 1214-1226 keeps it,
+# PresentationCall.swift 1219 and OngoingCallContext.swift 1058-1090 pass it,
+# extended only by network_* keys, to tgcalls::Config.customParameters, which
+# InstanceV2Impl parses into _customParameters.
+# The patch makes the engine of library versions 7, 8, 9, 12 and 13
+# (InstanceV2Impl; 9.0.0 is what the server negotiates between native
+# clients) read these keys. A key that is absent, not a number or out of its
+# range keeps Telegram's value, so a call without them is Telegram's call and
+# the server switches each value for an A/B test:
+#
+#   key                      Telegram's              range           where
+#   audio_ptime_ms           60                      10,20,40,60,120 OutgoingAudioChannel, kCodecParamPTime
+#   audio_max_bitrate_kbps   32 * 1024 bit/s         6-128           adjustBitratePreferences, audio setMaxBitrate
+#   audio_min_bitrate_kbps   none: min = max         6-max           field trial WebRTC-Audio-Allocation
+#   audio_jitter_min_ms      50                      1-500           IncomingV2AudioChannel, jitter buffer floor
+#   audio_rnnoise            false                   bool            RNNoise after the APM, as in group calls
+#   video_max_bitrate_kbps   1000 * 1024 bit/s       100-20000       adjustBitratePreferences, camera setMaxBitrate
+#   screen_max_bitrate_kbps  none: WebRTC's by size  100-20000       adjustBitratePreferences, screen setMaxBitrate
+#   start_bitrate_kbps       none: WebRTC's 300      30-20000        CallConfig bitrate_config.start_bitrate_bps
+#   video_fps                25                      1-60            VideoCaptureInterfaceObject, adaptVideoSource
+#
+# The keys, units and ranges are the server's (pkg/phonecalls/parameters.go,
+# docs/ops/calls.md there): a kbit/s is 1000 bit/s, while tgcalls writes its
+# own values as kbit * 1024, so without a key the upstream number stays.
+#   - audio_ptime_ms: 60 ms packets are three 20 ms Opus frames, and in-band
+#     FEC carries only the last one, so a lost packet loses 40 ms to
+#     concealment; WebRTC rounds a ptime up to 10, 20, 40 or 60
+#     (audio_encoder_opus.cc 61-64, 131-146).
+#   - audio_*_bitrate_kbps: setMaxBitrate makes the target the whole range
+#     (webrtc_voice_engine.cc UpdateAllowedBitrateRange 1105-1126); the trial's
+#     min and max replace it in the allocator's constraints
+#     (audio_send_stream.cc 847-850), so the estimate moves Opus inside it.
+#     Field trials are process-wide and InitFieldTrialsFromString keeps the
+#     pointer (field_trial.cc 163-170): every string set is kept for the life of
+#     the process.
+#   - Every integer key is read with its presence, not as tgcalls'
+#     getCustomParameterInt, which answers 0 for an absent key; the server
+#     never sends 0.
+#   - audio_rnnoise: GroupInstanceCustomImpl's AudioCapturePostProcessor
+#     (12.9.2: GroupInstanceCustomImpl.cpp 717-880; 13.2:
+#     group/GroupAudioCapturePostProcessor.cpp) without its level metering:
+#     a non-silent 10 ms frame at 48 kHz is denoised; a frame of another size
+#     is left as it is, as the group discards its result for one (12.9.2
+#     756-764, 865-867). On iOS it runs after VPIO's own processing, as in
+#     group calls.
+#   - screen_max_bitrate_kbps: Telegram caps the camera only; the screen gets
+#     WebRTC's default by frame size (encoder_stream_factory.cc 79-96).
+#   - start_bitrate_kbps: the start of the bandwidth estimate; below 500
+#     kbit/s WebRTC drops the first 720p frames and steps the resolution down
+#     (research video.md, "Start bitrate"). WebRTC's default is 300000
+#     (bitrate_settings.h 41-45). It covers the start of the call only.
+#   - video_fps: the camera is captured at 30 and adapted to 25
+#     (VideoCaptureInterfaceImpl.cpp 129, 131, DarwinInterface adaptVideoSource);
+#     the key is applied when the call takes the camera. The capture object
+#     is the call's own (PresentationCall.swift 1570-1572); a call moved to a
+#     conference hands it over (1094-1095), so the conference keeps the rate.
+# Not read here: screen_fps and screen_max_size_px, because nothing in the
+# call sets a screen size or rate for them to replace. iOS shares its screen
+# from the broadcast extension, a separate process that gets no call
+# parameters: it drops frames to 30 a second and sends the screen at its own
+# size (BroadcastUploadExtension.swift 234-254). The app hands those frames to
+# tgcalls through the custom capture (":ios_custom",
+# OngoingCallThreadLocalContext.mm 1320), which has no format and so no
+# resolution (VideoCapturerInterfaceImpl.mm 193-195, 359-361), and
+# updateAspectRateAdaptation adapts nothing without one. The server's 30
+# frames a second is what the extension sends; a smaller long side than the
+# screen's would need scaling in the app, which upstream does not do and this
+# patch does not add. Not here either: TURN over TCP or TLS (the
+# TL type and the three clients carry no TLS flag, research network.md "TURN
+# over TCP and TLS on 443") and 1080p capture; the engines of versions 10, 11
+# (Reference), 14 (Compat), 18 and 19 (Pump) keep Telegram's values.
+
+CALL_ENGINE_INCLUDES_ANCHOR = '#include "utils/gzip.h"\n'
+CALL_ENGINE_INCLUDES = src("", """
+    // pluma: call quality from phoneCall.custom_parameters (task 077).
+    #include "rnnoise.h"
+    #include "modules/audio_processing/include/audio_processing.h"
+    #include <algorithm>
+    #include <cmath>
+    #include <cstring>
+    #include <mutex>
+    #include <set>
+""")
+CALL_ENGINE_HELPERS_ANCHOR = "namespace tgcalls {\nnamespace {\n\n"
+CALL_ENGINE_HELPERS = src("", """
+    // pluma: the call quality the server sets in phoneCall.custom_parameters
+    // (task 077). A key that is absent, of another type or out of its range
+    // keeps Telegram's value. The server's kbit/s is 1000 bit/s; Telegram's
+    // own rates are written as tgcalls writes them, kbit * 1024.
+    struct PlumaCallParameters {
+        int audioPacketMs = 60;
+        int audioMaxBitrateBps = 32 * 1024;
+        int audioMinBitrateBps = 0; // none: the target is the whole range
+        int audioJitterMinDelayMs = 50;
+        bool audioNoiseSuppression = false;
+        int videoMaxBitrateBps = 1000 * 1024;
+        int screencastMaxBitrateBps = 0; // none: WebRTC's default by frame size
+        int startBitrateBps = 0; // none: WebRTC's 300 kbit/s
+        int videoFps = 0; // none: the capture's own adaptation, 25
+    };
+
+    int plumaCustomParameterInt(std::map<std::string, json11::Json> const &parameters, std::string const &name, int min, int max, int fallback) {
+        const auto value = parameters.find(name);
+        if (value == parameters.end() || !value->second.is_number()) {
+            return fallback;
+        }
+        const double number = value->second.number_value();
+        if (number < min || number > max || number != std::floor(number)) {
+            return fallback;
+        }
+        return (int)number;
+    }
+
+    PlumaCallParameters plumaCallParameters(std::map<std::string, json11::Json> const &parameters) {
+        PlumaCallParameters result;
+        const int packetMs = plumaCustomParameterInt(parameters, "audio_ptime_ms", 10, 120, 0);
+        if (packetMs == 10 || packetMs == 20 || packetMs == 40 || packetMs == 60 || packetMs == 120) {
+            result.audioPacketMs = packetMs;
+        }
+        if (const int kbps = plumaCustomParameterInt(parameters, "audio_max_bitrate_kbps", 6, 128, 0)) {
+            result.audioMaxBitrateBps = kbps * 1000;
+        }
+        const int audioMinKbps = plumaCustomParameterInt(parameters, "audio_min_bitrate_kbps", 6, 128, 0);
+        if (audioMinKbps != 0 && audioMinKbps * 1000 <= result.audioMaxBitrateBps) {
+            result.audioMinBitrateBps = audioMinKbps * 1000;
+        }
+        result.audioJitterMinDelayMs = plumaCustomParameterInt(parameters, "audio_jitter_min_ms", 1, 500, 50);
+        const auto noiseSuppression = parameters.find("audio_rnnoise");
+        result.audioNoiseSuppression = noiseSuppression != parameters.end() && noiseSuppression->second.is_bool() && noiseSuppression->second.bool_value();
+        if (const int kbps = plumaCustomParameterInt(parameters, "video_max_bitrate_kbps", 100, 20000, 0)) {
+            result.videoMaxBitrateBps = kbps * 1000;
+        }
+        result.screencastMaxBitrateBps = plumaCustomParameterInt(parameters, "screen_max_bitrate_kbps", 100, 20000, 0) * 1000;
+        result.startBitrateBps = plumaCustomParameterInt(parameters, "start_bitrate_kbps", 30, 20000, 0) * 1000;
+        result.videoFps = plumaCustomParameterInt(parameters, "video_fps", 1, 60, 0);
+        return result;
+    }
+
+    // The field trials with Opus' bitrate range added. InitFieldTrialsFromString
+    // keeps the pointer and the trials are process-wide, so each string set
+    // lives as long as the process.
+    const char *plumaFieldTrials(const char *trials, PlumaCallParameters const &parameters) {
+        std::ostringstream string;
+        string << (trials ? trials : "") << "WebRTC-Audio-Allocation/min:" << parameters.audioMinBitrateBps << "bps,max:" << parameters.audioMaxBitrateBps << "bps/";
+        static std::mutex mutex;
+        static std::set<std::string> *kept = new std::set<std::string>();
+        std::lock_guard<std::mutex> lock(mutex);
+        return kept->insert(string.str()).first->c_str();
+    }
+
+    // RNNoise on the captured voice after the APM, as group calls run it
+    // (AudioCapturePostProcessor of GroupInstanceCustomImpl): a 10 ms frame of
+    // 48 kHz, which RNNoise takes, is denoised when it is not silent; a frame of
+    // another size passes as it is, as the group's result is dropped then.
+    class PlumaNoiseSuppressor : public webrtc::CustomProcessing {
+    public:
+        PlumaNoiseSuppressor() {
+            _frameSamples.resize(rnnoise_get_frame_size());
+            _denoiseState = rnnoise_create(nullptr);
+        }
+
+        ~PlumaNoiseSuppressor() override {
+            if (_denoiseState) {
+                rnnoise_destroy(_denoiseState);
+            }
+        }
+
+    private:
+        void Initialize(int sample_rate_hz, int num_channels) override {
+        }
+
+        void Process(webrtc::AudioBuffer *buffer) override {
+            if (!buffer || buffer->num_channels() != 1 || !_denoiseState) {
+                return;
+            }
+            if (buffer->num_frames() != _frameSamples.size()) {
+                return;
+            }
+            float *samples = buffer->channels()[0];
+            float peak = 0.0f;
+            for (size_t i = 0; i < _frameSamples.size(); i++) {
+                peak = std::max(std::fabs(samples[i]), peak);
+            }
+            if (peak >= 0.01f) {
+                rnnoise_process_frame(_denoiseState, _frameSamples.data(), samples);
+                memcpy(samples, _frameSamples.data(), _frameSamples.size() * sizeof(float));
+            }
+        }
+
+        std::string ToString() const override {
+            return "PlumaNoiseSuppressor";
+        }
+
+        void SetRuntimeSetting(webrtc::AudioProcessing::RuntimeSetting setting) override {
+        }
+
+        DenoiseState *_denoiseState = nullptr;
+        std::vector<float> _frameSamples;
+    };
+""") + "\n"
+CALL_OUTGOING_AUDIO_OLD = ("        signaling::MediaContent const &mediaContent,\n        std::shared_ptr<Threads> threads\n"
+                           "    ) :\n    _threads(threads),\n    _ssrc(mediaContent.ssrc),\n    _call(call),\n")
+CALL_OUTGOING_AUDIO = CALL_OUTGOING_AUDIO_OLD.replace(
+    "        std::shared_ptr<Threads> threads\n",
+    "        std::shared_ptr<Threads> threads,\n        int audioPacketMs // pluma: 60 in Telegram (task 077)\n")
+CALL_PARSED_ANCHOR = ("                _customParameters = customParametersJson.object_items();\n"
+                      "            }\n        }\n")
+CALL_PARSED = "        \n" + src(" " * 8, """
+    // pluma: call quality from phoneCall.custom_parameters (task 077).
+    _plumaParameters = plumaCallParameters(_customParameters);
+    if (_plumaParameters.audioMinBitrateBps != 0) {
+        webrtc::field_trial::InitFieldTrialsFromString(plumaFieldTrials(webrtc::field_trial::GetFieldTrialString(), _plumaParameters));
+    }
+""")
+CALL_START_ANCHOR = "            callConfig.audio_state = _channelManager->media_engine()->voice().GetAudioState();\n"
+CALL_INCOMING_AUDIO_OLD = "        std::function<void(float)> onAudioLevelUpdated,\n        std::shared_ptr<Threads> threads) :\n"
+CALL_INCOMING_AUDIO = ("        std::function<void(float)> onAudioLevelUpdated,\n        std::shared_ptr<Threads> threads,\n"
+                       "        int jitterBufferMinDelayMs) : // pluma: 50 in Telegram (task 077)\n")
+
+
+def call_parameter_edits():
+    """The edits of tgcalls, as (file, upstream's text, Pluma's)."""
+    return (
+        (CALL_ENGINE, CALL_ENGINE_INCLUDES_ANCHOR, CALL_ENGINE_INCLUDES_ANCHOR + CALL_ENGINE_INCLUDES),
+        (CALL_ENGINE, CALL_ENGINE_HELPERS_ANCHOR, CALL_ENGINE_HELPERS_ANCHOR + CALL_ENGINE_HELPERS),
+        # Opus' packet.
+        (CALL_ENGINE, CALL_OUTGOING_AUDIO_OLD, CALL_OUTGOING_AUDIO),
+        (CALL_ENGINE, "                codec.SetParam(cricket::kCodecParamPTime, 60);\n",
+         "                codec.SetParam(cricket::kCodecParamPTime, audioPacketMs);\n"),
+        (CALL_ENGINE, "                            outgoingAudioContent.value(),\n                            _threads\n",
+         "                            outgoingAudioContent.value(),\n                            _threads,\n"
+         "                            _plumaParameters.audioPacketMs\n"),
+        # The jitter buffer's floor.
+        (CALL_ENGINE, CALL_INCOMING_AUDIO_OLD, CALL_INCOMING_AUDIO),
+        (CALL_ENGINE, "        audioOptions.audio_jitter_buffer_min_delay_ms = 50;\n",
+         "        audioOptions.audio_jitter_buffer_min_delay_ms = jitterBufferMinDelayMs;\n"),
+        (CALL_ENGINE, "                            _audioLevelUpdated,\n                            _threads\n",
+         "                            _audioLevelUpdated,\n                            _threads,\n"
+         "                            _plumaParameters.audioJitterMinDelayMs\n"),
+        # The values, once the parameters are parsed; Opus' range among the
+        # field trials.
+        (CALL_ENGINE, CALL_PARSED_ANCHOR, CALL_PARSED_ANCHOR + CALL_PARSED),
+        (CALL_ENGINE, "    std::map<std::string, json11::Json> _customParameters;\n",
+         "    std::map<std::string, json11::Json> _customParameters;\n"
+         "    PlumaCallParameters _plumaParameters; // pluma: task 077\n"),
+        # The start of the bandwidth estimate.
+        (CALL_ENGINE, CALL_START_ANCHOR, CALL_START_ANCHOR + src(" " * 12, """
+             // pluma: WebRTC's 300 kbit/s in Telegram; phoneCall.custom_parameters may set it (task 077).
+             if (_plumaParameters.startBitrateBps != 0) {
+                 callConfig.bitrate_config.start_bitrate_bps = _plumaParameters.startBitrateBps;
+             }
+         """)),
+        # RNNoise.
+        (CALL_ENGINE, "        webrtc::AudioProcessingBuilder builder;\n",
+         "        webrtc::AudioProcessingBuilder builder;\n" + src(" " * 8, """
+             // pluma: RNNoise as in group calls when the server asks (task 077).
+             if (_plumaParameters.audioNoiseSuppression) {
+                 builder.SetCapturePostProcessing(std::make_unique<PlumaNoiseSuppressor>());
+             }
+         """)),
+        # The caps.
+        (CALL_ENGINE, src(" " * 4, """
+            void adjustBitratePreferences(bool resetStartBitrate) {
+                if (_outgoingAudioChannel) {
+                    _outgoingAudioChannel->setMaxBitrate(32 * 1024);
+                }
+                if (_outgoingVideoChannel) {
+                    _outgoingVideoChannel->setMaxBitrate(1000 * 1024);
+                }
+            }
+        """), src(" " * 4, """
+            void adjustBitratePreferences(bool resetStartBitrate) {
+                // pluma: 32 * 1024 and 1000 * 1024 in Telegram, which leaves the
+                // screen at WebRTC's default; phoneCall.custom_parameters may set
+                // all three (task 077).
+                if (_outgoingAudioChannel) {
+                    _outgoingAudioChannel->setMaxBitrate(_plumaParameters.audioMaxBitrateBps);
+                }
+                if (_outgoingVideoChannel) {
+                    _outgoingVideoChannel->setMaxBitrate(_plumaParameters.videoMaxBitrateBps);
+                }
+                if (_outgoingScreencastChannel && _plumaParameters.screencastMaxBitrateBps != 0) {
+                    _outgoingScreencastChannel->setMaxBitrate(_plumaParameters.screencastMaxBitrateBps);
+                }
+            }
+        """)),
+        # The camera's frame rate.
+        (CALL_ENGINE, src(" " * 16, """
+            _videoCapture = videoCapture;
+            _screencastCapture = nullptr;
+        """), src(" " * 16, """
+            _videoCapture = videoCapture;
+            _screencastCapture = nullptr;
+            // pluma: 25 in Telegram; phoneCall.custom_parameters may set it (task 077).
+            if (_plumaParameters.videoFps != 0) {
+                videoCaptureImpl->setAdaptationFramerate(_plumaParameters.videoFps);
+            }
+        """)),
+        (CALL_CAPTURE_HEADER, "    void setPreferredAspectRatio(float aspectRatio);\n",
+         "    void setPreferredAspectRatio(float aspectRatio);\n"
+         "    void setAdaptationFramerate(int framerate); // pluma: task 077\n"),
+        (CALL_CAPTURE_HEADER, "    bool _isScreenCapture = false;\n",
+         "    bool _isScreenCapture = false;\n"
+         "    int _adaptationFramerate = 25; // pluma: Telegram's literal of updateAspectRateAdaptation (task 077)\n"),
+        (CALL_CAPTURE, src("", """
+            void VideoCaptureInterfaceObject::setPreferredAspectRatio(float aspectRatio) {
+                _preferredAspectRatio = aspectRatio;
+                updateAspectRateAdaptation();
+            }
+        """), src("", """
+            void VideoCaptureInterfaceObject::setPreferredAspectRatio(float aspectRatio) {
+                _preferredAspectRatio = aspectRatio;
+                updateAspectRateAdaptation();
+            }
+
+            // pluma: the frame rate the camera is adapted to, 25 in Telegram (task 077).
+            void VideoCaptureInterfaceObject::setAdaptationFramerate(int framerate) {
+                if (_adaptationFramerate != framerate) {
+                    _adaptationFramerate = framerate;
+                    updateAspectRateAdaptation();
+                }
+            }
+        """)),
+        (CALL_CAPTURE, "adaptVideoSource(_videoSource, (int)width, (int)height, 25);\n",
+         "adaptVideoSource(_videoSource, (int)width, (int)height, _adaptationFramerate);\n"),
+        (CALL_CAPTURE, "adaptVideoSource(_videoSource, _videoCapturerResolution.first, _videoCapturerResolution.second, 25);\n",
+         "adaptVideoSource(_videoSource, _videoCapturerResolution.first, _videoCapturerResolution.second, _adaptationFramerate);\n"),
+    )
+
+
+def patch_call_parameters(tree):
+    """1:1 calls take their quality from phoneCall.custom_parameters, with
+    Telegram's values where the server sets none."""
+    for rel, old, new in call_parameter_edits():
+        tree.replace(rel, old, new)
+
+
+def verify_call_parameters(tree):
+    for rel, old, new in call_parameter_edits():
+        text = tree.read(rel)
+        if text.count(new) != 1 or (old not in new and old in text):
+            raise PatchError(f"{rel}: the call quality from the server is not there ({old.strip().splitlines()[-1]!r})")
+    engine = tree.read(CALL_ENGINE)
+    # Every value the patch replaced comes from the parameters now.
+    for literal in ("kCodecParamPTime, 60)", "setMaxBitrate(32 * 1024)", "setMaxBitrate(1000 * 1024)",
+                    "audio_jitter_buffer_min_delay_ms = 50;"):
+        if literal in engine:
+            raise PatchError(f"{CALL_ENGINE}: {literal} is still Telegram's literal")
+    if ", 25);" in tree.read(CALL_CAPTURE):
+        raise PatchError(f"{CALL_CAPTURE}: the camera is still adapted to Telegram's 25 frames a second")
+
+
 def main(argv=None):
     if (argv if argv is not None else sys.argv[1:]) == ["--paths"]:
         print("\n".join(UPSTREAM_PATHS))
         return 0
+    if (argv if argv is not None else sys.argv[1:]) == ["--submodules"]:
+        for sub, url, paths in SUBMODULES:
+            print(" ".join([sub, url] + [p[len(sub) + 1:] for p in paths]))
+        return 0
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
-                                 epilog="patch.py --paths prints the upstream paths the patch reads.")
+                                 epilog="patch.py --paths prints the upstream paths the patch reads; "
+                                        "patch.py --submodules, for each submodule it reads, its path, "
+                                        "repository and the files in it.")
     ap.add_argument("--source", required=True, help="the Telegram-iOS checkout")
     ap.add_argument("--upstream", required=True, help="upstream.env")
     ap.add_argument("--app", required=True, help="config/app.env")
