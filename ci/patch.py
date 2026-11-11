@@ -1464,6 +1464,7 @@ def patch(tree, c):
     patch_saved_tags(tree)
     patch_premium_stickers(tree)
     premium_for_everyone(tree)
+    patch_no_ai_editor(tree)
     patch_app_update(tree)
     patch_video_quality(tree)
     patch_store(tree, c)
@@ -4486,6 +4487,7 @@ def verify(tree, c):
     verify_saved_tags(tree)
     verify_premium_stickers(tree)
     verify_premium_for_everyone(tree)
+    verify_no_ai_editor(tree)
     verify_app_update(tree)
     verify_video_quality(tree)
     verify_store(tree, c)
@@ -4572,6 +4574,83 @@ def verify_premium_for_everyone(tree):
         text = tree.read(rel)
         if text.count(new) != count or old in text.replace(new, ""):
             raise PatchError(f"{rel}: the edit of task 071 is not there")
+
+
+# --- No AI message editor (task 079) ------------------------------------------
+# The AI editor rewrites, proofreads, restyles and translates a typed message
+# (TextProcessingScreen in its edit and generate modes, through
+# messages.composeMessageWithAI, messages.composeRichMessageWithAI and the
+# aicompose.* tones); Pluma runs no language model to answer them (the
+# owner's decision, 2026-11-11). Upstream offers it from the AI button of the
+# chat's text field (ChatTextInputPanelNode), of the attachment caption
+# (AttachmentPanel), of the legacy media caption (LegacyMessageInputPanel) and
+# of the rich text editor (RichTextAttachmentScreen). The chat field keeps
+# isAIEnabled, which also enables its expand button; only the AI button never
+# shows. The two caption panels never enable it. The rich editor's button is
+# made but never added, and its action bar takes the room. The translate mode
+# of the same screen (messages, bios, gallery, Instant View) is left to
+# message translation, which the server turns off until it has a provider.
+NO_AI_EDITOR_EDITS = (
+    ("submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift",
+     "        if self.isAIEnabled, inputHasNonWhitespaceText, let node = self.richTextInputNode {\n",
+     "        // pluma: no AI editor, Pluma runs no language model (task 079); the expand button stays.\n"
+     "        if false && self.isAIEnabled, inputHasNonWhitespaceText, let node = self.richTextInputNode {\n", 1),
+    ("submodules/AttachmentUI/Sources/AttachmentPanel.swift",
+     "            if let data = self.context.currentAppConfiguration.with({ $0 }).data, let value = data[\"ios_disable_ai_chat\"] as? Double, value == 1.0 {\n"
+     "            } else if let peerId = self.presentationInterfaceState.chatLocation.peerId, peerId.namespace != Namespaces.Peer.SecretChat {\n"
+     "                textInputPanelNode.isAIEnabled = true\n"
+     "            }\n",
+     "            // pluma: no AI editor for a caption, Pluma runs no language model (task 079).\n", 1),
+    ("submodules/TelegramUI/Components/LegacyMessageInputPanel/Sources/LegacyMessageInputPanel.swift",
+     "        if let data = context.currentAppConfiguration.with({ $0 }).data, let value = data[\"ios_disable_ai_attach\"] as? Double, value == 1.0 {\n"
+     "        } else if let peerId = chatLocation.peerId, peerId.namespace != Namespaces.Peer.SecretChat {\n"
+     "            self.isAIEnabled = true\n"
+     "        }\n",
+     "        // pluma: no AI editor for a caption, Pluma runs no language model (task 079).\n", 1),
+    ("submodules/TelegramUI/Components/RichTextAttachmentScreen/Sources/RichTextAttachmentScreen.swift",
+     "                containerSize: CGSize(width: availableSize.width - (sideInset + environment.safeInsets.left) * 2.0 - actionBarSpacing * 2.0 - aiButtonSize.width - sendButtonSize.width, height: 44.0)\n",
+     "                containerSize: CGSize(width: availableSize.width - (sideInset + environment.safeInsets.left) * 2.0 - actionBarSpacing - sendButtonSize.width, height: 44.0) // pluma: no AI button\n", 1),
+    ("submodules/TelegramUI/Components/RichTextAttachmentScreen/Sources/RichTextAttachmentScreen.swift",
+     "            let aiButtonFrame = CGRect(origin: CGPoint(x: sideInset + environment.safeInsets.left, y: availableSize.height - bottomInset - 6.0 - aiButtonSize.height), size: aiButtonSize)\n"
+     "            if let aiButtonView = self.aiButton.view {\n"
+     "                if aiButtonView.superview == nil {\n"
+     "                    self.addSubview(aiButtonView)\n"
+     "                }\n"
+     "                transition.setFrame(view: aiButtonView, frame: aiButtonFrame)\n"
+     "            }\n",
+     "            // pluma: no AI editor, Pluma runs no language model (task 079); the button is never added.\n"
+     "            let _ = aiButtonSize\n", 1),
+    ("submodules/TelegramUI/Components/RichTextAttachmentScreen/Sources/RichTextAttachmentScreen.swift",
+     "            let actionBarFrame = CGRect(origin: CGPoint(x: sideInset + environment.safeInsets.left + aiButtonSize.width + actionBarSpacing, y: availableSize.height - bottomInset - 6.0 - actionBarSize.height), size: actionBarSize)\n",
+     "            let actionBarFrame = CGRect(origin: CGPoint(x: sideInset + environment.safeInsets.left, y: availableSize.height - bottomInset - 6.0 - actionBarSize.height), size: actionBarSize) // pluma: no AI button\n", 1),
+)
+# What would open the editor past the edits: another place that enables a
+# caption's AI button or adds the rich editor's. Upstream adding one stops
+# the patch until it is read.
+NO_AI_EDITOR_GUARDS = (
+    ("submodules/AttachmentUI/Sources/AttachmentPanel.swift", "isAIEnabled = true", 0),
+    ("submodules/TelegramUI/Components/LegacyMessageInputPanel/Sources/LegacyMessageInputPanel.swift", "isAIEnabled = true", 0),
+    ("submodules/TelegramUI/Components/RichTextAttachmentScreen/Sources/RichTextAttachmentScreen.swift", "self.aiButton.view", 0),
+    ("submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift", "isAIButtonVisible = true", 1),
+)
+UPSTREAM_PATHS += tuple(sorted({edit[0] for edit in NO_AI_EDITOR_EDITS} - set(UPSTREAM_PATHS)))
+
+
+def patch_no_ai_editor(tree):
+    for rel, old, new, count in NO_AI_EDITOR_EDITS:
+        tree.replace(rel, old, new, count=count)
+
+
+def verify_no_ai_editor(tree):
+    for rel, old, new, count in NO_AI_EDITOR_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != count or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the AI editor is offered again")
+    for rel, s, count in NO_AI_EDITOR_GUARDS:
+        found = tree.read(rel).count(s)
+        if found != count:
+            raise PatchError(f"{rel}: {found} occurrences of {s!r}, expected {count}; another way into the AI editor")
+
 
 def main(argv=None):
     if (argv if argv is not None else sys.argv[1:]) == ["--paths"]:
