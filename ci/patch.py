@@ -4462,8 +4462,8 @@ def verify_identity(tree):
 # the caller passes, so no image of the app is blue. Every place on a theme's
 # background passes the theme's check colours, list.itemCheckColors: the chat
 # list, the chat title, the profile, member, contact and call lists, search,
-# reactions, the stories bar, messages of channels, voice chats, link previews
-# and mini apps. The two images that resources draw take the same colours
+# reactions, the stories bar, messages of channels, the news feed, voice
+# chats, link previews and mini apps. The two images that resources draw take the same colours
 # (PresentationResourcesChatList.verifiedIcon, the call list) or the unread
 # counter's (PresentationResourcesItemList.verifiedPeerIcon, the profile's
 # name in item lists). The palette makes all of them sage with the text colour
@@ -4499,6 +4499,7 @@ VERIFIED_BADGE_SITES = (
     ("submodules/TelegramUI/Components/ChatTitleView/Sources/ChatTitleComponent.swift", 1, ()),
     ("submodules/TelegramUI/Components/ChatTitleView/Sources/ChatTitleView.swift", 2, ()),
     ("submodules/TelegramUI/Components/JoinSubjectScreen/Sources/JoinSubjectScreen.swift", 1, ()),
+    ("submodules/TelegramUI/Components/News/NewsFeedComponents/Sources/NewsFeedPostComponent.swift", 2, ()),
     ("submodules/TelegramUI/Components/Stories/PeerListItemComponent/Sources/PeerListItemComponent.swift", 1, ()),
     ("submodules/TelegramUI/Components/Stories/StoryPeerListComponent/Sources/StoryPeerListItemComponent.swift", 1, ()),
     ("submodules/WebUI/Sources/WebAppLaunchConfirmationController.swift", 1, ()),
