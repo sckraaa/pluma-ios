@@ -852,6 +852,36 @@ class AppUpdateTest(unittest.TestCase):
         patch.verify_app_update(self.tree)
 
 
+class AccountCleanupTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.dir.name)
+        (root / "Telegram").mkdir()
+        (root / "Telegram/BUILD").write_text("")
+        (root / "versions.json").write_text("{}")
+        self.tree = patch.Tree(root)
+        # The loop over the logged-out accounts before it reads view.records
+        # too, and stays.
+        self.other = "            outer: for record in view.records {\n"
+        self.tree.write(patch.ACCOUNT_MANAGER, self.other + patch.ACCOUNT_CLEANUP_OLD + "        })\n")
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_account_cleanup(self):
+        with self.assertRaisesRegex(patch.PatchError, "still matched with a view"):
+            patch.verify_account_cleanup(self.tree)
+        patch.patch_account_cleanup(self.tree)
+        patch.verify_account_cleanup(self.tree)
+        text = self.tree.read(patch.ACCOUNT_MANAGER)
+        self.assertIn(self.other, text)
+        self.assertIn("        for record in transaction.getRecords() {\n", text)
+        self.assertIn("        if let record = transaction.getCurrentAuth() {\n", text)
+        self.assertNotIn("removeItem(at: url)\n                    }\n                }\n            }\n        }\n    }).start(", text)
+        with self.assertRaises(patch.PatchError):
+            patch.patch_account_cleanup(self.tree)
+
+
 class SavedTagsTest(unittest.TestCase):
     # Each file the patch edits, with the upstream text of its edits.
     def upstream(self):
