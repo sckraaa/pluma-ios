@@ -133,6 +133,8 @@ CHAT_LIST_PANELS = "submodules/TelegramUI/Components/GlobalControlPanelsContext/
 PROFILE_ITEMS = "submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoProfileItems.swift"
 # The read date of an outgoing message in its context menu.
 CONTEXT_MENUS = "submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift"
+# The cleanup of account directories at launch (task 080).
+ACCOUNT_MANAGER = "submodules/TelegramCore/Sources/Account/AccountManager.swift"
 # The tags of Saved Messages: the flag of the chat's state, the gates that
 # check Premium (a tap on a tag, its context menu, the tag bar of a message's
 # context menu, the panel of tags over the chat and when it shows), and the
@@ -882,6 +884,7 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + (MESSAGE_REACTIONS, UPDATE_INFO)
                   + (MEDIA_FILE, SEARCH_STICKERS, ENTITY_KEYBOARD_INPUT, ENTITY_KEYBOARD_SIGNALS, STICKER_PACK_SCREEN)
                   + (VIDEO_PRESETS_LEGACY, VIDEO_PRESETS, ROUND_VIDEO_RECORDER, GIF_CONVERTER, VIDEO_FETCH)
+                  + (ACCOUNT_MANAGER,)
                   + (FONT, CAMERA_ASSETS) + tuple(CAMERA_FONTS) + tuple(SIRI_VOCABULARY.format(lang) for lang in SIRI_PHRASES))
 
 
@@ -1468,6 +1471,7 @@ def patch(tree, c):
     patch_app_update(tree)
     patch_video_quality(tree)
     patch_store(tree, c)
+    patch_account_cleanup(tree)
 
     # The build configuration of Make.py, with exactly the keys it reads.
     conf = c.build_configuration()
@@ -4491,6 +4495,7 @@ def verify(tree, c):
     verify_app_update(tree)
     verify_video_quality(tree)
     verify_store(tree, c)
+    verify_account_cleanup(tree)
 
     build = tree.read(APP_BUILD)
     if "<string>Telegram</string>" in build or "<string>telegram</string>" in build:
@@ -4650,6 +4655,109 @@ def verify_no_ai_editor(tree):
         found = tree.read(rel).count(s)
         if found != count:
             raise PatchError(f"{rel}: {found} occurrences of {s!r}, expected {count}; another way into the AI editor")
+
+
+# --- account directories on a fresh install ----------------------------------
+#
+# Task 080 of the server repository. On the first launch after an install the
+# first account (the login's auth record) could lose its directory while the
+# person signed in, and the app came back to the intro screen right after a
+# successful auth.signUp, with no error (the owner's report of 2026-11-11, and
+# the same on 2026-11-01, docs/tasks/029-ios-install-from-site.md):
+#   - managedCleanupAccounts (AccountManager.swift 392-475) deletes every
+#     account-* directory that no record names. It takes the names from one
+#     view of the records, then deletes on the global utility queue later. The
+#     first view at launch is empty; meanwhile beginNewAuth creates the auth
+#     record and accountWithId its account-<id>/postbox
+#     (SharedAccountContext.swift 803-805, 1758-1762; Postbox.swift 1455), and
+#     a late delete removes the live directory. SQLite keeps the open files, so
+#     the login works on unlinked files to the end;
+#   - after the login switchToAuthorizedAccount (Authorization.swift 18-39)
+#     turns the auth record into an account record and SharedAccountContext
+#     opens account-<id> again (SharedAccountContext.swift 640-641): it is
+#     empty, accountWithId answers .unauthorized, the record is deleted
+#     (751-756) and beginNewAuth starts a new login with new keys.
+# The server saw auth.signUp answered and, 0.14 s later, the client close the
+# key and make new ones with nothing sent in between.
+# The directories are now matched with the records inside a transaction of
+# the account manager, where the records are current: an auth record is
+# created in one before its directory, and an account record replaces it in
+# one. A directory no record names is moved aside there (a rename, quick on
+# the manager's queue) and deleted later on the utility queue, with any left
+# by an earlier launch.
+
+ACCOUNT_CLEANUP_OLD = src(" " * 12, """
+    var validPaths = Set<String>()
+    for record in view.records {
+        if let temporarySessionId = record.temporarySessionId, temporarySessionId != currentTemporarySessionId {
+            continue
+        }
+        validPaths.insert("\\(accountRecordIdPathName(record.id))")
+    }
+    if let record = view.currentAuthAccount {
+        validPaths.insert("\\(accountRecordIdPathName(record.id))")
+    }
+
+    DispatchQueue.global(qos: .utility).async {
+        if let files = try? FileManager.default.contentsOfDirectory(at: URL(fileURLWithPath: rootPath), includingPropertiesForKeys: [], options: []) {
+            for url in files {
+                if url.lastPathComponent.hasPrefix("account-") {
+                    if !validPaths.contains(url.lastPathComponent) {
+                        try? FileManager.default.removeItem(at: url)
+                    }
+                }
+            }
+        }
+    }
+""")
+ACCOUNT_CLEANUP = src(" " * 12, """
+    // pluma: the directories are matched with the records inside a
+    // transaction, where they are current: a view taken earlier may predate
+    // the auth record of a login whose directory exists (task 080).
+    let _ = (accountManager.transaction { transaction -> Void in
+        var validPaths = Set<String>()
+        for record in transaction.getRecords() {
+            if let temporarySessionId = record.temporarySessionId, temporarySessionId != currentTemporarySessionId {
+                continue
+            }
+            validPaths.insert("\\(accountRecordIdPathName(record.id))")
+        }
+        if let record = transaction.getCurrentAuth() {
+            validPaths.insert("\\(accountRecordIdPathName(record.id))")
+        }
+        if let files = try? FileManager.default.contentsOfDirectory(at: URL(fileURLWithPath: rootPath), includingPropertiesForKeys: [], options: []) {
+            for url in files {
+                if url.lastPathComponent.hasPrefix("account-") {
+                    if !validPaths.contains(url.lastPathComponent) {
+                        try? FileManager.default.moveItem(at: url, to: URL(fileURLWithPath: rootPath).appendingPathComponent("removed-account-\\(UUID().uuidString)"))
+                    }
+                }
+            }
+        }
+    }).start(completed: {
+        DispatchQueue.global(qos: .utility).async {
+            if let files = try? FileManager.default.contentsOfDirectory(at: URL(fileURLWithPath: rootPath), includingPropertiesForKeys: [], options: []) {
+                for url in files {
+                    if url.lastPathComponent.hasPrefix("removed-account-") {
+                        try? FileManager.default.removeItem(at: url)
+                    }
+                }
+            }
+        }
+    })
+""")
+
+
+def patch_account_cleanup(tree):
+    """Account directories are matched with the records in a transaction, so
+    the cleanup at launch never removes the directory of a login."""
+    tree.replace(ACCOUNT_MANAGER, ACCOUNT_CLEANUP_OLD, ACCOUNT_CLEANUP)
+
+
+def verify_account_cleanup(tree):
+    text = tree.read(ACCOUNT_MANAGER)
+    if text.count(ACCOUNT_CLEANUP) != 1 or ACCOUNT_CLEANUP_OLD in text:
+        raise PatchError(f"{ACCOUNT_MANAGER}: the account directories are still matched with a view of the records")
 
 
 def main(argv=None):
