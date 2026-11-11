@@ -227,7 +227,7 @@ The signed ad hoc IPA also goes to the server's install service (`ci/install-upl
 
 ### TestFlight
 
-Next to the ad hoc IPA, a manual run of `main` with *testflight* ticked builds the same app signed with App Store profiles and uploads it to App Store Connect, where it becomes a TestFlight build. Testers install it with the TestFlight app on any iPhone; it needs no registered devices. The certificate is the same Apple Distribution certificate; only the profiles differ, so the build reads the compiled code from the ad hoc IPA's Bazel cache and saves no cache of its own. The build number is the run number, which App Store Connect needs to grow from build to build.
+After the ad hoc IPA, every push to `main` (and a manual run of `main` with *testflight* ticked) builds the same app signed with App Store profiles and uploads it to App Store Connect, where it becomes a TestFlight build. Testers install it with the TestFlight app on any iPhone; it needs no registered devices. The certificate is the same Apple Distribution certificate; only the profiles differ, so the build reads the compiled code from the ad hoc IPA's Bazel cache and saves no cache of its own. The build number is the run number, which App Store Connect needs to grow from build to build.
 
 The `preflight-testflight` job checks first, in the `release` environment, and fails within a minute when something is wrong. It requires the following:
 - the certificate as for the ad hoc IPA;

@@ -16,7 +16,8 @@
 #                   then it hands the IPA to the install service and offers
 #                   it to the apps installed from the site;
 #   preflight-testflight, build-testflight
-#                   on a manual run of main with "testflight" ticked: the
+#                   on every push to main, and on a manual run of main with
+#                   "testflight" ticked: the
 #                   same IPA signed with App Store profiles and uploaded to
 #                   App Store Connect for TestFlight, after the same kind of
 #                   check of its profiles and of the API key it is uploaded
@@ -269,7 +270,7 @@ jobs:
 
   preflight-testflight:
     needs: check
-    if: vars.PLUMA_TEAM_ID != '' && github.event_name == 'workflow_dispatch' && inputs.testflight && github.ref == 'refs/heads/main'
+    if: vars.PLUMA_TEAM_ID != '' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.testflight))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     environment: release
@@ -304,7 +305,10 @@ jobs:
           fi
 
   build-testflight:
-    needs: preflight-testflight
+    # After the ad hoc IPA, whose Bazel cache it reads; a manual run may
+    # build no ad hoc IPA.
+    needs: [preflight-testflight, build-ipa]
+    if: always() && needs.preflight-testflight.result == 'success' && (needs.build-ipa.result == 'success' || needs.build-ipa.result == 'skipped')
     runs-on: macos-26
     timeout-minutes: 180
     environment: release
