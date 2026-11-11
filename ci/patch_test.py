@@ -1625,6 +1625,21 @@ DAMAGE = (
     (patch.CALL_CAPTURE, "_videoCapturerResolution.second, 25);\n", "_videoCapturerResolution.second, 30);\n"),
     # No AI message editor: each edit.
     *((rel, old, old.replace(", ", ",  ", 1)) for rel, old, _, _ in patch.NO_AI_EDITOR_EDITS),
+    # The service account: a place that shows a support account's line gone,
+    # one more of them, a row of a contact or of a list changed, Telegram's
+    # text changed.
+    *((rel, "Bot_GenericSupportStatus", "Bot_GenericBotStatus") for rel, _ in patch.SERVICE_ACCOUNT_SITES),
+    (patch.CONTACTS_ITEM, "                            userPresence = presence\n",
+     "                            userPresence = presence\n"
+     "                            let support = item.presentationData.strings.Bot_GenericSupportStatus\n"),
+    (patch.CONTACTS_ITEM, "                        } else {\n                            userPresence = presence\n",
+     "                        } else if !item.selectionOnly {\n                            userPresence = presence\n"),
+    (patch.PEER_ITEM, "                } else if let presence = item.presence {\n",
+     "                } else if let presence = item.presence, !item.editing.editing {\n"),
+    (patch.PEER_ITEM, "                    let botStatus: String\n",
+     "                    let botStatus: String\n"
+     "                    let support = user.flags.contains(.isSupport)\n"),
+    (patch.STRINGS, '"Bot.GenericSupportStatus" = "support";\n', '"Bot.GenericSupportStatus" = "Support";\n'),
 )
 
 
@@ -2161,6 +2176,29 @@ class UpstreamTest(unittest.TestCase):
                 with self.assertRaisesRegex(patch.PatchError, "still names Telegram"):
                     patch.verify_names(tree, c)
 
+    def test_service_account(self):
+        # A support account's line reads "service account", under upstream's
+        # key, at each place upstream shows it, in the row of a contact and
+        # in the row of the settings' lists.
+        tree, _ = self.run_patch()
+        strings = tree.read(patch.STRINGS)
+        self.assertIn('"Bot.GenericBotStatus" = "bot";\n"Bot.GenericSupportStatus" = "service account";\n', strings)
+        self.assertNotIn('= "support";', strings)
+        self.assertEqual(sum(tree.read(rel).count("strings.Bot_GenericSupportStatus") for rel, _ in patch.SERVICE_ACCOUNT_SITES), 5)
+        contact = tree.read(patch.CONTACTS_ITEM)
+        bot = contact.index("strings.Bot_GenericBotStatus, font: statusFont")
+        support = contact.index("user.flags.contains(.isSupport) {\n")
+        self.assertLess(bot, support)
+        self.assertLess(support, contact.index("strings.Bot_GenericSupportStatus, font: statusFont"))
+        self.assertLess(support, contact.index("                            userPresence = presence\n"))
+        row = tree.read(patch.PEER_ITEM)
+        bot = row.index("string: botStatus, font: statusFont")
+        support = row.index("} else if case let .user(user) = item.peer, user.flags.contains(.isSupport) {\n")
+        self.assertLess(bot, support)
+        self.assertLess(support, row.index("strings.Bot_GenericSupportStatus, font: statusFont"))
+        self.assertLess(support, row.index("                } else if let presence = item.presence {\n"))
+        self.assertLess(support, row.index("strings.LastSeen_Offline, font: statusFont"))
+
     def test_intro_without_wordmark(self):
         # The check after the edits finds a first page of the intro without
         # the wordmark.
@@ -2682,6 +2720,118 @@ class NoAiEditorTest(unittest.TestCase):
             patch.patch_no_ai_editor(tree)
             rel = patch.NO_AI_EDITOR_EDITS[0][0]
             self.assertIn("        if false && self.isAIEnabled, inputHasNonWhitespaceText,", tree.read(rel))
+
+
+class ServiceAccountTest(unittest.TestCase):
+    STRINGS = '"Bot.GenericBotStatus" = "bot";\n"Bot.GenericSupportStatus" = "support";\n"Bot.DescriptionTitle" = "x";\n'
+    LINE = "    let statusText = strings.Bot_GenericSupportStatus\n"
+
+    # The upstream files: the strings, a line of each place, the row of a
+    # contact and the row of the settings' lists.
+    def tree(self, root, strings=STRINGS, contact=patch.SERVICE_ACCOUNT_CONTACT_OLD, row=patch.SERVICE_ACCOUNT_PEER_OLD):
+        (root / "versions.json").write_text("{}")
+        files = {patch.APP_BUILD: "", patch.STRINGS: strings, patch.CONTACTS_ITEM: contact + "x\n",
+                 patch.PEER_ITEM: row + "x\n"}
+        for rel, count in patch.SERVICE_ACCOUNT_SITES:
+            files[rel] = self.LINE * count
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_upstream_paths_cover_the_edits(self):
+        for rel in [rel for rel, _ in patch.SERVICE_ACCOUNT_SITES] + [patch.CONTACTS_ITEM, patch.PEER_ITEM, patch.STRINGS]:
+            self.assertIn(rel, patch.UPSTREAM_PATHS)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "Bot.GenericSupportStatus is not the line of a service account"):
+                patch.verify_service_account(tree)
+            patch.patch_service_account(tree)
+            patch.verify_service_account(tree)
+            # The key stays (the server's language pack translates it), the
+            # text is Pluma's, in lower case as "bot" and "online" are.
+            self.assertEqual(tree.read(patch.STRINGS), '"Bot.GenericBotStatus" = "bot";\n'
+                             '"Bot.GenericSupportStatus" = "service account";\n"Bot.DescriptionTitle" = "x";\n')
+            # The places that read it are as they were.
+            for rel, count in patch.SERVICE_ACCOUNT_SITES:
+                self.assertEqual(tree.read(rel), self.LINE * count)
+            # The row of a contact: a support account before the last seen,
+            # the last seen of everyone else as it was.
+            contact = tree.read(patch.CONTACTS_ITEM)
+            self.assertEqual(contact.count("user.flags.contains(.isSupport) {\n"), 1)
+            self.assertLess(contact.index("user.flags.contains(.isSupport)"), contact.index("userPresence = presence"))
+            self.assertIn("string: item.presentationData.strings.Bot_GenericSupportStatus, font: statusFont, "
+                          "textColor: item.presentationData.theme.list.itemSecondaryTextColor)\n", contact)
+            self.assertTrue(contact.endswith("                        } else {\n"
+                                             "                            userPresence = presence\nx\n"))
+            # The row of the settings' lists: after a bot's line, before
+            # the last seen and "offline".
+            row = tree.read(patch.PEER_ITEM)
+            self.assertEqual(row, patch.SERVICE_ACCOUNT_PEER_OLD.split("                } else if let presence")[0]
+                             + "                } else if case let .user(user) = item.peer, user.flags.contains(.isSupport) {\n"
+                             "                    // pluma: a support account is a service account with no last seen (task 080).\n"
+                             "                    statusAttributedString = NSAttributedString(string: "
+                             "item.presentationData.strings.Bot_GenericSupportStatus, font: statusFont, "
+                             "textColor: item.presentationData.theme.list.itemSecondaryTextColor)\n"
+                             "                } else if let presence = item.presence {\nx\n")
+            # A second run is refused.
+            with self.assertRaises(patch.PatchError):
+                patch.patch_service_account(tree)
+
+    def test_upstream_changed(self):
+        cases = (
+            # Telegram's text is not the one replaced, or the key is gone.
+            ({"strings": '"Bot.GenericSupportStatus" = "Support";\n'}, None),
+            ({"strings": '"Bot.GenericBotStatus" = "bot";\n'}, None),
+            # The row of a contact changed, or has a line for support accounts.
+            ({"contact": patch.SERVICE_ACCOUNT_CONTACT_OLD.replace("userPresence", "presenceOfUser")}, None),
+            ({"contact": "if user.flags.contains(.isSupport) {}\n" + patch.SERVICE_ACCOUNT_CONTACT_OLD}, None),
+            # The same of the row of the settings' lists.
+            ({"row": patch.SERVICE_ACCOUNT_PEER_OLD.replace("item.presence", "item.status")}, None),
+            ({"row": "if user.flags.contains(.isSupport) {}\n" + patch.SERVICE_ACCOUNT_PEER_OLD}, None),
+            # A place lost its line or shows it once more.
+            ({}, ""),
+            ({}, self.LINE * 2),
+        )
+        for i, (over, site) in enumerate(cases):
+            with self.subTest(case=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), **over)
+                if site is not None:
+                    tree.write(patch.SERVICE_ACCOUNT_SITES[0][0], site)
+                with self.assertRaisesRegex(patch.PatchError, "occurrences"):
+                    patch.patch_service_account(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.patch_service_account(tree)
+            damages = [(patch.STRINGS, '= "service account";', '= "support";'),
+                       (patch.STRINGS, '"Bot.GenericSupportStatus" = "service account";\n',
+                        '"Bot.GenericSupportStatus" = "service account";\n"Bot.GenericSupportStatus" = "support";\n'),
+                       (patch.CONTACTS_ITEM, "user.flags.contains(.isSupport)", "user.flags.contains(.isScam)"),
+                       (patch.CONTACTS_ITEM, "strings.Bot_GenericSupportStatus, font", "strings.Bot_GenericBotStatus, font"),
+                       (patch.PEER_ITEM, "user.flags.contains(.isSupport)", "user.flags.contains(.isScam)"),
+                       (patch.PEER_ITEM, "strings.Bot_GenericSupportStatus, font", "strings.LastSeen_Offline, font")]
+            damages += [(rel, "Bot_GenericSupportStatus", "Bot_GenericBotStatus") for rel, _ in patch.SERVICE_ACCOUNT_SITES]
+            for i, (rel, old, new) in enumerate(damages):
+                patched = tree.read(rel)
+                self.assertIn(old, patched)
+                tree.write(rel, patched.replace(old, new))
+                with self.subTest(damage=i), self.assertRaisesRegex(patch.PatchError, pathlib.PurePath(rel).name):
+                    patch.verify_service_account(tree)
+                tree.write(rel, patched)
+            patch.verify_service_account(tree)
+
+    def test_another_place(self):
+        # The line read anywhere else in the sources.
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.patch_service_account(tree)
+            tree.write("submodules/New/Sources/New.swift", self.LINE)
+            with self.assertRaisesRegex(patch.PatchError, "New.swift: 1 uses of Bot_GenericSupportStatus, expected 0"):
+                patch.verify_service_account(tree)
 
 
 if __name__ == "__main__":
