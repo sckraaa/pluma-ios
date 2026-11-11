@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Fetches the upstream commit upstream.env pins: one commit, no history.
 #   fetch-upstream.sh sparse  into ./upstream, only the files ci/patch.py
-#                             reads and checks (ci/patch.py --paths): seconds,
-#                             for the check job and the tests;
+#                             reads and checks (ci/patch.py --paths, and in
+#                             submodules --submodules): seconds, for the check
+#                             job and the tests;
 #   fetch-upstream.sh full    into $UPSTREAM_DIR (default ./upstream) with
 #                             every submodule, for a build.
 # The CI builds in /Users/Shared/telegram-ios, as upstream's own CI does: the
@@ -66,5 +67,25 @@ retry with_timeout 10m git -C "$dir" -c advice.detachedHead=false checkout -q FE
 test "$(git -C "$dir" rev-parse HEAD)" = "$UPSTREAM_REF"
 if [ "$mode" = full ]; then
 	retry with_timeout 30m git -C "$dir" submodule update -q --init --recursive --depth 1 --jobs 4
+else
+	# The files the patch reads inside submodules (ci/patch.py --submodules),
+	# each submodule at the commit the checkout pins for it. Read first, so
+	# that a failure of patch.py stops the script.
+	submodules=$(python3 -I ci/patch.py --submodules)
+	while read -r sub url rest; do
+		read -ra files <<<"$rest"
+		commit=$(git -C "$dir" ls-tree HEAD "$sub" | awk '$2 == "commit" { print $3 }')
+		if [ -z "$commit" ]; then
+			echo "fetch-upstream: $sub is not a submodule at $UPSTREAM_REF" >&2
+			exit 1
+		fi
+		git init -q "$dir/$sub"
+		git -C "$dir/$sub" remote add origin "$url"
+		git -C "$dir/$sub" config core.sparseCheckout true
+		printf '/%s\n' "${files[@]}" >"$dir/$sub/.git/info/sparse-checkout"
+		retry with_timeout 10m git -C "$dir/$sub" fetch -q --depth 1 --filter=blob:none origin "$commit"
+		retry with_timeout 10m git -C "$dir/$sub" -c advice.detachedHead=false checkout -q FETCH_HEAD
+		test "$(git -C "$dir/$sub" rev-parse HEAD)" = "$commit"
+	done <<<"$submodules"
 fi
 echo "fetch-upstream: $UPSTREAM_TAG ($UPSTREAM_REF), $mode, in $dir"

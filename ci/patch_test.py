@@ -14,6 +14,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import unittest.mock
 import zlib
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
@@ -1503,6 +1504,12 @@ DAMAGE = (
     (patch.APP_DELEGATE, '                if parsed.scheme == "tg" {\n', '                if parsed.scheme == "tg" || parsed.scheme == "ton" {\n'),
     (patch.STRINGS, '"Login.EnterCodeSMSTitle" = "Enter Code";\n',
      '"Login.EnterCodeSMSTitle" = "Enter Code";\n"Pluma.Login.SendAgain" = "Send again";\n'),
+    # tgcalls: a value of the call engine or the camera that moved.
+    (patch.CALL_ENGINE, "                codec.SetParam(cricket::kCodecParamPTime, 60);\n",
+     "                codec.SetParam(cricket::kCodecParamPTime, 40);\n"),
+    (patch.CALL_ENGINE, "            _outgoingVideoChannel->setMaxBitrate(1000 * 1024);\n",
+     "            _outgoingVideoChannel->setMaxBitrate(1200 * 1024);\n"),
+    (patch.CALL_CAPTURE, "_videoCapturerResolution.second, 25);\n", "_videoCapturerResolution.second, 30);\n"),
 )
 
 
@@ -1517,13 +1524,29 @@ def upstream_files():
         return None
     if head != env["UPSTREAM_REF"]:
         return None
-    archive = subprocess.run(git + ["archive", "--format=tar", "HEAD", *patch.UPSTREAM_PATHS],
-                             capture_output=True, check=True).stdout
+    files = archived_files(git, "", patch.UPSTREAM_PATHS)
+    # Each submodule at the commit the checkout pins for it.
+    for sub, _, paths in patch.SUBMODULES:
+        pinned = subprocess.run(git + ["ls-tree", "HEAD", sub], capture_output=True, text=True, check=True).stdout.split()
+        sub_git = ["git", "-C", str(ROOT / "upstream" / sub)]
+        try:
+            head = subprocess.run(sub_git + ["rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            return None
+        if pinned[1:3] != ["commit", head]:
+            return None
+        files.update(archived_files(sub_git, sub + "/", [p[len(sub) + 1:] for p in paths]))
+    return files
+
+
+def archived_files(git, prefix, paths):
+    """{prefix + path: bytes} of paths at HEAD of the repository git names."""
+    archive = subprocess.run(git + ["archive", "--format=tar", "HEAD", *paths], capture_output=True, check=True).stdout
     files = {}
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
         for m in tar.getmembers():
             if m.isfile():
-                files[m.name] = tar.extractfile(m).read()
+                files[prefix + m.name] = tar.extractfile(m).read()
     return files
 
 
@@ -1857,6 +1880,17 @@ class UpstreamTest(unittest.TestCase):
                 self.assertEqual(vocabulary.count("Pluma"), len(patch.SIRI_INTENTS))
                 self.assertNotIn("{name}", vocabulary)
                 plistlib.loads(vocabulary.encode("utf-8"))
+        # The call quality from phoneCall.custom_parameters, Telegram's values
+        # where the server sets none.
+        engine = tree.read(patch.CALL_ENGINE)
+        self.assertEqual(engine.count("plumaCallParameters(_customParameters)"), 1)
+        self.assertIn("    int audioPacketMs = 60;\n    int audioMaxBitrateBps = 32 * 1024;\n", engine)
+        self.assertIn("    int audioJitterMinDelayMs = 50;\n", engine)
+        self.assertIn("    int videoMaxBitrateBps = 1000 * 1024;\n", engine)
+        self.assertEqual(engine.count("_plumaParameters.audioPacketMs\n"), 1)
+        self.assertEqual(engine.count("_plumaParameters.audioJitterMinDelayMs\n"), 1)
+        self.assertIn("    int _adaptationFramerate = 25;", tree.read(patch.CALL_CAPTURE_HEADER))
+        self.assertEqual(tree.read(patch.CALL_CAPTURE).count(", _adaptationFramerate);\n"), 2)
 
     def test_dev_server(self):
         dev = patch.load_env(ROOT / "config/dev/server.env")
@@ -1996,6 +2030,112 @@ class UpstreamTest(unittest.TestCase):
                 with self.assertRaises(patch.PatchError) as e:
                     self.run_patch()
                 self.assertIn(pathlib.PurePath(rel).name, str(e.exception))
+
+
+class CallParametersTest(unittest.TestCase):
+    def tree(self, root):
+        (root / "Telegram").mkdir(exist_ok=True)
+        (root / "Telegram/BUILD").write_text("")
+        (root / "versions.json").write_text("{}")
+        files = {}
+        for rel, old, _ in patch.call_parameter_edits():
+            files[rel] = files.get(rel, "") + old + "x\n"
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_submodule_paths(self):
+        # Every file the edits touch is fetched for the check job, inside
+        # the submodule it belongs to.
+        (sub, url, paths), = patch.SUBMODULES
+        self.assertEqual((sub, url), (patch.TGCALLS, patch.TGCALLS_URL))
+        self.assertEqual({rel for rel, _, _ in patch.call_parameter_edits()}, set(paths))
+        for rel in paths:
+            self.assertTrue(rel.startswith(sub + "/"), rel)
+            self.assertNotIn(rel, patch.UPSTREAM_PATHS)
+        out = io.StringIO()
+        with unittest.mock.patch("sys.stdout", out):
+            self.assertEqual(patch.main(["--submodules"]), 0)
+        self.assertEqual(out.getvalue(), f"{sub} {url} tgcalls/v2/InstanceV2Impl.cpp tgcalls/VideoCaptureInterfaceImpl.cpp "
+                                         "tgcalls/VideoCaptureInterfaceImpl.h\n")
+
+    def test_telegram_defaults(self):
+        # With no key from the server every value is the literal it replaces.
+        helpers = patch.CALL_ENGINE_HELPERS
+        for default in ("int audioPacketMs = 60;", "int audioMaxBitrateBps = 32 * 1024;", "int audioMinBitrateBps = 0;",
+                        "int audioJitterMinDelayMs = 50;", "bool audioNoiseSuppression = false;",
+                        "int videoMaxBitrateBps = 1000 * 1024;", "int screencastMaxBitrateBps = 0;", "int startBitrateBps = 0;",
+                        "int videoFps = 0;"):
+            self.assertEqual(helpers.count(default), 1, default)
+        # The server's kbit/s is 1000 bit/s; a key read as absent keeps the
+        # literal.
+        for key in ('"audio_max_bitrate_kbps", 6, 128, 0)) {\n        result.audioMaxBitrateBps = kbps * 1000;',
+                    '"audio_jitter_min_ms", 1, 500, 50)', '"start_bitrate_kbps", 30, 20000, 0) * 1000;',
+                    '"video_max_bitrate_kbps", 100, 20000, 0)) {\n        result.videoMaxBitrateBps = kbps * 1000;',
+                    '"screen_max_bitrate_kbps", 100, 20000, 0) * 1000;', '"video_fps", 1, 60, 0);'):
+            self.assertIn(key, helpers)
+        self.assertNotIn("kbps * 1024", helpers)
+        # The bitrate range goes into the field trials only when a minimum is
+        # set, and the screen keeps WebRTC's default unless a cap is set.
+        self.assertIn("if (_plumaParameters.audioMinBitrateBps != 0) {\n", patch.CALL_PARSED)
+        edited = "".join(new for _, _, new in patch.call_parameter_edits())
+        self.assertIn("if (_outgoingScreencastChannel && _plumaParameters.screencastMaxBitrateBps != 0) {\n", edited)
+        self.assertIn('"WebRTC-Audio-Allocation/min:"', helpers)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "the call quality from the server is not there"):
+                patch.verify_call_parameters(tree)
+            patch.patch_call_parameters(tree)
+            patch.verify_call_parameters(tree)
+            engine = tree.read(patch.CALL_ENGINE)
+            self.assertIn("codec.SetParam(cricket::kCodecParamPTime, audioPacketMs);\n", engine)
+            self.assertIn("audio_jitter_buffer_min_delay_ms = jitterBufferMinDelayMs;\n", engine)
+            self.assertIn("builder.SetCapturePostProcessing(std::make_unique<PlumaNoiseSuppressor>());\n", engine)
+            self.assertIn("callConfig.bitrate_config.start_bitrate_bps = _plumaParameters.startBitrateBps;\n", engine)
+            self.assertIn("videoCaptureImpl->setAdaptationFramerate(_plumaParameters.videoFps);\n", engine)
+            # A second run is refused: nothing is left to edit.
+            with tempfile.TemporaryDirectory() as d2:
+                again = self.tree(pathlib.Path(d2))
+                patch.patch_call_parameters(again)
+                with self.assertRaises(patch.PatchError):
+                    patch.patch_call_parameters(again)
+
+    def test_server_contract(self):
+        # The keys and ranges are the server's (pkg/phonecalls/parameters.go of
+        # the server repository). screen_fps and screen_max_size_px are not
+        # read: nothing in an iOS call sets a screen size or rate for them to
+        # replace (the comment above CALL_ENGINE_INCLUDES_ANCHOR).
+        helpers = patch.CALL_ENGINE_HELPERS
+        ranges = {key: (int(lo), int(hi)) for key, lo, hi in
+                  re.findall(r'plumaCustomParameterInt\(parameters, "([a-z0-9_]+)", (\d+), (\d+), ', helpers)}
+        self.assertEqual(ranges, {
+            "audio_ptime_ms": (10, 120), "audio_max_bitrate_kbps": (6, 128), "audio_min_bitrate_kbps": (6, 128),
+            "audio_jitter_min_ms": (1, 500), "video_max_bitrate_kbps": (100, 20000),
+            "screen_max_bitrate_kbps": (100, 20000), "start_bitrate_kbps": (30, 20000), "video_fps": (1, 60)})
+        # Of 10-120 ms, only the server's packet times.
+        self.assertIn("if (packetMs == 10 || packetMs == 20 || packetMs == 40 || packetMs == 60 || packetMs == 120) {\n",
+                      helpers)
+        # The flag only as a JSON bool, a number only as a whole one.
+        self.assertIn("noiseSuppression->second.is_bool() && noiseSuppression->second.bool_value()", helpers)
+        self.assertIn("number != std::floor(number)", helpers)
+        for key in ("screen_fps", "screen_max_size_px", "video_camera_fps"):
+            self.assertNotIn(f'"{key}"', helpers)
+
+    def test_literal_left_is_refused(self):
+        # A Telegram literal the edits missed, upstream's second copy of it,
+        # stops the patch.
+        for rel, literal in ((patch.CALL_ENGINE, "kCodecParamPTime, 60)"), (patch.CALL_ENGINE, "setMaxBitrate(32 * 1024)"),
+                             (patch.CALL_ENGINE, "setMaxBitrate(1000 * 1024)"),
+                             (patch.CALL_ENGINE, "audio_jitter_buffer_min_delay_ms = 50;"), (patch.CALL_CAPTURE, ", 25);")):
+            with self.subTest(literal=literal), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d))
+                patch.patch_call_parameters(tree)
+                tree.write(rel, tree.read(rel) + literal + "\n")
+                with self.assertRaisesRegex(patch.PatchError, "Telegram's"):
+                    patch.verify_call_parameters(tree)
 
 
 class PremiumForEveryoneTest(unittest.TestCase):
