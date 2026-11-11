@@ -1503,6 +1503,8 @@ DAMAGE = (
     (patch.APP_DELEGATE, '                if parsed.scheme == "tg" {\n', '                if parsed.scheme == "tg" || parsed.scheme == "ton" {\n'),
     (patch.STRINGS, '"Login.EnterCodeSMSTitle" = "Enter Code";\n',
      '"Login.EnterCodeSMSTitle" = "Enter Code";\n"Pluma.Login.SendAgain" = "Send again";\n'),
+    # No AI message editor: each edit.
+    *((rel, old, old.replace(", ", ",  ", 1)) for rel, old, _, _ in patch.NO_AI_EDITOR_EDITS),
 )
 
 
@@ -2235,6 +2237,77 @@ class LoginCodesTest(unittest.TestCase):
                 self.assertIn(rel, str(e.exception))
                 tree.write(rel, patched)
         patch.verify_login_codes(tree, self.c)
+
+
+class NoAiEditorTest(unittest.TestCase):
+    # The upstream files, made of the texts the edits expect and of the line
+    # that shows the chat field's AI button.
+    def tree(self, root, edits=patch.NO_AI_EDITOR_EDITS):
+        (root / "Telegram").mkdir(exist_ok=True)
+        (root / "Telegram/BUILD").write_text("")
+        (root / "versions.json").write_text("{}")
+        files = {patch.NO_AI_EDITOR_GUARDS[3][0]: "isAIButtonVisible = true\n"}
+        for rel, old, _, count in edits:
+            files[rel] = files.get(rel, "") + (old + "x\n") * count
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_upstream_paths_cover_the_edits(self):
+        for edit in patch.NO_AI_EDITOR_EDITS:
+            self.assertIn(edit[0], patch.UPSTREAM_PATHS)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "the AI editor is offered again"):
+                patch.verify_no_ai_editor(tree)
+            patch.patch_no_ai_editor(tree)
+            patch.verify_no_ai_editor(tree)
+            with self.assertRaises(patch.PatchError):
+                patch.patch_no_ai_editor(tree)
+
+    def test_upstream_changed(self):
+        for i, edit in enumerate(patch.NO_AI_EDITOR_EDITS):
+            changed = edit[1][:-2] + "~" + edit[1][-1]
+            edits = [e if j != i else (edit[0], changed) + tuple(edit[2:]) for j, e in enumerate(patch.NO_AI_EDITOR_EDITS)]
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                with self.assertRaisesRegex(patch.PatchError, "occurrences"):
+                    patch.patch_no_ai_editor(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.patch_no_ai_editor(tree)
+            for i, (rel, old, new, _) in enumerate(patch.NO_AI_EDITOR_EDITS):
+                patched = tree.read(rel)
+                tree.write(rel, patched.replace(new, old))
+                with self.subTest(edit=i), self.assertRaisesRegex(patch.PatchError, "the AI editor is offered again"):
+                    patch.verify_no_ai_editor(tree)
+                tree.write(rel, patched)
+            patch.verify_no_ai_editor(tree)
+
+    def test_another_way_in(self):
+        # A second place that enables a caption's button or adds the rich
+        # editor's, or a chat field button shown some other way.
+        for rel, s, count in patch.NO_AI_EDITOR_GUARDS:
+            with self.subTest(file=rel), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d))
+                patch.patch_no_ai_editor(tree)
+                tree.write(rel, tree.read(rel) + s + "\n")
+                with self.assertRaisesRegex(patch.PatchError, "another way into the AI editor"):
+                    patch.verify_no_ai_editor(tree)
+
+    def test_chat_field_keeps_expand(self):
+        # The chat field stays AI-enabled for its expand button; only the AI
+        # button's condition is false.
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.patch_no_ai_editor(tree)
+            rel = patch.NO_AI_EDITOR_EDITS[0][0]
+            self.assertIn("        if false && self.isAIEnabled, inputHasNonWhitespaceText,", tree.read(rel))
 
 
 if __name__ == "__main__":
