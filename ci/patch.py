@@ -505,6 +505,10 @@ KEPT_TELEGRAM_NAMES = {
     "submodules/TelegramUI/Sources/Chat/ChatControllerOpenPhoneContextMenu.swift": 1,
     "submodules/TelegramUI/Sources/Chat/ChatMessageActionOptions.swift": 1,
     "submodules/TelegramUI/Sources/ContextMenuMorphDebugController.swift": 1,
+    # The SOFTWARE attribute of the STUN messages tgcalls sends to the TURN
+    # servers of a call ("Telegram "): never shown, and the TURN server is
+    # Pluma's own (13.2).
+    "submodules/TgVoipWebrtc/tgcalls/tgcalls/TurnCustomizerImpl.cpp": 1,
     "submodules/WalletContext/Sources/WalletTonConnect.swift": 1,
     "submodules/WalletContext/Sources/WalletToncenter.swift": 2,
 }
