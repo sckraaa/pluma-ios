@@ -1496,6 +1496,32 @@ DAMAGE = (
     (patch.LEGACY_COLORS, "TGColorWithHex(0x0088ff)", "TGColorWithHex(0x0089ff)"),
     (patch.AVATAR_NODE, "UIColor(rgb: 0x2a9ef1), UIColor(rgb: 0x72d5fd)\n    ]", "UIColor(rgb: 0x2a9ef1), UIColor(rgb: 0x72d5fe)\n    ]"),
     (patch.AVATAR_NODE, "UIColor(rgb: 0x3DA1FD), UIColor(rgb: 0x34C76F)", "UIColor(rgb: 0x3DA1FD), UIColor(rgb: 0x34C76E)"),
+    # The verified badge: every place takes the theme's check colours, or
+    # white over a photo or a video.
+    ("submodules/ChatListUI/Sources/Node/ChatListItem.swift",
+     "currentCredibilityIconContent = .verified(fillColor: item.presentationData.theme.list.itemCheckColors.fillColor, "
+     "foregroundColor: item.presentationData.theme.list.itemCheckColors.foregroundColor, sizeType: .compact)\n"
+     "                    }",
+     "currentCredibilityIconContent = .verified(fillColor: UIColor(rgb: 0x2ea6ff), "
+     "foregroundColor: item.presentationData.theme.list.itemCheckColors.foregroundColor, sizeType: .compact)\n"
+     "                    }"),
+    ("submodules/TelegramUI/Components/ChatTitleView/Sources/ChatTitleView.swift",
+     "titleVerifiedContent = .verified(fillColor: self.theme.list.itemCheckColors.fillColor,",
+     "titleVerifiedContent = .verified(fillColor: self.theme.list.itemAccentColor,"),
+    ("submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoHeaderNode.swift",
+     "                emojiExpandedStatusContent = .verified(fillColor: navigationContentsAccentColor, foregroundColor: .clear, sizeType: .large)\n"
+     "            case .fake:",
+     "                emojiExpandedStatusContent = .verified(fillColor: .white, foregroundColor: .clear, sizeType: .large)\n"
+     "            case .fake:"),
+    ("submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/StoryAuthorInfoComponent.swift",
+     "iconBackgroundColor: component.theme.list.itemCheckColors.fillColor,", "iconBackgroundColor: UIColor(rgb: 0x2ea6ff),"),
+    ("submodules/TelegramPresentationData/Sources/Resources/PresentationResourcesChatList.swift",
+     "context.setFillColor(theme.list.itemCheckColors.fillColor.cgColor)\n                        context.fill(CGRect(origin: CGPoint(), size: size))\n"
+     "                        context.restoreGState()\n                        \n                        context.clip(to: CGRect(origin: .zero, size: size), mask: foregroundCgImage)",
+     "context.setFillColor(theme.chatList.verifiedIconFillColor.cgColor)\n                        context.fill(CGRect(origin: CGPoint(), size: size))\n"
+     "                        context.restoreGState()\n                        \n                        context.clip(to: CGRect(origin: .zero, size: size), mask: foregroundCgImage)"),
+    (patch.DARK_THEME, "itemCheckColors: list.itemCheckColors.withUpdated(fillColor: accentColor, foregroundColor: secondaryBadgeTextColor),",
+     "itemCheckColors: list.itemCheckColors.withUpdated(fillColor: accentColor, foregroundColor: badgeTextColor),"),
     # People's identity colours: each table holds Telegram's seven.
     (patch.AVATAR_NODE, "[UIColor(rgb: 0x4acccd), UIColor(rgb: 0x00fcfd)],", "[UIColor(rgb: 0x4acccd), UIColor(rgb: 0x00fcfe)],"),
     (patch.NOTIFICATION_AVATARS, "[UIColor(rgb: 0xff516a).cgColor, UIColor(rgb: 0xff885e).cgColor],",
@@ -1597,6 +1623,8 @@ DAMAGE = (
     (patch.CALL_ENGINE, "            _outgoingVideoChannel->setMaxBitrate(1000 * 1024);\n",
      "            _outgoingVideoChannel->setMaxBitrate(1200 * 1024);\n"),
     (patch.CALL_CAPTURE, "_videoCapturerResolution.second, 25);\n", "_videoCapturerResolution.second, 30);\n"),
+    # No AI message editor: each edit.
+    *((rel, old, old.replace(", ", ",  ", 1)) for rel, old, _, _ in patch.NO_AI_EDITOR_EDITS),
 )
 
 
@@ -1847,6 +1875,11 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn("secondaryTextColor: UIColor(rgb: 0xb2ceb4), linkTextColor: UIColor(rgb: 0xb2ceb4),", dark)
         self.assertIn("let defaultPatternWallpaper: TelegramWallpaper = .color(0x131513)\n", dark)
         self.assertNotIn("baseColor: .blue", tree.read(patch.PRESENTATION_DATA))
+        # Night with the palette's accent picked: #131513 on it, the check of
+        # the verified badge too.
+        self.assertIn(patch.NIGHT_SAGE_TEXT + "            } else if initialAccentColor.lightness > 0.735 {\n"
+                      "                secondaryBadgeTextColor = UIColor(rgb: 0x000000)\n", dark)
+        self.assertNotIn("|| initialAccentColor.rgb == 0x9dbb9f", dark)
         avatars = tree.read(patch.AVATAR_NODE)
         self.assertIn("    static let savedMessagesColors: [UIColor] = [\n"
                       "        UIColor(rgb: 0x5b7a5e), UIColor(rgb: 0x9dbb9f) // pluma: sage\n", avatars)
@@ -2332,6 +2365,72 @@ class PremiumForEveryoneTest(unittest.TestCase):
             patch.verify_premium_for_everyone(tree)
 
 
+class VerifiedBadgeTest(unittest.TestCase):
+    # A tree of the files the check reads: each place of the badge with its
+    # calls, the colours and images as the patched upstream has them.
+    THEME = ".verified(fillColor: item.presentationData.theme.list.itemCheckColors.fillColor, " \
+            "foregroundColor: item.presentationData.theme.list.itemCheckColors.foregroundColor, sizeType: .compact)"
+
+    def tree(self, root):
+        (root / "Telegram").mkdir(exist_ok=True)
+        (root / "Telegram/BUILD").write_text("")
+        (root / "versions.json").write_text("{}")
+        files = {}
+        for rel, theme_calls, others in patch.VERIFIED_BADGE_SITES:
+            files[rel] = "".join(f"x = {c}\n" for c in [self.THEME] * theme_calls + list(others))
+        for rel, s, count in patch.VERIFIED_BADGE_COLOURS:
+            files[rel] = files.get(rel, "") + s * count
+        for rel, head, fills in patch.VERIFIED_BADGE_IMAGES:
+            files[rel] = head + "".join(f"        {f}\n" for f in fills) + "    }\n"
+        for rel, s in patch.VERIFIED_BADGE_THEMES:
+            files[rel] = files.get(rel, "") + s
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_upstream_paths_cover_the_badge(self):
+        for rel in patch.VERIFIED_BADGE_PATHS + (patch.DAY_THEME, patch.DARK_THEME):
+            self.assertIn(rel, patch.UPSTREAM_PATHS)
+
+    def test_theme_calls(self):
+        # The theme's check colours of any owner of the theme, the same owner
+        # for both colours.
+        self.assertEqual(len(patch.VERIFIED_THEME_CALL.findall(
+            ".verified(fillColor: self.theme.list.itemCheckColors.fillColor, "
+            "foregroundColor: self.theme.list.itemCheckColors.foregroundColor, sizeType: .large)")), 1)
+        self.assertEqual(patch.VERIFIED_THEME_CALL.findall(
+            ".verified(fillColor: self.theme.list.itemCheckColors.fillColor, "
+            "foregroundColor: other.list.itemCheckColors.foregroundColor, sizeType: .large)"), [])
+
+    def test_check(self):
+        site = patch.VERIFIED_BADGE_SITES[0][0]
+        profile = "submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoHeaderNode.swift"
+        image = patch.VERIFIED_BADGE_IMAGES[0][0]
+        for name, rel, damage in (
+            ("a colour of its own", site, lambda t: t.replace("fillColor: item.presentationData.theme.list.itemCheckColors.fillColor",
+                                                              "fillColor: UIColor(rgb: 0x2ea6ff)", 1)),
+            ("one more badge", site, lambda t: t + "y = " + self.THEME + "\n"),
+            ("another badge over the photo", profile, lambda t: t.replace(patch.VERIFIED_OVER_MEDIA,
+                                                                       patch.VERIFIED_OVER_MEDIA.replace("navigationContentsAccentColor", ".white"), 1)),
+            ("a caller's colour", patch.VERIFIED_BADGE_COLOURS[1][0], lambda t: t.replace("component.theme.list.itemCheckColors.fillColor",
+                                                                                         "UIColor(rgb: 0x2ea6ff)")),
+            ("the image's fill", image, lambda t: t.replace("theme.list.itemCheckColors.fillColor", "theme.chatList.verifiedIconFillColor")),
+            ("a fill more in the image", image, lambda t: t.replace("    }\n", "        context.setFillColor(UIColor.blue.cgColor)\n    }\n")),
+            ("black on Night's sage", patch.DARK_THEME, lambda t: t.replace("UIColor(rgb: 0x131513)\n", "UIColor(rgb: 0x000000)\n", 1)),
+            ("Day's accent", patch.DAY_THEME, lambda t: t.replace("0x5b7a5e", "0x0088ff")),
+        ):
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d))
+                patch.verify_verified_badge(tree)
+                damaged = damage(tree.read(rel))
+                self.assertNotEqual(damaged, tree.read(rel))
+                tree.write(rel, damaged)
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify_verified_badge(tree)
+                self.assertIn(rel, str(e.exception))
+
+
 class LoginCodesTest(unittest.TestCase):
     STRINGS = '"Login.EnterCodeSMSTitle" = "Enter Code";\n"Login.EnterCodeTelegramText" = "In the **Pluma app**.";'
 
@@ -2512,6 +2611,77 @@ class LoginCodesTest(unittest.TestCase):
                 self.assertIn(rel, str(e.exception))
                 tree.write(rel, patched)
         patch.verify_login_codes(tree, self.c)
+
+
+class NoAiEditorTest(unittest.TestCase):
+    # The upstream files, made of the texts the edits expect and of the line
+    # that shows the chat field's AI button.
+    def tree(self, root, edits=patch.NO_AI_EDITOR_EDITS):
+        (root / "Telegram").mkdir(exist_ok=True)
+        (root / "Telegram/BUILD").write_text("")
+        (root / "versions.json").write_text("{}")
+        files = {patch.NO_AI_EDITOR_GUARDS[3][0]: "isAIButtonVisible = true\n"}
+        for rel, old, _, count in edits:
+            files[rel] = files.get(rel, "") + (old + "x\n") * count
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_upstream_paths_cover_the_edits(self):
+        for edit in patch.NO_AI_EDITOR_EDITS:
+            self.assertIn(edit[0], patch.UPSTREAM_PATHS)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "the AI editor is offered again"):
+                patch.verify_no_ai_editor(tree)
+            patch.patch_no_ai_editor(tree)
+            patch.verify_no_ai_editor(tree)
+            with self.assertRaises(patch.PatchError):
+                patch.patch_no_ai_editor(tree)
+
+    def test_upstream_changed(self):
+        for i, edit in enumerate(patch.NO_AI_EDITOR_EDITS):
+            changed = edit[1][:-2] + "~" + edit[1][-1]
+            edits = [e if j != i else (edit[0], changed) + tuple(edit[2:]) for j, e in enumerate(patch.NO_AI_EDITOR_EDITS)]
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), edits)
+                with self.assertRaisesRegex(patch.PatchError, "occurrences"):
+                    patch.patch_no_ai_editor(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.patch_no_ai_editor(tree)
+            for i, (rel, old, new, _) in enumerate(patch.NO_AI_EDITOR_EDITS):
+                patched = tree.read(rel)
+                tree.write(rel, patched.replace(new, old))
+                with self.subTest(edit=i), self.assertRaisesRegex(patch.PatchError, "the AI editor is offered again"):
+                    patch.verify_no_ai_editor(tree)
+                tree.write(rel, patched)
+            patch.verify_no_ai_editor(tree)
+
+    def test_another_way_in(self):
+        # A second place that enables a caption's button or adds the rich
+        # editor's, or a chat field button shown some other way.
+        for rel, s, count in patch.NO_AI_EDITOR_GUARDS:
+            with self.subTest(file=rel), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d))
+                patch.patch_no_ai_editor(tree)
+                tree.write(rel, tree.read(rel) + s + "\n")
+                with self.assertRaisesRegex(patch.PatchError, "another way into the AI editor"):
+                    patch.verify_no_ai_editor(tree)
+
+    def test_chat_field_keeps_expand(self):
+        # The chat field stays AI-enabled for its expand button; only the AI
+        # button's condition is false.
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.patch_no_ai_editor(tree)
+            rel = patch.NO_AI_EDITOR_EDITS[0][0]
+            self.assertIn("        if false && self.isAIEnabled, inputHasNonWhitespaceText,", tree.read(rel))
 
 
 if __name__ == "__main__":

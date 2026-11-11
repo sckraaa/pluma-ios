@@ -1671,6 +1671,7 @@ def patch(tree, c):
     patch_saved_tags(tree)
     patch_premium_stickers(tree)
     premium_for_everyone(tree)
+    patch_no_ai_editor(tree)
     patch_app_update(tree)
     patch_video_quality(tree)
     patch_store(tree, c)
@@ -3261,6 +3262,14 @@ def verify_video_quality(tree):
 # dark mode, Night; both take these colours. Text and secondary text keep
 # upstream's greys, which differ from the palette's by a shade.
 
+# Night with the palette's accent picked in the theme settings (the first
+# accent there, PresentationThemeSettings): the text and marks on the accent
+# (unread counters, check boxes, the verified badge's check) are the palette's
+# #131513, as in Night itself, not upstream's black for light accents.
+NIGHT_SAGE_TEXT = ("            if initialAccentColor.rgb == 0x9dbb9f {\n"
+                   "                // pluma: the palette's text on its accent, as in Night itself.\n"
+                   "                secondaryBadgeTextColor = UIColor(rgb: 0x131513)\n")
+
 # The colours of the avatars that stand for Saved Messages and for reposts.
 AVATAR_SAVED_MESSAGES = ("    static let savedMessagesColors: [UIColor] = [\n"
                          "        UIColor(rgb: 0x2a9ef1), UIColor(rgb: 0x72d5fd)\n")
@@ -3354,8 +3363,7 @@ PALETTE_EDITS = (
      "        } else if accentColor.rgb == 0x9dbb9f {\n            // pluma: the palette's outgoing bubbles with its accent.\n"
      "            bubbleColors = [0x2c3a2d, 0x36473a]\n", 1),
     (DARK_THEME, "            if initialAccentColor.lightness > 0.735 {\n                secondaryBadgeTextColor = UIColor(rgb: 0x000000)\n",
-     "            // pluma: dark text on the palette's accent too.\n"
-     "            if initialAccentColor.lightness > 0.735 || initialAccentColor.rgb == 0x9dbb9f {\n"
+     NIGHT_SAGE_TEXT + "            } else if initialAccentColor.lightness > 0.735 {\n"
      "                secondaryBadgeTextColor = UIColor(rgb: 0x000000)\n", 1),
     (DARK_THEME, "    let rootNavigationBar = PresentationThemeRootNavigationBar(\n        buttonColor: UIColor(rgb: 0xffffff),\n",
      "    let rootNavigationBar = PresentationThemeRootNavigationBar(\n        buttonColor: UIColor(rgb: 0x9dbb9f),\n", 1),
@@ -4455,6 +4463,154 @@ def verify_identity(tree):
         raise PatchError(f"{PEER_COLOR_UPDATES}: no dark name colours of Pluma's")
 
 
+# --- the verified badge --------------------------------------------------------
+#
+# Task 080: the badge of a verified account (user.verified, channel.verified)
+# is Telegram's rosette with a check, in the palette's colours. The app draws
+# it from two masks, "Chat List/PeerVerifiedIcon{Background,Foreground}" and
+# "Peer Info/VerifiedIcon{Background,Foreground}" (EmojiStatusComponent,
+# content .verified(fillColor:foregroundColor:sizeType:)), filled with colours
+# the caller passes, so no image of the app is blue. Every place on a theme's
+# background passes the theme's check colours, list.itemCheckColors: the chat
+# list, the chat title, the profile, member, contact and call lists, search,
+# reactions, the stories bar, messages of channels, voice chats, link previews
+# and mini apps. The two images that resources draw take the same colours
+# (PresentationResourcesChatList.verifiedIcon, the call list) or the unread
+# counter's (PresentationResourcesItemList.verifiedPeerIcon, the profile's
+# name in item lists). The palette makes all of them sage with the text colour
+# on the accent: #5B7A5E with white in Day Classic and Day, #9DBB9F with
+# #131513 in Night (PALETTE_EDITS, NIGHT_SAGE_TEXT); Night Tinted keeps its
+# own accent, as everything in it. The places over a photo or a video (an
+# expanded profile photo, stories, a live stream) draw the badge white with a
+# transparent check, as upstream; the mask that text attachments tint
+# (EmojiTextAttachmentView) and the template of a full-screen mini app's
+# controls ("Instant View/Verified", FullscreenControlsComponent) take the
+# colour of their text.
+# chatList.verifiedIconFillColor and verifiedIconForegroundColor, which the
+# themes also set, are drawn nowhere.
+#
+# The patch changes no line for it beyond the palette; it checks that every
+# place still takes these colours, so that an upstream update that draws the
+# badge in a colour of its own fails here.
+
+# (file, the calls with the theme's check colours, the other calls as their
+# text): every .verified(fillColor: of the file.
+VERIFIED_THEME_CALL = re.compile(
+    r"\.verified\(fillColor: ([\w.]+)\.list\.itemCheckColors\.fillColor, "
+    r"foregroundColor: \1\.list\.itemCheckColors\.foregroundColor, sizeType: \.\w+\)")
+VERIFIED_OVER_MEDIA = ".verified(fillColor: navigationContentsAccentColor, foregroundColor: .clear, sizeType: .large)"
+VERIFIED_BADGE_SITES = (
+    ("submodules/ChatListUI/Sources/Node/ChatListItem.swift", 2, ()),
+    ("submodules/Components/ReactionListContextMenuContent/Sources/ReactionListContextMenuContent.swift", 1, ()),
+    ("submodules/ContactsPeerItem/Sources/ContactsPeerItem.swift", 1, ()),
+    ("submodules/ItemListPeerItem/Sources/ItemListPeerItem.swift", 1, ()),
+    ("submodules/JoinLinkPreviewUI/Sources/JoinLinkPreviewPeerContentNode.swift", 1, ()),
+    ("submodules/TelegramCallsUI/Sources/VoiceChatParticipantItem.swift", 1, ()),
+    ("submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/Sources/ChatMessageBubbleItemNode.swift", 1, ()),
+    ("submodules/TelegramUI/Components/ChatTitleView/Sources/ChatTitleComponent.swift", 1, ()),
+    ("submodules/TelegramUI/Components/ChatTitleView/Sources/ChatTitleView.swift", 2, ()),
+    ("submodules/TelegramUI/Components/JoinSubjectScreen/Sources/JoinSubjectScreen.swift", 1, ()),
+    ("submodules/TelegramUI/Components/Stories/PeerListItemComponent/Sources/PeerListItemComponent.swift", 1, ()),
+    ("submodules/TelegramUI/Components/Stories/StoryPeerListComponent/Sources/StoryPeerListItemComponent.swift", 1, ()),
+    ("submodules/WebUI/Sources/WebAppLaunchConfirmationController.swift", 1, ()),
+    ("submodules/WebUI/Sources/WebAppTitleView.swift", 1, ()),
+    # The profile: the theme's colours under the photo, white over it.
+    ("submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoHeaderNode.swift", 2,
+     (VERIFIED_OVER_MEDIA, VERIFIED_OVER_MEDIA)),
+    # The preview of the profile's colour: white on the colour, the theme's
+    # check colour without one.
+    ("submodules/TelegramUI/Components/Settings/PeerNameColorScreen/Sources/PeerNameColorProfilePreviewItem.swift", 0,
+     (".verified(fillColor: statusColor, foregroundColor: .clear, sizeType: .large)",)),
+    # A name with its badge, in the colours the caller gives (below).
+    ("submodules/TelegramUI/Components/PeerNameTextComponent/Sources/PeerNameTextComponent.swift", 0,
+     (".verified(fillColor: component.iconBackgroundColor, foregroundColor: component.iconForegroundColor, sizeType: .compact)",)),
+)
+# The colours of the profile preview and of PeerNameTextComponent's callers:
+# (file, text, how many times).
+VERIFIED_BADGE_COLOURS = (
+    ("submodules/TelegramUI/Components/Settings/PeerNameColorScreen/Sources/PeerNameColorProfilePreviewItem.swift",
+     "                    statusColor = item.theme.list.itemCheckColors.fillColor\n", 1),
+    # The author of a story, on the story's dark header.
+    ("submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/StoryAuthorInfoComponent.swift",
+     "                    iconBackgroundColor: component.theme.list.itemCheckColors.fillColor,\n", 1),
+    # Over the video of a story or a live stream: white, as upstream.
+    ("submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/PinnedBarComponent.swift",
+     "                    iconBackgroundColor: .white,\n", 1),
+    ("submodules/TelegramUI/Components/Stories/LiveChat/StoryLiveChatMessageComponent/Sources/StoryLiveChatMessageComponent.swift",
+     "                    iconBackgroundColor: .white,\n", 1),
+)
+# The images the resources draw: (file, the function, the colours it fills
+# the two masks with).
+VERIFIED_BADGE_IMAGES = (
+    ("submodules/TelegramPresentationData/Sources/Resources/PresentationResourcesChatList.swift",
+     "    public static func verifiedIcon(_ theme: PresentationTheme) -> UIImage? {\n",
+     ("context.setFillColor(theme.list.itemCheckColors.fillColor.cgColor)",
+      "context.setFillColor(theme.list.itemCheckColors.foregroundColor.cgColor)")),
+    ("submodules/TelegramPresentationData/Sources/Resources/PresentationResourcesItemList.swift",
+     "    public static func verifiedPeerIcon(_ theme: PresentationTheme) -> UIImage? {\n",
+     ("context.setFillColor(theme.chatList.unreadBadgeActiveBackgroundColor.cgColor)",
+      "context.setFillColor(theme.chatList.unreadBadgeActiveTextColor.cgColor)")),
+)
+# The colours themselves, in the patched themes: Day Classic and Day (the
+# accent of a custom accent replaces the fill, the check stays white), Night
+# and Night with an accent picked.
+VERIFIED_BADGE_THEMES = (
+    (DAY_THEME, "public let defaultDayAccentColor = UIColor(rgb: 0x5b7a5e) // pluma: sage\n"),
+    (DAY_THEME, "        itemCheckColors: PresentationThemeFillStrokeForeground(\n"
+                "            fillColor: defaultDayAccentColor,\n"
+                "            strokeColor: UIColor(rgb: 0xc7c7cc),\n"
+                "            foregroundColor: UIColor(rgb: 0xffffff)\n"),
+    (DAY_THEME, "            itemCheckColors: list.itemCheckColors.withUpdated(fillColor: accentColor),\n"),
+    (DAY_THEME, "        unreadBadgeActiveBackgroundColor: defaultDayAccentColor,\n"
+                "        unreadBadgeActiveTextColor: UIColor(rgb: 0xffffff),\n"),
+    (DARK_THEME, "        itemCheckColors: PresentationThemeFillStrokeForeground(\n"
+                 "            fillColor: UIColor(rgb: 0x9dbb9f),\n"
+                 "            strokeColor: UIColor(rgb: 0xffffff, alpha: 0.3),\n"
+                 "            foregroundColor:  UIColor(rgb: 0x131513)\n"),
+    (DARK_THEME, "        unreadBadgeActiveBackgroundColor: UIColor(rgb: 0x9dbb9f),\n"
+                 "        unreadBadgeActiveTextColor: UIColor(rgb: 0x131513),\n"),
+    (DARK_THEME, NIGHT_SAGE_TEXT),
+    (DARK_THEME, "            itemCheckColors: list.itemCheckColors.withUpdated(fillColor: accentColor, foregroundColor: secondaryBadgeTextColor),\n"),
+)
+VERIFIED_BADGE_PATHS = tuple(sorted(
+    {rel for rel, _, _ in VERIFIED_BADGE_SITES} | {rel for rel, _, _ in VERIFIED_BADGE_COLOURS}
+    | {rel for rel, _, _ in VERIFIED_BADGE_IMAGES}))
+# The check job fetches only the paths the patch reads (ci/fetch-upstream.sh sparse).
+UPSTREAM_PATHS += tuple(rel for rel in VERIFIED_BADGE_PATHS if rel not in UPSTREAM_PATHS)
+
+
+def verify_verified_badge(tree):
+    for rel, theme_calls, others in VERIFIED_BADGE_SITES:
+        text = tree.read(rel)
+        found = len(VERIFIED_THEME_CALL.findall(text))
+        if found != theme_calls:
+            raise PatchError(f"{rel}: {found} verified badges in the theme's check colours, expected {theme_calls}")
+        rest = VERIFIED_THEME_CALL.sub("", text)
+        for other in set(others):
+            if rest.count(other) != others.count(other):
+                raise PatchError(f"{rel}: {rest.count(other)} verified badges {other!r}, expected {others.count(other)}")
+            rest = rest.replace(other, "")
+        if ".verified(fillColor:" in rest:
+            raise PatchError(f"{rel}: a verified badge in colours other than the theme's")
+    for rel, s, count in VERIFIED_BADGE_COLOURS:
+        if tree.read(rel).count(s) != count:
+            raise PatchError(f"{rel}: the verified badge is not in {s.strip()!r}")
+    for rel, head, fills in VERIFIED_BADGE_IMAGES:
+        text = tree.read(rel)
+        if text.count(head) != 1:
+            raise PatchError(f"{rel}: {text.count(head)} functions {head.strip()!r}, expected 1")
+        start = text.index(head)
+        end = text.find("\n    }\n", start)
+        if end < 0:
+            raise PatchError(f"{rel}: no end of {head.strip()!r}")
+        body = text[start:end]
+        if re.findall(r"context\.setFillColor\([^)]*\)", body) != list(fills):
+            raise PatchError(f"{rel}: the verified badge of {head.strip()!r} is not in the theme's colours")
+    for rel, s in VERIFIED_BADGE_THEMES:
+        if tree.read(rel).count(s) != 1:
+            raise PatchError(f"{rel}: the verified badge is not in the palette's colours ({s.strip()[:60]!r}...)")
+
+
 # An entry of a .strings file, "key" = "value";, where the value may span
 # lines: the key with what precedes the value, the value, the end.
 STRINGS_ENTRY = re.compile(r'^("(?:[^"\\]|\\.)*"\s*=\s*")((?:[^"\\]|\\.)*)(";)', re.M)
@@ -4784,12 +4940,14 @@ def verify(tree, c):
     verify_links(tree)
     verify_palette(tree)
     verify_identity(tree)
+    verify_verified_badge(tree)
     verify_support(tree)
     verify_birthdays(tree)
     verify_read_date(tree)
     verify_saved_tags(tree)
     verify_premium_stickers(tree)
     verify_premium_for_everyone(tree)
+    verify_no_ai_editor(tree)
     verify_app_update(tree)
     verify_video_quality(tree)
     verify_store(tree, c)
@@ -4882,6 +5040,83 @@ def verify_premium_for_everyone(tree):
         text = tree.read(rel)
         if text.count(new) != count or old in text.replace(new, ""):
             raise PatchError(f"{rel}: the edit of task 071 is not there")
+
+
+# --- No AI message editor (task 079) ------------------------------------------
+# The AI editor rewrites, proofreads, restyles and translates a typed message
+# (TextProcessingScreen in its edit and generate modes, through
+# messages.composeMessageWithAI, messages.composeRichMessageWithAI and the
+# aicompose.* tones); Pluma runs no language model to answer them (the
+# owner's decision, 2026-11-11). Upstream offers it from the AI button of the
+# chat's text field (ChatTextInputPanelNode), of the attachment caption
+# (AttachmentPanel), of the legacy media caption (LegacyMessageInputPanel) and
+# of the rich text editor (RichTextAttachmentScreen). The chat field keeps
+# isAIEnabled, which also enables its expand button; only the AI button never
+# shows. The two caption panels never enable it. The rich editor's button is
+# made but never added, and its action bar takes the room. The translate mode
+# of the same screen (messages, bios, gallery, Instant View) is left to
+# message translation, which the server turns off until it has a provider.
+NO_AI_EDITOR_EDITS = (
+    ("submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift",
+     "        if self.isAIEnabled, inputHasNonWhitespaceText, let node = self.richTextInputNode {\n",
+     "        // pluma: no AI editor, Pluma runs no language model (task 079); the expand button stays.\n"
+     "        if false && self.isAIEnabled, inputHasNonWhitespaceText, let node = self.richTextInputNode {\n", 1),
+    ("submodules/AttachmentUI/Sources/AttachmentPanel.swift",
+     "            if let data = self.context.currentAppConfiguration.with({ $0 }).data, let value = data[\"ios_disable_ai_chat\"] as? Double, value == 1.0 {\n"
+     "            } else if let peerId = self.presentationInterfaceState.chatLocation.peerId, peerId.namespace != Namespaces.Peer.SecretChat {\n"
+     "                textInputPanelNode.isAIEnabled = true\n"
+     "            }\n",
+     "            // pluma: no AI editor for a caption, Pluma runs no language model (task 079).\n", 1),
+    ("submodules/TelegramUI/Components/LegacyMessageInputPanel/Sources/LegacyMessageInputPanel.swift",
+     "        if let data = context.currentAppConfiguration.with({ $0 }).data, let value = data[\"ios_disable_ai_attach\"] as? Double, value == 1.0 {\n"
+     "        } else if let peerId = chatLocation.peerId, peerId.namespace != Namespaces.Peer.SecretChat {\n"
+     "            self.isAIEnabled = true\n"
+     "        }\n",
+     "        // pluma: no AI editor for a caption, Pluma runs no language model (task 079).\n", 1),
+    ("submodules/TelegramUI/Components/RichTextAttachmentScreen/Sources/RichTextAttachmentScreen.swift",
+     "                containerSize: CGSize(width: availableSize.width - sideInset * 2.0 - bottomRowInsets.left - bottomRowInsets.right - actionBarSpacing * 2.0 - aiButtonSize.width - sendButtonSize.width, height: 44.0)\n",
+     "                containerSize: CGSize(width: availableSize.width - sideInset * 2.0 - bottomRowInsets.left - bottomRowInsets.right - actionBarSpacing - sendButtonSize.width, height: 44.0) // pluma: no AI button\n", 1),
+    ("submodules/TelegramUI/Components/RichTextAttachmentScreen/Sources/RichTextAttachmentScreen.swift",
+     "            let aiButtonFrame = CGRect(origin: CGPoint(x: sideInset + bottomRowInsets.left, y: availableSize.height - bottomInset - 6.0 - aiButtonSize.height), size: aiButtonSize)\n"
+     "            if let aiButtonView = self.aiButton.view {\n"
+     "                if aiButtonView.superview == nil {\n"
+     "                    self.addSubview(aiButtonView)\n"
+     "                }\n"
+     "                transition.setFrame(view: aiButtonView, frame: aiButtonFrame)\n"
+     "            }\n",
+     "            // pluma: no AI editor, Pluma runs no language model (task 079); the button is never added.\n"
+     "            let _ = aiButtonSize\n", 1),
+    ("submodules/TelegramUI/Components/RichTextAttachmentScreen/Sources/RichTextAttachmentScreen.swift",
+     "            let actionBarFrame = CGRect(origin: CGPoint(x: sideInset + bottomRowInsets.left + aiButtonSize.width + actionBarSpacing, y: availableSize.height - bottomInset - 6.0 - actionBarSize.height), size: actionBarSize)\n",
+     "            let actionBarFrame = CGRect(origin: CGPoint(x: sideInset + bottomRowInsets.left, y: availableSize.height - bottomInset - 6.0 - actionBarSize.height), size: actionBarSize) // pluma: no AI button\n", 1),
+)
+# What would open the editor past the edits: another place that enables a
+# caption's AI button or adds the rich editor's. Upstream adding one stops
+# the patch until it is read.
+NO_AI_EDITOR_GUARDS = (
+    ("submodules/AttachmentUI/Sources/AttachmentPanel.swift", "isAIEnabled = true", 0),
+    ("submodules/TelegramUI/Components/LegacyMessageInputPanel/Sources/LegacyMessageInputPanel.swift", "isAIEnabled = true", 0),
+    ("submodules/TelegramUI/Components/RichTextAttachmentScreen/Sources/RichTextAttachmentScreen.swift", "self.aiButton.view", 0),
+    ("submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift", "isAIButtonVisible = true", 1),
+)
+UPSTREAM_PATHS += tuple(sorted({edit[0] for edit in NO_AI_EDITOR_EDITS} - set(UPSTREAM_PATHS)))
+
+
+def patch_no_ai_editor(tree):
+    for rel, old, new, count in NO_AI_EDITOR_EDITS:
+        tree.replace(rel, old, new, count=count)
+
+
+def verify_no_ai_editor(tree):
+    for rel, old, new, count in NO_AI_EDITOR_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != count or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the AI editor is offered again")
+    for rel, s, count in NO_AI_EDITOR_GUARDS:
+        found = tree.read(rel).count(s)
+        if found != count:
+            raise PatchError(f"{rel}: {found} occurrences of {s!r}, expected {count}; another way into the AI editor")
+
 
 # --- account directories on a fresh install ----------------------------------
 #
