@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Deletes the Bazel caches of main that a newer one of the same kind
-# replaced: prune-caches.sh <key prefix>... Cache entries cannot be updated,
-# so every build saves a new one; keeping only the newest of each kind keeps
-# the simulator and the IPA caches side by side within the 10 GB of a
-# repository instead of evicting each other.
+# Deletes the Bazel caches of this run's branch that a newer one of the same
+# kind replaced: prune-caches.sh <key prefix>... Cache entries cannot be
+# updated, so every build saves a new one; keeping only the newest of each
+# kind on a branch keeps the entries of main from being evicted by those of
+# pull requests.
 #
-# Environment: GH_TOKEN with actions: write, GITHUB_REPOSITORY.
+# Environment: GH_TOKEN with actions: write, GITHUB_REPOSITORY, GITHUB_REF.
 set -euo pipefail
-: "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is not set}"
+: "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is not set}" "${GITHUB_REF:?GITHUB_REF is not set}"
 if [ $# = 0 ]; then
 	echo "usage: prune-caches.sh <key prefix>..." >&2
 	exit 2
 fi
 for prefix in "$@"; do
-	ids=$(gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main --key "$prefix" \
+	ids=$(gh cache list --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF" --key "$prefix" \
 		--sort created_at --order desc --limit 100 --json id --jq '.[1:][].id')
 	n=0
 	for id in $ids; do

@@ -226,7 +226,7 @@ The signed ad hoc IPA also goes to the server's install service (`ci/install-upl
 
 ### TestFlight
 
-Next to the ad hoc IPA, a manual run of `main` with *testflight* ticked builds the same app signed with App Store profiles and uploads it to App Store Connect, where it becomes a TestFlight build. Testers install it with the TestFlight app on any iPhone; it needs no registered devices. The certificate is the same Apple Distribution certificate; only the profiles differ, so the build reads the compiled code from the ad hoc IPA's Bazel cache and saves no cache of its own. The build number is the run number, which App Store Connect needs to grow from build to build.
+After the ad hoc IPA, every push to `main` (and a manual run of `main` with *testflight* ticked) builds the same app signed with App Store profiles and uploads it to App Store Connect, where it becomes a TestFlight build. Testers install it with the TestFlight app on any iPhone; it needs no registered devices. The certificate is the same Apple Distribution certificate; only the profiles differ, so the build reads the compiled code from the ad hoc IPA's Bazel cache and saves no cache of its own. The build number is the run number, which App Store Connect needs to grow from build to build.
 
 The `preflight-testflight` job checks first, in the `release` environment, and fails within a minute when something is wrong. It requires the following:
 - the certificate as for the ad hoc IPA;
@@ -301,7 +301,8 @@ The jobs run on GitHub's `xcode-27` runners (macOS 27, a public preview of GitHu
 The Bazel disk cache and Bazel's downloads are kept in the GitHub Actions cache, one entry for the simulator app and one for the IPA (the TestFlight build reads the IPA's and saves none):
 - the entry is saved even when a build fails, so a re-run continues from where it stopped;
 - before saving, the disk cache is trimmed to 12 GB (`PLUMA_BAZEL_CACHE_GB`), least recently used entries first;
-- older entries of each kind are deleted after the run, so the two kinds fit in the repository's 10 GB together.
+- a pull request saves its own entry (not one of a fork or Dependabot), so its next push finds what the last one compiled; it reads its own entries and those of `main`, and `cache-cleanup` deletes them when it closes;
+- older entries of each kind on a branch are deleted after the run. The repository's cache limit is 40 GB (*Settings → Actions → General*; above 10 GB it is paid, ADR 0010 of the server repository).
 
 A cold build takes about an hour. A repeat build without changes takes minutes. An edit of TelegramCore or MtProtoKit, which most of the app depends on, compiles nearly everything again.
 
