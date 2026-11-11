@@ -2,14 +2,13 @@
 
 Builds of the official Telegram iOS app ([TelegramMessenger/Telegram-iOS](https://github.com/TelegramMessenger/Telegram-iOS)) for a [Pluma](https://github.com/sckraaa/pluma) server, a self-hosted Telegram-compatible server: Telegram-iOS patched for Pluma. This project is not affiliated with Telegram.
 
-The repository holds no copy of the app's code. CI fetches the upstream release pinned in [`upstream.env`](upstream.env) (tag `release-12.9.2`, MTProto layer 228), patches it with [`ci/patch.py`](ci/patch.py) and builds it with Telegram-iOS's own `Make.py` (Bazel). Every edit must match the upstream source exactly. If an update moves any of the edited places, the build fails; it never quietly produces a client that talks to Telegram.
+The repository holds no copy of the app's code. CI fetches the upstream release pinned in [`upstream.env`](upstream.env) (tag `release-13.2`, MTProto layer 233), patches it with [`ci/patch.py`](ci/patch.py) and builds it with Telegram-iOS's own `Make.py` (Bazel). Every edit must match the upstream source exactly. If an update moves any of the edited places, the build fails; it never quietly produces a client that talks to Telegram.
 
 ## What the patch changes
 
 - **Datacenter.** MtProtoKit gets a single datacenter, DC 1: the Pluma server (IPv4 address, optional IPv6 address, port). It is used for both the production and the test backend. A fresh install starts on it, and it is the only datacenter the client makes keys for ahead.
 - **Server key.** The server's RSA key replaces Telegram's production and test keys; MtProtoKit picks the key by the fingerprint the server announces. Telegram's key for its backup address records is replaced too, so no key of Telegram's is left in the client.
 - **Backup addresses.** The client does not look up backup addresses: no DNS-over-HTTPS queries at Google for Telegram's records, no CloudKit records. The library call returns nothing as well. Proxy host names resolve through the system resolver, not through Google's DNS-over-HTTPS.
-- **Calls.** No extra TCP reflector of Telegram's is added to calls of the 12.0.0 protocol.
 - **App identity.** It goes into the build configuration of `Make.py` (`--configurationPath`), which the patch writes from [`config/app.env`](config/app.env):
   - the bundle ID is `chat.pluma.app`, the extensions are `chat.pluma.app.<name>`, the App Group is `group.chat.pluma.app`;
   - Pluma's `api_id` (10002) and `api_hash`, and the Team ID that signs the app;
@@ -36,13 +35,13 @@ The repository holds no copy of the app's code. CI fetches the upstream release 
   | 720p | 3.0 Mbit/s, 64 kbit/s stereo | 5.0 Mbit/s, 128 kbit/s stereo |
   | 1080p | 6.6 Mbit/s, 64 kbit/s stereo | 12 Mbit/s, 128 kbit/s stereo |
   | a video sent as a GIF | 0.9 Mbit/s | 1.8 Mbit/s |
-  | round video | 1.0 Mbit/s, 64 kbit/s | 2.0 Mbit/s, 96 kbit/s |
+  | round video | 1.2 Mbit/s, 64 kbit/s | 2.0 Mbit/s, 96 kbit/s |
 
-  A round video is recorded at 2 Mbit/s instead of 1 (`CameraOutput.swift`); a GIF file becomes an mp4 at 1 Mbit/s instead of 0.5 (`TGGifConverter.m`). No video is scaled up: an edited video with no quality chosen takes the default quality only up to its own size, as an unedited one already does. Upstream fits such a video into the default's size, so a trimmed 720p video with a 1080p default went out as 1080p.
+  A round video is recorded at 2 Mbit/s instead of 1 or 1.2, by the legacy recorder (`CameraOutput.swift`) as by the new camera's (`VideoRecorder.swift`); a GIF file becomes an mp4 at 1 Mbit/s instead of 0.5 (`TGGifConverter.m`). No video is scaled up: an edited video with no quality chosen takes the default quality only up to its own size, as an unedited one already does. Upstream fits such a video into the default's size, so a trimmed 720p video with a 1080p default went out as 1080p.
 - **App Store requirements.** What App Store Connect warns about on upload (its notes on build 20):
   - the Info.plist names the purpose of background location (`NSLocationAlwaysAndWhenInUseUsageDescription`, ITMS-90683), in English the text every language's `InfoPlist.strings` already translates;
   - no Apple font in the bundle (ITMS-91198, refused from 1 October 2027): SF Camera, the face of the camera's controls, is gone, and the camera uses the system font of the same weight, as it already does when the font cannot be loaded (the legacy camera of the attachment menu is given the same fallback, without which it crashed);
-  - Siri gets an example phrase for each of the five system intents of the Intents extension in each of the app's 19 languages (ITMS-90626), naming Pluma; upstream gives one for sending a message only, naming Telegram, in English for most languages.
+  - Siri gets an example phrase for each of the five system intents of the Intents extension in each of the app's 19 languages (ITMS-90626), naming Pluma, and in the fallback vocabulary (`Base.lproj`), whichever language a device has; upstream's name Telegram.
 - **App update** (task 054 of the server repository). A build installed from the site (its profile lists devices, as an ad hoc profile does) ends its `app_version` with `adhoc`, so the server offers it updates; the update screen opens the page the server gives (the site's install page) instead of the App Store, which has no Pluma page. TestFlight builds are left to TestFlight.
 - **Login code screens** (task 076 of the server repository). Pluma sends no SMS; the code screen says where the code went, by the type the server answers:
   - in the person's other Pluma session (`auth.sentCodeTypeApp`): upstream's screen, with "Didn't get the code?" instead of "Get the code via SMS";
@@ -54,15 +53,15 @@ The repository holds no copy of the app's code. CI fetches the upstream release 
 
   Every answer to "Send again" or "Didn't get the code?" restarts the countdown of the screen it leads to, also when the server answers the same screen with the same data (upstream keeps the screen as it was, and the link stays active). The link sends one request at a time: while the answer is awaited it is dimmed and does nothing. An expired code (`PHONE_CODE_EXPIRED`) goes back to the phone number, as at sign in; `SEND_CODE_UNAVAILABLE` says to ask the administrator; after `FLOOD_WAIT` upstream's "Too many attempts" shows and the link waits the screen's countdown, or 60 s on a screen without one (TelegramCore keeps no seconds of `FLOOD_WAIT`).
 
-  The long text of a code that did not reach Telegram fits on small phones: as 13.2 does on every code screen, the sticker goes when the content does not fit with the keyboard up, and what still does not fit (on the smaller phones, such as the iPhone SE or mini) is the text, which then scrolls between the title and the code; the code field, the link and the button stay in view. Under the code field there is room for the error line. The Telegram app is checked again when the app becomes active in the login; the change of the phone number checks it when its code screen opens.
+  The long text of a code that did not reach Telegram fits on small phones: upstream drops the sticker of any code screen whose content does not fit with the keyboard up, and what still does not fit (on the smaller phones, such as the iPhone SE or mini) is the text, which then scrolls between the title and the code; the code field, the link and the button stay in view. Under the code field there is room for the error line. The Telegram app is checked again when the app becomes active in the login; the change of the phone number checks it when its code screen opens.
 
   The texts are the patch's own (`Pluma.Login.*`, in English); other languages come with the server's language pack.
 - **Build flags.** The upstream `.bazelrc` imports `pluma.bazelrc`, which [`ci/build.sh`](ci/build.sh) writes: the cache locations, and no provisioning profiles for a simulator build.
 
-After the edits, the result is checked again. MtProtoKit, TelegramCore and TelegramVoip may hold no address in Telegram's published ranges, and their only RSA keys must be the server's. The check also covers the layer (`currentLayer()` is 228), the versions of `versions.json`, and the `Make.py` options and targets the build relies on.
+After the edits, the result is checked again. MtProtoKit, TelegramCore and TelegramVoip may hold no address in Telegram's published ranges, and their only RSA keys must be the server's. The check also covers the layer (`currentLayer()` is 233), the versions of `versions.json`, and the `Make.py` options and targets the build relies on.
 
 What the patch leaves, and why:
-- **iOS 13 as the minimum.** App Store Connect wants iOS 15 from April 2027 (ITMS-90068). The pinned release targets 13.0 and compiles most of its modules with `-warnings-as-errors`; at 15.0 every unguarded API deprecated in iOS 14 or 15 (`UIApplication.windows` in `AppDelegate.swift` and others) turns into a build error. Telegram has to raise the target itself before then; the update of the pinned release brings it.
+- **Sections of 13.x the server does not offer.** The wallet (`wallet_available`), the news feed (`news_feed_enabled`) and Agent mode (`agent_bot_ids`) stay off without the server's app configuration key; the patch stops if one of those gates (or the default of the MTProto engine: MtProtoKit, with the Rust engine behind Debug Settings) changes.
 - **Links** to `telegram.org` and `fragment.com` in the interface: the terms, the privacy policy, Telegram's own features. Each opens only when tapped. The rebranding leaves them as they are, except the links to Telegram's desktop and web clients in Settings → Devices and in its QR scanner ([Branding](#branding)). Links of `t.me` the app makes are `pluma.chat`'s, except those of Telegram's own features ([Branding](#branding), pluma.chat links).
 - **The reflector benchmark** of TelegramUI's `AppDelegate` measures a call server of Telegram's. It runs only in internal builds or behind a hidden debug switch; this is a public build.
 - **Connection probing.** MtProtoKit pings `google.com` or `8.8.8.8` (ICMP) when a proxy the user set up stops answering.
@@ -83,8 +82,8 @@ The app looks like Pluma, not like Telegram. The brand kit of the server reposit
     - The screen that hosts the intro plays it with the app's own Lottie player (rlottie) whenever the first page appears: at the start, and when the user comes back to the page or to the intro. Light themes show the kit's ink; dark themes show the ink of the app icon's dark appearance, by colour replacement. The mark shows while the first page is current, fades with the scroll, and comes in and goes as the old disc did. When the user comes back to the page, it writes itself once the scroll lets it show.
     - The pages are one group between the status bar and the start button: the mark 128 pt high, the wordmark's glyphs 32 pt under it, the group at 44% of the free space (`PlumaIntroMarkHeight`, `PlumaIntroMarkGap` and `PlumaIntroGroupBias` in `ci/patch.py`). The free space starts where the app's own screens start under the status bar, by the app's own metrics of the device (Display's `DeviceMetrics`), not by UIKit's safe area: 54 pt on an iPhone 16 Pro, for example, or the height of UIKit's status bar if that is taller. The start button keeps upstream's place, and the pictures of the other pages end where the mark ends.
     - The textures of Telegram's sphere and plane are transparent. The intro fills the sphere's texture with its background colour, so on that page its OpenGL animation draws a square of the background colour over the next page's speedometer and hides it. When the page changes, the square fades in or out over the speedometer, with the old sphere's timing (0.24 s in, 0.3 s out), and the mark fades in or out with it: the mark and the speedometer cross-fade. The patch pins the upstream lines this relies on (`INTRO_SPHERE_MASK`). The pages "Powerful" and "Cloud-Based" are sage instead of blue. Upstream does not start that animation in the arm64 simulator build (Apple Silicon; `loadGL` in `RMIntroViewController.m`, with no reason given); the patch starts it there as on devices, so the simulator, where the intro is checked, shows what a device shows.
-- **Name.** "Telegram" becomes "Pluma" wherever the user reads it, except where the login code screens mean the Telegram app: the built-in English strings (556 entries, feature names included, such as "Pluma Premium"; string keys, URLs and user names stay), the permission prompts in every language (in Arabic, Persian and Korean script too, and the name under the icon in Arabic and Korean), the Photos album, CallKit, the locked widget, the label of the app's entry in address book contacts.
-- **Link scheme.** The app registers `plm://`, not `tg://`, which stays with Telegram installed on the same phone. The links it makes use `plm://`, the QR code of a sign-in on another device among them; its scanner takes `plm://` codes only, so a sign-in by QR code works between Pluma clients. `tg://` links inside the app (messages, bots) still open in it.
+- **Name.** "Telegram" becomes "Pluma" wherever the user reads it, except where the login code screens mean the Telegram app: the built-in English strings (585 entries, feature names included, such as "Pluma Premium"; string keys, URLs and user names stay), the permission prompts in every language (in Arabic, Persian and Korean script too, and the name under the icon in Arabic and Korean), the Photos album, the locked widget, the label of the app's entry in address book contacts.
+- **Link scheme.** The app registers `plm://`, not `tg://`, which stays with Telegram installed on the same phone, nor `ton://` and `tc://` of 13.x (the wallet, which the server does not offer). The links it makes use `plm://`, the QR code of a sign-in on another device among them; its scanner takes `plm://` codes only, so a sign-in by QR code works between Pluma clients. `tg://` links inside the app (messages, bots) still open in it.
 - **Client links.** In the header of Settings → Devices ("Link Pluma Desktop or Pluma Web by scanning a QR code"), "Pluma Desktop" opens Pluma's site https://pluma.chat/ and "Pluma Web" its web client https://web.pluma.chat/, as in the Android client, instead of getdesktop.telegram.org and web.telegram.org (`CLIENT_LINKS` in `ci/patch.py`). The QR scanner opened from that screen does the same under its viewfinder, and its text reads "Go to pluma.chat or web.pluma.chat to get the QR code" (`AuthSessions.AddDevice.ScanInstallInfo`, `CLIENT_TEXTS`; English is the only language the app bundles). The header's text names no site, so its string stays. "Learn More" under the sessions, which the app shows only when the server enables the QR login camera (`qr_login_camera`), still opens telegram.org/apps.
 - **pluma.chat links** (task 026 of the server repository). pluma.chat is to Pluma what t.me is to Telegram (the server's invite links and `me_url_prefix` are pluma.chat's):
   - The app opens links of `pluma.chat` itself, as those of `t.me`, `telegram.me` and `telegram.dog`, which stay its own as upstream: the parsers of `UrlHandling`, the check of `OpenUrl`, concealed links without a warning, the QR scanner of a profile and the story camera, a pasted bot or sticker set link, the "View Message" of a message link's preview, the slug of a shared folder's link (`LINK_HOSTS` in `ci/patch.py`). Only the host itself: a subdomain of `t.me` is read as a username, one of `pluma.chat` (web.pluma.chat) stays a site (`URL_SUBDOMAIN`).
@@ -140,7 +139,7 @@ Every run builds the simulator app for the development server of [`config/dev`](
    E2E_SERVER_KEY=~/pluma-dev-secrets/server_pkcs1.key E2E_GATEWAY_PORT=10443 test/e2e/run.sh up
    test/e2e/run.sh admin allowlist add +79990000001
    ```
-2. Install the app on a booted simulator (Xcode 26) and start it:
+2. Install the app on a booted simulator (Xcode 27) and start it:
    ```sh
    gh run download <run id> -R sckraaa/pluma-ios -n simulator
    unzip pluma-ios-*-simulator.zip
@@ -298,7 +297,7 @@ A bad release: `pluma-admin release withdraw ios <build>` on the server stops th
 | Pull request | yes, no artifact | no | no |
 | Weekly canary | the pinned upstream on a fresh runner image | no | no |
 
-The jobs run on GitHub's `macos-26` runners with Xcode 26.2 selected explicitly, the version `versions.json` asks for. The setup removes the image's other Xcode versions when the disk is short, and downloads the Metal toolchain when it is missing.
+The jobs run on GitHub's `xcode-27` runners (macOS 27, a public preview of GitHub's) with Xcode 27.1 selected explicitly, the version `versions.json` asks for; the label is a hosted one that actionlint does not know yet (`.github/actionlint.yaml`). The setup removes the image's other Xcode versions when the disk is short, and downloads the Metal toolchain when it is missing.
 
 The Bazel disk cache and Bazel's downloads are kept in the GitHub Actions cache, one entry for the simulator app and one for the IPA (the TestFlight build reads the IPA's and saves none):
 - the entry is saved even when a build fails, so a re-run continues from where it stopped;
@@ -324,7 +323,7 @@ python3 -m unittest discover -s ci -p '*_test.py'
 ci/configure.sh dev
 ```
 
-A build needs a Mac with Xcode 26.2 and several tens of GB free:
+A build needs a Mac with macOS 27, Xcode 27.1 and several tens of GB free; Bazel 9.2.0 is what `Make.py` downloads, and Rust 1.98.1, the crates of its two Rust engines and more come with the build:
 
 ```sh
 ci/fetch-upstream.sh full            # ./upstream with all submodules

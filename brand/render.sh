@@ -180,6 +180,11 @@ pdf "$tmp/outlined.svg" "$out/submodules/TelegramUI/Images.xcassets/Chat/Context
 svg calltitle 20 15 "$(mark_at 10 7.5 17.4 "$mono")"
 pdf "$tmp/calltitle.svg" "$out/submodules/TelegramUI/Images.xcassets/Call/CallTitleLogo.imageset/ic_calls_tlogo.pdf"
 
+# The badge of a message or block the app cannot show, a template in a bubble
+# of its own.
+svg unsupported 44 44 "$(mark_at 22 22 26 "$mono")"
+pdf "$tmp/unsupported.svg" "$out/submodules/TelegramUI/Images.xcassets/Chat/Message/UnsupportedIcon.imageset/logo.pdf"
+
 # CallKit's button of the app in the system call screen, an alpha template.
 svg callkit 80 80 "$(mark_at 40 40 60 "$mono")"
 png "$tmp/callkit.svg" 80 80 "$out/submodules/TelegramUI/Images.xcassets/Call/CallKitLogo.imageset/CallKitLogo@2x.png"

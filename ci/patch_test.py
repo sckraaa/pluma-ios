@@ -112,7 +112,7 @@ def config(**over):
 class ConfigTest(unittest.TestCase):
     def test_repository_config(self):
         c = config(server_ipv6="2001:db8:0:0::1")
-        self.assertEqual((c.bundle_id, c.app_name, c.api_id, c.layer), ("chat.pluma.app", "Pluma", 10002, 228))
+        self.assertEqual((c.bundle_id, c.app_name, c.api_id, c.layer), ("chat.pluma.app", "Pluma", 10002, 233))
         self.assertEqual(c.ipv6, "2001:db8::1")
         conf = c.build_configuration()
         self.assertEqual((conf["bundle_id"], conf["api_id"], conf["team_id"]), ("chat.pluma.app", "10002", "ABCDE12345"))
@@ -749,6 +749,65 @@ class BirthdayTest(unittest.TestCase):
                          [patch.CHAT_LIST, patch.CHAT_LIST_NOTICE, patch.CHAT_LIST_PANELS])
 
 
+class MediaEditorAccentTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.dir.name)
+        (root / "Telegram").mkdir()
+        (root / "Telegram/BUILD").write_text("")
+        (root / "versions.json").write_text("{}")
+        self.tree = patch.Tree(root)
+        for rel, count in patch.MEDIA_EDITOR_ACCENTS:
+            self.tree.write(rel, "UIColor(rgb: 0x5b7a5e)\n" * count)
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_sage(self):
+        patch.verify_media_editor_accent(self.tree)
+
+    def test_a_new_blue_stops_the_patch(self):
+        for rel, _ in patch.MEDIA_EDITOR_ACCENTS:
+            with self.subTest(file=rel):
+                text = self.tree.read(rel)
+                self.tree.write(rel, text + "UIColor(rgb: 0x0088FF)\n")
+                with self.assertRaisesRegex(patch.PatchError, "Telegram's blue"):
+                    patch.verify_media_editor_accent(self.tree)
+                self.tree.write(rel, text)
+
+
+class CrashReportsTest(unittest.TestCase):
+    PATCHED = (patch.CRASH_REPORT_TEAM + patch.CRASH_REPORT_PROMPT
+               + "                TextAlertAction(type: .defaultAction, title: \"Send\", action: { self.send(report, context: context) })\n")
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.dir.name)
+        (root / "Telegram").mkdir()
+        (root / "Telegram/BUILD").write_text("")
+        (root / "versions.json").write_text("{}")
+        self.tree = patch.Tree(root)
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_only_the_dead_confirmation_calls_send(self):
+        self.tree.write(patch.CRASH_REPORTS, self.PATCHED)
+        patch.verify_crash_reports(self.tree)
+
+    def test_a_new_path_to_the_bot_stops_the_patch(self):
+        for extra in ("actions.send(report, context: context)\n", "self.confirmSend(report)\n"):
+            with self.subTest(extra=extra):
+                self.tree.write(patch.CRASH_REPORTS, self.PATCHED + extra)
+                with self.assertRaisesRegex(patch.PatchError, "can still be sent"):
+                    patch.verify_crash_reports(self.tree)
+
+    def test_the_prompt_goes_to_the_bot_again(self):
+        self.tree.write(patch.CRASH_REPORTS, self.PATCHED.replace(patch.CRASH_REPORT_PROMPT, patch.CRASH_REPORT_PROMPT_OLD))
+        with self.assertRaisesRegex(patch.PatchError, "can still be sent"):
+            patch.verify_crash_reports(self.tree)
+
+
 class AppUpdateTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
@@ -775,6 +834,8 @@ class AppUpdateTest(unittest.TestCase):
         self.assertIn("    public let url: String?\n", info)
         self.assertIn("                self.url = appUpdateData.url\n", info)
         self.assertIn("            context.sharedContext.applicationBindings.openUrl(url)\n", self.tree.read(patch.UPDATE_INFO))
+        self.assertNotIn("itms-apps:", self.tree.read(patch.APP_DELEGATE))
+        self.assertIn('URL(string: "https://pluma.chat/")', self.tree.read(patch.APP_DELEGATE))
         self.assertIn('            suffix = @"adhoc";\n', self.tree.read(patch.MT_API_ENVIRONMENT))
         # A second run finds none of the upstream texts.
         with self.assertRaises(patch.PatchError):
@@ -1309,13 +1370,16 @@ DAMAGE = (
      "        case .compressedMedium, .compressedHigh, .compressedVeryHigh, .videoMessage:\n            return 96\n"),
     (patch.VIDEO_PRESETS, "        case .compressedVeryLow, .compressedLow:\n            return 1\n",
      "        case .compressedVeryLow:\n            return 1\n"),
+    (patch.VIDEO_PRESETS, "<= 400.0 ? 1000 : 1200\n", "<= 400.0 ? 1000 : 1500\n"),
     (patch.ROUND_VIDEO_RECORDER, "AVVideoAverageBitRateKey: 1000 * 1000,", "AVVideoAverageBitRateKey: 1500 * 1000,"),
+    (patch.ROUND_VIDEO_RECORDER_NEO, "audioSettings[AVSampleRateKey] = streamDescription.pointee.mSampleRate\n",
+     "audioSettings[AVSampleRateKey] = 48000.0\n"),
     (patch.GIF_CONVERTER, "AVVideoAverageBitRateKey: @(500000),", "AVVideoAverageBitRateKey: @(750000),"),
     (patch.VIDEO_FETCH, "            qualityPreset = defaultPreset\n", "            qualityPreset = .compressedMedium\n"),
-    (patch.SERIALIZATION, "        return 228\n", "        return 229\n"),
-    (patch.VERSIONS, '"app": "12.9.2"', '"app": "12.9.3"'),
-    (patch.VERSIONS, '"xcode": "26.2"', '"xcode": "26.3"'),
-    (patch.VERSIONS, '"bazel": "8.4.2:', '"bazel": "8.5.0:'),
+    (patch.SERIALIZATION, "        return 233\n", "        return 234\n"),
+    (patch.VERSIONS, '"app": "13.2"', '"app": "13.2.1"'),
+    (patch.VERSIONS, '"xcode": "27.1"', '"xcode": "27.2"'),
+    (patch.VERSIONS, '"bazel": "9.2.0:', '"bazel": "9.3.0:'),
     (MAKE, "elif configuration == 'debug_sim_arm64':", "elif configuration == 'debug_sim':"),
     (MAKE, "codesigning_group.add_argument(\n        '--xcodeManagedCodesigning',",
      "codesigning_group.add_argument(\n        '--xcodeManaged',"),
@@ -1341,11 +1405,20 @@ DAMAGE = (
     (ENCRYPTION, "MIIBCgKCAQEAyr+18Rex2ohtVy8sroGPBwXD3DOoKCSpjDqYoXgCqB7ioln4eDCF",
      "MIIBCgKCAQEAyr+18Rex2ohtVy8sroGPBwXD3DOoKCSpjDqYoXgCqB7ioln4eDCG"),
     (BACKUP, "MTSignal *signal = [self fetchConfigFromAddress:address", "MTSignal *signal = [self fetchConfigFrom:address"),
-    (BACKUP, "mainDatacenterId:(NSInteger)mainDatacenterId {\n    NSMutableArray",
-     "mainDatacenterId:(NSInteger)mainDatacenterId delay:(double)delay {\n    NSMutableArray"),
+    (BACKUP, "mainDatacenterId:(NSInteger)mainDatacenterId {\n    __weak MTContext",
+     "mainDatacenterId:(NSInteger)mainDatacenterId delay:(double)delay {\n    __weak MTContext"),
     (DNS, "timeout:10.0 onQueue:[MTQueue concurrentDefaultQueue] orSignal", "timeout:5.0 onQueue:[MTQueue concurrentDefaultQueue] orSignal"),
-    (CALLS, 'ip: "91.108.9.38",', 'ip: "91.108.9.39",'),
+    (CALLS, "                unfilteredConnections = [connections.primary] + connections.alternatives\n",
+     "                unfilteredConnections = connections.alternatives\n"),
     (patch.BAZELRC, "build --action_env=ZERO_AR_DATE=1\n", "build --action_env=ZERO_AR_DATE=1\ntry-import %workspace%/user.bazelrc\n"),
+    # The engine of a build and the sections the server does not turn on.
+    (patch.NETWORK_ENGINE, "        return NetworkEngineSettings(engine: .mtProtoKit)\n", "        return NetworkEngineSettings(engine: .rust)\n"),
+    (patch.WALLET_CONFIGURATION, "            isAvailable: false,\n", "            isAvailable: true,\n"),
+    (patch.SETTINGS_ITEMS, ".isAvailable {\n            let balanceText", " {\n            let balanceText"),
+    (patch.NEWS_CONFIGURATION, "newsFeedSwitch(appConfiguration: appConfiguration) == true\n", "newsFeedSwitch(appConfiguration: appConfiguration) != false\n"),
+    (patch.AGENT_CONFIGURATION, 'data["agent_bot_ids"] as? [Any]', 'data["agent_bots"] as? [Any]'),
+    (patch.APP_BUILD, "                <string>tc</string>\n", "                <string>tonconnect</string>\n"),
+    (patch.STRINGS, '"SocksProxySetup.QrCode.TgLink" = "tg:// link";', '"SocksProxySetup.QrCode.TgLink" = "tg link";'),
     # The brand.
     (BUILD, '    "PremiumTurbo",\n]\n', '    "PremiumTurbo",\n    "Premium2",\n]\n'),
     (APP_DELEGATE, 'PresentationAppIcon(name: "New2", imageName: "New2"),', 'PresentationAppIcon(name: "New3", imageName: "New3"),'),
@@ -1360,7 +1433,7 @@ DAMAGE = (
     (patch.INTRO_HEADER, "@property (nonatomic, copy) UIView *(^createStartButton)(CGFloat);",
      "@property (nonatomic, copy) UIView *(^createStartButton)(CGFloat width);"),
     (patch.INTRO_CONTROLLER, "} DeviceScreen;", "} RMDeviceScreen;"),
-    (patch.INTRO_CONTROLLER, "    bool _loadedView;\n}\n@end\n", "    bool _loadedView;\n    bool _loadedGL;\n}\n@end\n"),
+    (patch.INTRO_CONTROLLER, "    bool _loadedView;\n", "    BOOL _loadedView;\n"),
     (patch.INTRO_CONTROLLER, "    _glkView.transform = CGAffineTransformMakeScale(0.66, 0.66);",
      "    _glkView.transform = CGAffineTransformMakeScale(0.7, 0.7);"),
     (patch.INTRO_CONTROLLER, "        _startButton.alpha = 1.0;\n    } completion:nil];",
@@ -1470,6 +1543,20 @@ DAMAGE = (
     # Telegram's support.
     (patch.SETTINGS_ITEMS, "interaction.openSettings(.faq)", "interaction.openSettings(.faqPage)"),
     (patch.SETTINGS_SEARCH, "        allItems.append(contentsOf: helpItems)\n", "        allItems += helpItems\n"),
+    (patch.CRASH_REPORTS, 'text: "Send to Telegram Team"', 'text: "Send to the Telegram Team"'),
+    (patch.CRASH_REPORTS, 'Sign in to a Telegram account to share', 'Sign in to Telegram to share'),
+    (patch.APP_DELEGATE, "itms-apps://itunes.apple.com/app/id", "itms-apps://apps.apple.com/app/id"),
+    (patch.MAKE_THEME, "neutralNightAccentColor = UIColor(rgb: 0x3e88f7)", "neutralNightAccentColor = UIColor(rgb: 0x3e88f8)"),
+    (patch.SEND_BUTTON, "if saturation < 0.2 ||", "if saturation < 0.25 ||"),
+    (patch.SEND_BUTTON, "generateTintedImage(image: image, color: .white) else {", "generateTintedImage(image: image, color: .black) else {"),
+    (patch.CHAT_EDITOR_CONTROLS, "UIColor(rgb: 0x0088ff)", "UIColor(rgb: 0x0088FE)"),
+    (patch.CHAT_EDITOR_COVER, "UIColor(rgb: 0x0088ff)", "UIColor(rgb: 0x0088FE)"),
+    (patch.MEDIA_EDITOR, "pressedColor: UIColor(rgb: 0x0088ff)", "pressedColor: UIColor(rgb: 0x0088FE)"),
+    (patch.MEDIA_TOOLS, "UIColor(rgb: 0x0088ff)", "UIColor(rgb: 0x0088FE)"),
+    (patch.DRAWING_SCREEN, ".color(UIColor(rgb: 0x0088ff))", ".color(UIColor(rgb: 0x0088FE))"),
+    (patch.PICKER_TOOLBAR, "UIColor(rgb: 0x0088ff)", "UIColor(rgb: 0x0088FE)"),
+    (patch.CRASH_REPORTS, "actions.send(pending[0], context: context)", "actions.send(pending.first!, context: context)"),
+    (patch.CRASH_REPORTS, "    private func share(_ report: CrashReport) {", "    fileprivate func share(_ report: CrashReport) {"),
     ("submodules/QrCodeUI/Sources/QrCodeScanScreen.swift", 'filteredCodes = codes.filter { $0.message.hasPrefix("tg://") }',
      'filteredCodes = codes.filter { $0.message.hasPrefix("tg://login") }'),
     ("submodules/TelegramUI/Components/ShareExtensionContext/Sources/ShareExtensionContext.swift",
@@ -1649,7 +1736,7 @@ class UpstreamTest(unittest.TestCase):
         self.assertEqual(keys.count(c.rsa_pem[1]), 2)
         self.assertEqual(tree.read(ENCRYPTION).count(c.rsa_pem[1]), 1)
         self.assertIn("    return [MTSignal complete];\n}\n\n@end\n", tree.read(BACKUP))
-        self.assertIn("    return [self resolveHostnameNative:hostname port:port];\n", tree.read(DNS))
+        self.assertIn(patch.DNS_NATIVE, tree.read(DNS))
         self.assertNotIn("CallSessionConnection.Reflector(", tree.read(CALLS))
         build = tree.read(BUILD)
         self.assertEqual(build.count("<string>Pluma</string>"), 9)
@@ -1719,13 +1806,15 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn('"CFBundleDisplayName" = "Pluma";', tree.read(patch.INFOPLIST_STRINGS.format("ko")))
         self.assertIn("위치를 지도에 표시하기 위해 Pluma가 위치", tree.read(patch.INFOPLIST_STRINGS.format("ko")))
         self.assertIn("<string>Pluma stores your contacts heavily encrypted", build)
-        self.assertIn('CXProviderConfiguration(localizedName: "Pluma")',
-                      tree.read("submodules/TelegramCallsUI/Sources/CallKitIntegration.swift"))
         # plm:// instead of tg://, which the app only asks about (whether the
-        # Telegram app is installed, for the login code screens).
+        # Telegram app is installed, for the login code screens); the wallet's
+        # schemes stay with the apps that have one.
         self.assertNotIn("                <string>tg</string>\n", build)
         self.assertEqual(build.count("<string>tg</string>"), 1)
         self.assertIn("        <string>rizogo</string>\n        <string>tg</string>\n    </array>\n", build)
+        self.assertNotIn("<string>ton</string>", build)
+        self.assertNotIn("<string>tc</string>", build)
+        self.assertIn('"SocksProxySetup.QrCode.TgLink" = "plm:// link";', tree.read(patch.STRINGS))
         self.assertIn('let urlString = "plm://login?token=\\(tokenString)"',
                       tree.read("submodules/AuthorizationUI/Sources/AuthorizationSequencePhoneEntryControllerNode.swift"))
         self.assertIn('codes.filter { $0.message.hasPrefix("plm://") }', tree.read("submodules/QrCodeUI/Sources/QrCodeScanScreen.swift"))
@@ -1819,6 +1908,15 @@ class UpstreamTest(unittest.TestCase):
         # No support section.
         self.assertNotIn("Settings_Support", tree.read(patch.SETTINGS_ITEMS))
         self.assertNotIn("let helpItems = ", tree.read(patch.SETTINGS_SEARCH))
+        for rel, count in patch.MEDIA_EDITOR_ACCENTS:
+            self.assertEqual(tree.read(rel).count("UIColor(rgb: 0x5b7a5e)"), count, rel)
+        self.assertIn("neutralNightAccentColor = UIColor(rgb: 0x9dbb9f)", tree.read(patch.MAKE_THEME))
+        self.assertIn(patch.SEND_GLASS, tree.read(patch.SEND_BUTTON))
+        self.assertIn(patch.SEND_GLASS_ICON, tree.read(patch.SEND_BUTTON))
+        crash_reports = tree.read(patch.CRASH_REPORTS)
+        self.assertNotIn("Send to Telegram Team", crash_reports)
+        self.assertNotIn("actions.send(", crash_reports)
+        self.assertIn("                actions.share(pending[0])\n", crash_reports)
         # The birthday notice opens the chat, says "Send Message" and no longer
         # offers a gift; closing it still dismisses it.
         chat_list = tree.read(patch.CHAT_LIST)
@@ -1881,12 +1979,15 @@ class UpstreamTest(unittest.TestCase):
             self.assertNotIn(value + "\n", legacy)
         presets = tree.read(patch.VIDEO_PRESETS)
         self.assertIn("        case .compressedHigh:\n            return 5000 // pluma: 3000 in Telegram (task 052)\n", presets)
-        self.assertIn("        case .videoMessage:\n            return 2000 // pluma: 1000 in Telegram (task 052)\n", presets)
+        self.assertIn("        case .videoMessage:\n            return 2000 // pluma: 1200 in Telegram (task 052)\n", presets)
         self.assertIn("        case .sticker:\n            return 1000\n", presets)  # not a video message, kept
         self.assertIn("        case .animation:\n            return 1800", presets)
         self.assertIn("        case .compressedMedium, .compressedHigh, .compressedVeryHigh:\n            return 128\n", presets)
         self.assertNotIn("            return 1\n", presets)
+        self.assertIn("        self.bitrateKbps = 2000 //", presets)
         self.assertIn("AVVideoAverageBitRateKey: 2000 * 1000,", tree.read(patch.ROUND_VIDEO_RECORDER))
+        self.assertIn("AVVideoAverageBitRateKey: 2_000_000,", tree.read(patch.ROUND_VIDEO_RECORDER_NEO))
+        self.assertIn("audioSettings[AVEncoderBitRateKey] = 96_000", tree.read(patch.ROUND_VIDEO_RECORDER_NEO))
         self.assertIn("AVVideoAverageBitRateKey: @(1000000),", tree.read(patch.GIF_CONVERTER))
         self.assertIn(patch.VIDEO_DEFAULT_PRESET, tree.read(patch.VIDEO_FETCH))
         # What App Store Connect asks: the purpose of background location,
@@ -1986,7 +2087,8 @@ class UpstreamTest(unittest.TestCase):
             (patch.URL_HANDLING, '"iphone", ', ""),
             (patch.OPEN_URL, ", !isPlumaSiteLink(parsedUrl.absoluteString) {", " {"),
             (patch.OPEN_LINK_MENU, '(host == "pluma.chat" && !isPlumaSiteLink(parsedUrl.absoluteString))', 'host == "pluma.chat"'),
-            (patch.STRINGS, '"Link: pluma.chat/%@"', '"Link: t.me/%@"'),
+            (patch.STRINGS, '"pluma.chat link"', '"t.me link"'),
+            (patch.STRINGS, '"plm:// link"', '"tg:// link"'),
             (patch.STRINGS, '"Settings.FAQ" = "Pluma FAQ";', '"Settings.FAQ" = "Pluma FAQ at t.me/faq";'),
         ):
             with self.subTest(rel=rel, old=(old or new)[:60]):
@@ -2001,6 +2103,44 @@ class UpstreamTest(unittest.TestCase):
                 with self.assertRaises(patch.PatchError) as e:
                     patch.verify(tree, c)
                 self.assertIn(rel, str(e.exception))
+
+    def test_new_links_stop_the_patch(self):
+        # A new tg:// literal or a new host of Telegram's is a new place to
+        # decide about, in the app's code and in its strings; a unit test is
+        # not in the app.
+        target = patch.URL_HANDLING
+        for text in ('let a = "tg://resolve?domain=x"\n', 'let a = "https://telegram.org/new"\n',
+                     'let a = "https://t.me/new"\n', 'let a = "http://telesco.pe/x"\n', 'let a = "Send to Telegram"\n'):
+            with self.subTest(text=text):
+                self.tearDown()
+                tree, c = self.run_patch()
+                tree.write(target, tree.read(target) + text)
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify(tree, c)
+                self.assertIn(target, str(e.exception))
+        self.tearDown()
+        tree, c = self.run_patch()
+        tree.write(patch.STRINGS, tree.read(patch.STRINGS) + '"Pluma.New" = "See https://telegram.org/new";\n')
+        with self.assertRaises(patch.PatchError) as e:
+            patch.verify(tree, c)
+        self.assertIn(patch.STRINGS, str(e.exception))
+
+        self.tearDown()
+        tree, c = self.run_patch()
+        for rel in ("submodules/TextFormat/Tests/New.swift", "Telegram/SiriIntentsTests/New.swift"):
+            tree.write(rel, 'let a = "tg://resolve?domain=x", b = "https://telegram.org", c = "https://t.me/x", d = "Telegram"\n')
+        patch.verify(tree, c)
+        self.assertTrue(patch.is_unit_test("submodules/TelegramUI/Components/RichTextEditor/Tests/RichTextEditorCoreTests/A.swift"))
+        self.assertFalse(patch.is_unit_test("submodules/TelegramUI/Components/Tests.swift"))
+
+    def test_every_siri_vocabulary_is_replaced(self):
+        tree, c = self.run_patch()
+        self.assertNotIn("Telegram", tree.read(patch.SIRI_VOCABULARY.format("Base")))
+        rel = patch.SIRI_VOCABULARY.format("xx")
+        tree.write(rel, "<plist></plist>")
+        with self.assertRaises(patch.PatchError) as e:
+            patch.verify(tree, c)
+        self.assertIn(rel, str(e.exception))
 
     def test_login_code_texts(self):
         # The texts of the login code screens name the Telegram app exactly as
@@ -2404,14 +2544,11 @@ class LoginCodesTest(unittest.TestCase):
         tree = self.tree()
         patch.patch_login_codes(tree, self.c)
         node = tree.read(patch.LOGIN_CODE_NODE)
-        # The screen fits before the items are laid out: the sticker goes, then
-        # the text scrolls.
-        self.assertIn("        self.fitTelegramCodeScreen(items: &items, insets: &insets, layoutHeight: layout.size.height, "
-                      "additionalBottomInset: additionalBottomInset, navigationBarHeight: navigationBarHeight, "
-                      "textSize: currentOptionSize)\n        let _ = layoutAuthorizationItems(", node)
+        # The screen fits before the items are laid out, after upstream drops
+        # the sticker: the text scrolls.
+        self.assertIn("        self.fitTelegramCodeScreen(items: &items, height: layout.size.height - insets.top - insets.bottom - "
+                      "additionalBottomInset, textSize: currentOptionSize)\n        let _ = layoutAuthorizationItems(", node)
         fit = node[node.index("    private func fitTelegramCodeScreen("):node.index("    func updateData(number: String,")]
-        self.assertIn("            items.removeFirst()\n            textIndex -= 1\n            insets.top = navigationBarHeight\n"
-                      "            self.animationNode.isHidden = true\n", fit)
         self.assertIn("        items[textIndex].node = scrollNode\n"
                       "        items[textIndex].size = CGSize(width: textSize.width, height: textHeight)\n", fit)
         self.assertIn("        scrollNode.view.contentSize = textSize\n", fit)

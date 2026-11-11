@@ -89,7 +89,19 @@ TELEGRAM_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
     "95.161.76.100/32",
 ))
 
-# Where the network code lives: what verify() scans.
+# The MTProto engine of a build: MtProtoKit, which the edits below are for. The
+# Rust engine of third-party/mtproto-engine is in every build, for macOS and
+# behind Debug Settings; it takes its addresses and keys from MtProtoKit's
+# context, and the patch must stop if it becomes the default on iOS.
+NETWORK_ENGINE = "submodules/TelegramCore/Sources/SyncCore/SyncCore_NetworkEngineSettings.swift"
+NETWORK_ENGINE_DEFAULT = ("        #if os(macOS)\n"
+                          "        return NetworkEngineSettings(engine: .rust)\n"
+                          "        #else\n"
+                          "        return NetworkEngineSettings(engine: .mtProtoKit)\n"
+                          "        #endif\n")
+
+# Where the network code lives: what verify() scans (without the unit tests,
+# which are not in the app and carry Telegram's addresses as fixtures).
 NETWORK_DIRS = ("submodules/MtProtoKit", "submodules/TelegramCore/Sources", "submodules/TelegramVoip/Sources")
 
 NETWORK = "submodules/TelegramCore/Sources/Network/Network.swift"
@@ -125,6 +137,7 @@ INTENT_AVATARS = "Telegram/SiriIntents/IntentHandler.swift"
 LIVE_STREAM_AVATARS = "submodules/TelegramUI/Components/Stories/StoryContainerScreen/Sources/LiveChatReactionStreamView.swift"
 SETTINGS_ITEMS = "submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoSettingsItems.swift"
 SETTINGS_SEARCH = "submodules/SettingsUI/Sources/Search/SettingsSearchableItems.swift"
+CRASH_REPORTS = "submodules/DebugSettingsUI/Sources/CrashReportsController.swift"
 # The birthday notice of the chat list: what a tap does, its text, its close.
 CHAT_LIST = "submodules/ChatListUI/Sources/ChatListControllerNode.swift"
 CHAT_LIST_NOTICE = "submodules/TelegramUI/Components/ChatList/ChatListHeaderNoticeComponent/Sources/ChatListNoticeItem.swift"
@@ -158,10 +171,38 @@ UPDATE_INFO = "submodules/TelegramUpdateUI/Sources/UpdateInfoController.swift"
 # recorder of round videos, GIF files.
 VIDEO_PRESETS_LEGACY = "submodules/LegacyComponents/Sources/TGMediaVideoConverter.m"
 VIDEO_PRESETS = "submodules/TelegramUI/Components/MediaEditor/Sources/MediaEditorValues.swift"
-ROUND_VIDEO_RECORDER = "submodules/Camera/Sources/CameraOutput.swift"
+ROUND_VIDEO_RECORDER = "submodules/Camera/CameraLegacy/Sources/CameraOutput.swift"
+ROUND_VIDEO_RECORDER_NEO = "submodules/Camera/CameraNeo/Sources/VideoRecorder.swift"
 GIF_CONVERTER = "submodules/LegacyComponents/Sources/TGGifConverter.m"
 # The quality an edited video is sent at when none was chosen.
 VIDEO_FETCH = "submodules/TelegramUI/Components/Resources/FetchVideoMediaResource/Sources/FetchVideoMediaResource.swift"
+# Night without bubbles: its accent, and the colour of the send button.
+MAKE_THEME = "submodules/TelegramPresentationData/Sources/MakePresentationTheme.swift"
+SEND_BUTTON = "submodules/TelegramUI/Components/Chat/ChatTextInputActionButtonsNode/Sources/ChatTextInputActionButtonsNode.swift"
+# The media editors' send and done buttons, Telegram's blue in any theme.
+CHAT_EDITOR_CONTROLS = "submodules/TelegramUI/Components/ChatMediaEditorScreen/Sources/ChatMediaEditorBottomControlsComponent.swift"
+CHAT_EDITOR_COVER = "submodules/TelegramUI/Components/ChatMediaEditorScreen/Sources/ChatMediaEditorCover.swift"
+MEDIA_EDITOR = "submodules/TelegramUI/Components/MediaEditorScreen/Sources/MediaEditorScreen.swift"
+MEDIA_TOOLS = "submodules/TelegramUI/Components/MediaEditorScreen/Sources/MediaToolsScreen.swift"
+DRAWING_SCREEN = "submodules/DrawingUI/Sources/DrawingScreen.swift"
+PICKER_TOOLBAR = "submodules/MediaPickerUI/Sources/MediaPickerPhotoToolbarView.swift"
+# (file, how many times upstream writes the blue).
+MEDIA_EDITOR_ACCENTS = ((CHAT_EDITOR_CONTROLS, 1), (CHAT_EDITOR_COVER, 1), (MEDIA_EDITOR, 4), (MEDIA_TOOLS, 1),
+                        (DRAWING_SCREEN, 2), (PICKER_TOOLBAR, 1))
+# Sections of 13.2 that Pluma's server does not serve and that a client without
+# the server's app config key does not show (wallet_available, news_feed_enabled,
+# agent_bot_ids):
+# (file, the upstream text that decides).
+WALLET_CONFIGURATION = "submodules/WalletContext/Sources/WalletContext.swift"
+NEWS_CONFIGURATION = "submodules/TelegramUI/Components/News/NewsFeedSupport/Sources/NewsFeedConfiguration.swift"
+AGENT_CONFIGURATION = "submodules/AccountContext/Sources/AgentChat.swift"
+OFF_BY_SERVER = (
+    (WALLET_CONFIGURATION, "    public static var defaultValue: WalletConfiguration {\n        return WalletConfiguration(\n            isAvailable: false,\n"),
+    (WALLET_CONFIGURATION, 'let isAvailable = appConfiguration.data?["wallet_available"] as? Bool ?? self.defaultValue.isAvailable\n'),
+    (SETTINGS_ITEMS, "        if WalletConfiguration.with(appConfiguration: context.currentAppConfiguration.with { $0 }).isAvailable {\n"),
+    (NEWS_CONFIGURATION, "    return isDevAccount(appConfiguration: appConfiguration) || newsFeedSwitch(appConfiguration: appConfiguration) == true\n"),
+    (AGENT_CONFIGURATION, 'guard peerId.namespace == Namespaces.Peer.CloudUser, let data = appConfiguration.data, let botIds = data["agent_bot_ids"] as? [Any] else {\n'),
+)
 # tgcalls, a submodule of upstream's at the commit the checkout pins: the
 # engine of 1:1 calls and the camera of every call.
 TGCALLS = "submodules/TgVoipWebrtc/tgcalls"
@@ -212,6 +253,8 @@ BRAND_REPLACED = {
     # copied from brand/pluma-devices.tgs: the plane on its lid and in its QR
     # code is the mark.
     "Telegram/Telegram-iOS/Resources/Devices.tgs": "9abb2d5dbd4ac7d2a83722b4871b6be03f76605d1594bcb5b17204ec8e4285fe",
+    # The badge of a message or block the app cannot show.
+    "submodules/TelegramUI/Images.xcassets/Chat/Message/UnsupportedIcon.imageset/logo.pdf": "3fa116c1bf4e112e72450eef0430d7d105c35424cc867406348a006fc099faa5",
     # The textures of the intro's first page, the sphere and the plane around
     # it: transparent, as the page's mark is a view of its own (brand/render.sh).
     # The intro fills the sphere's with its background colour, so the sphere
@@ -267,20 +310,19 @@ CODE_NAMES = (
     # The album the app saves photos and videos to.
     ("submodules/TelegramUI/Sources/StoreDownloadedMedia.swift",
      '        let albumName = "{name}"\n', 1),
-    # The name in the system call screen (iOS 13; later ones show the app's).
-    ("submodules/TelegramCallsUI/Sources/CallKitIntegration.swift",
-     'CXProviderConfiguration(localizedName: "{name}")', 1),
     # The widget of a passcode-locked app.
     ("submodules/WidgetItems/Sources/WidgetItems.swift",
      'generalLockedText: "Open {name} and enter passcode to edit widget.",', 1),
     ("Telegram/SiriIntents/IntentHandler.swift",
      'NSLocalizedDescriptionKey: "Open {name} and enter passcode to edit widget."', 1),
     # The service account 777000 until the server's data arrives.
-    ("submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift",
+    ("submodules/TelegramCore/Sources/State/Sync/UpdateInterpreter+Messages.swift",
      'firstName: "{name} Notifications"', 1),
     # The e-mail about a login code that does not arrive.
     ("submodules/AuthorizationUI/Sources/AuthorizationSequenceController.swift",
      'emailBody.append("{name}: \\(appVersion)\\n")', 1),
+    # Crash Logs, which the settings search finds: sharing a log needs an account.
+    (CRASH_REPORTS, '"Sign in to a {name} account to share this log."', 1),
     # The label of the app's entry in a contact of the address book, written
     # and read back: Telegram installed on the same phone writes its own.
     ("submodules/AccountContext/Sources/DeviceContactData.swift",
@@ -315,6 +357,7 @@ SCHEME_LINKS = (
     ("submodules/TelegramUI/Components/ShareExtensionContext/Sources/ShareExtensionContext.swift",
      'self.openUrl("{scheme}://shareStory?session=\\(sessionId)")', 1),
 )
+SCHEME_TEXT = '"SocksProxySetup.QrCode.TgLink" = "{scheme}:// link";'
 # Links the app reads: proxies, sticker sets, wallpapers and ads given as
 # links take the app's own scheme as well as tg:// (OpenUrl.swift does so for
 # every link already).
@@ -356,6 +399,132 @@ CLIENT_TEXTS = (
      '"AuthSessions.AddDevice.ScanInstallInfo" = "Go to [pluma.chat](desktop) or '
      '[web.pluma.chat](web) to get the QR code";', 1),
 )
+# tg:// literals and Telegram's hosts that stay in the app's code: (file, how many
+# times). The tg:// ones are not links the app makes for people (those are in
+# SCHEME_LINKS) but what it reads: prefixes of messages, the fallback markers
+# of custom emoji, mentions and dates, and Telegram's privacy settings, which
+# the login code screen opens in the Telegram app (patch_login_codes); the hosts
+# are the lists of link parsers, the terms, the privacy policy and the FAQ
+# (README, Links). A new one means a new place to decide about, so verify stops
+# on it.
+KEPT_TG_LINKS = {
+    "Telegram/WatchApp/tgwatch Watch App/Auth/QrLoginView.swift": 1,
+    "submodules/AuthorizationUI/Sources/AuthorizationSequenceCodeEntryControllerNode.swift": 1,
+    "submodules/BrowserUI/Sources/BrowserWebContent.swift": 3,
+    "submodules/ChatListUI/Sources/ChatListController.swift": 1,
+    "submodules/Pasteboard/Sources/Pasteboard.swift": 1,
+    "submodules/PremiumUI/Sources/PremiumIntroScreen.swift": 1,
+    "submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift": 1,
+    "submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift": 1,
+    "submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoScreenSettingsActions.swift": 1,
+    "submodules/TelegramUI/Components/RichTextEditor/Sources/RichTextEditorCore/Serialization/RTFImport.swift": 1,
+    "submodules/TelegramUI/Components/RichTextEditor/Sources/RichTextEditorUIKit/Canvas/RTFConversion.swift": 1,
+    "submodules/TelegramUI/Sources/ChatPinnedMessageTitlePanelNode.swift": 2,
+    "submodules/TextFormat/Sources/CustomEmojiMarkdownMarker.swift": 2,
+    "submodules/TextFormat/Sources/MentionDateMarkers.swift": 4,
+    "submodules/UrlWhitelist/Sources/UrlWhitelist.swift": 2,
+}
+KEPT_TELEGRAM_SITES = {
+    "Telegram/NotificationService/Sources/NotificationRecipientAccount.swift": 1,
+    "Telegram/NotificationService/Sources/NotificationService.swift": 1,
+    "Telegram/SiriIntents/MessageSearchScope.swift": 1,
+    "Telegram/Watch/Extension/TGMessageViewController.m": 1,
+    "Telegram/Watch/Extension/TGNeoConversationController.m": 1,
+    "Telegram/WatchApp/Packages/TDShim/Sources/TDShim/Generated/API/TDLibApi.swift": 4,
+    "Telegram/WatchApp/Packages/TDShim/Sources/TDShim/Generated/Models/GetOption.swift": 1,
+    "Telegram/WatchApp/Packages/TDShim/Sources/TDShim/Generated/Models/PhotoSize.swift": 1,
+    "Telegram/WatchApp/Packages/TDShim/Sources/TDShim/Generated/Models/SetOption.swift": 1,
+    "Telegram/WatchApp/Packages/TDShim/Sources/TDShim/Generated/Models/UserType.swift": 2,
+    "Telegram/WatchApp/Packages/TDShim/Sources/TDShim/Transport/TDLibClientManager.swift": 2,
+    "submodules/BotPaymentsUI/Sources/BotCheckoutWebInteractionControllerNode.swift": 1,
+    "submodules/BrowserUI/Sources/BrowserAddressListComponent.swift": 2,
+    "submodules/ChatListUI/Sources/ChatListSearchListPaneNode.swift": 2,
+    "submodules/ContactListUI/Sources/ContactsController.swift": 1,
+    "submodules/InstantPageCache/Sources/CachedInternalInstantPages.swift": 4,
+    "submodules/LanguageLinkPreviewUI/Sources/LanguageLinkPreviewContentNode.swift": 1,
+    "submodules/MtProtoKit/PublicHeaders/MtProtoKit/MTQuickAck.h": 1,
+    "submodules/MtProtoKit/Sources/MTDNS.m": 1,
+    "submodules/MtProtoKit/Sources/MTDiscoverConnectionSignals.m": 1,
+    "submodules/PeerAvatarGalleryUI/Sources/AvatarGalleryController.swift": 1,
+    "submodules/PeerInfoUI/Sources/SecretChatKeyControllerNode.swift": 2,
+    "submodules/SettingsUI/Sources/Data and Storage/WebBrowserSettingsController.swift": 1,
+    "submodules/SettingsUI/Sources/DeleteAccountOptionsController.swift": 2,
+    "submodules/SettingsUI/Sources/LogoutOptionsController.swift": 1,
+    "submodules/SettingsUI/Sources/Privacy and Security/PrivacyAndSecurityController.swift": 1,
+    "submodules/SettingsUI/Sources/Privacy and Security/Recent Sessions/RecentSessionsController.swift": 1,
+    "submodules/TelegramAudio/Sources/ManagedAudioSession.swift": 1,
+    "submodules/TelegramCore/Sources/PendingMessages/OutgoingReplyPeer.swift": 1,
+    "submodules/TelegramCore/Sources/State/Sync/SyncSequencing.swift": 1,
+    "submodules/TelegramPermissionsUI/Sources/PermissionController.swift": 1,
+    "submodules/TelegramUI/Components/Chat/ChatMessageRichDataBubbleContentNode/Sources/ChatMessageRichDataBubbleContentNode.swift": 1,
+    "submodules/TelegramUI/Components/GroupStickerPackSetupController/Sources/GroupStickerPackSetupController.swift": 1,
+    "submodules/TelegramUI/Components/HorizontalTabsComponent/Sources/HorizontalTabsComponent.swift": 1,
+    "submodules/TelegramUI/Components/MessageWidget/WidgetRuntime/Sources/Host/Links.cpp": 2,
+    "submodules/TelegramUI/Components/Settings/PasskeysScreen/Sources/PasskeysScreen.swift": 1,
+    "submodules/TelegramUI/Sources/Chat/ChatControllerOpenLinkContextMenu.swift": 2,
+    "submodules/TelegramUI/Sources/Chat/ChatControllerOpenPeer.swift": 1,
+    "submodules/TelegramUI/Sources/ChatInterfaceTitlePanelNodes.swift": 1,
+    "submodules/TelegramUI/Sources/OpenUrl.swift": 2,
+    "submodules/TextFormat/Sources/GenerateTextEntities.swift": 4,
+    "submodules/TgVoipWebrtc/Sources/OngoingCallThreadLocalContext.mm": 1,
+    "submodules/UrlHandling/Sources/UrlHandling.swift": 5,
+    "submodules/UrlWhitelist/Sources/UrlWhitelist.swift": 4,
+    "submodules/WalletContext/Sources/WalletOperations.swift": 1,
+    "submodules/WalletContext/Sources/WalletTonConnect.swift": 1,
+}
+# String literals that still name Telegram in the app's code, after CODE_NAMES:
+# identifiers, the partner names other apps ask for, debug text, and texts
+# behind what the server does not offer. A new one is a new place to decide
+# about, as with the links above.
+KEPT_TELEGRAM_NAMES = {
+    "Telegram/WatchApp/Packages/TDShim/Sources/TDShim/Generated/Models/InternalLinkType.swift": 1,
+    "Telegram/WatchApp/Packages/TDShim/Sources/TDShim/Generated/Models/SettingsSection.swift": 4,
+    "Telegram/WatchApp/tgwatch Watch App/Auth/QrLoginView.swift": 1,
+    "Telegram/WatchApp/tgwatch Watch App/AuthStateMapping.swift": 1,
+    "Telegram/WatchApp/tgwatch Watch App/Messages/ServiceLineFormatter.swift": 1,
+    "submodules/BrowserUI/Sources/BrowserAddressListComponent.swift": 3,
+    "submodules/BrowserUI/Sources/BrowserWebContent.swift": 1,
+    "submodules/ChatListUI/Sources/ChatListSearchListPaneNode.swift": 3,
+    "submodules/DebugSettingsUI/Sources/CrashReportsController.swift": 2,
+    "submodules/DebugSettingsUI/Sources/DebugController.swift": 11,
+    "submodules/LegacyComponents/Sources/TGLocalization.m": 2,
+    "submodules/MTProtoRustEngine/Sources/MTProtoRustEngine/RustNetworkIdentity.swift": 2,
+    "submodules/OpenInExternalAppUI/Sources/OpenInOptions.swift": 4,
+    "submodules/PaymentMethodUI/Sources/AddPaymentMethodSheetScreen.swift": 1,
+    "submodules/PaymentMethodUI/Sources/PaymentMethodListScreen.swift": 1,
+    "submodules/QrCodeUI/Sources/QrCodeScanScreen.swift": 1,
+    "submodules/SettingsUI/Sources/Privacy and Security/Recent Sessions/ItemListRecentSessionItem.swift": 1,
+    "submodules/SettingsUI/Sources/Themes/EditThemeController.swift": 1,
+    "submodules/ShareController/Sources/ShareController.swift": 1,
+    "submodules/Stripe/Sources/STPPaymentConfiguration.m": 1,
+    "submodules/TelegramCore/Sources/Utils/Log.swift": 2,
+    "submodules/TelegramUI/Components/Chat/ChatMessageWidgetBubbleContentNode/Sources/ChatMessageWidgetBubbleContentNode.swift": 1,
+    "submodules/TelegramUI/Components/MessageWidget/MessageWidgetStress/Sources/MessageWidgetStressRunner.swift": 1,
+    "submodules/TelegramUI/Components/PeerInfo/PeerCopyProtectionInfoScreen/Sources/PeerCopyProtectionInfoScreen.swift": 1,
+    "submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoSettingsItems.swift": 1,
+    "submodules/TelegramUI/Components/RichTextEditor/Sources/RichTextEditorUIKit/InputBackend/InputDec/Upstream/IDUpstreamInputBackend+Responder.swift": 1,
+    "submodules/TelegramUI/Components/RichTextEditor/Sources/RichTextEditorUIKit/InputBackend/InputDec/Upstream/IDUpstreamInputBackend+Unwitnessed.swift": 7,
+    "submodules/TelegramUI/Components/RichTextEditor/Sources/RichTextEditorUIKit/InputBackend/InputDec/Upstream/IDUpstreamInputBackend.swift": 2,
+    "submodules/TelegramUI/Components/RichTextEditor/Sources/RichTextEditorUIKit/InputBackend/LegacyRichTextInputBackend.swift": 1,
+    "submodules/TelegramUI/Components/ShareWithPeersScreen/Sources/CategoryListItemComponent.swift": 1,
+    "submodules/TelegramUI/Components/Stars/StarsTransactionsScreen/Sources/StarsTransactionsScreen.swift": 1,
+    "submodules/TelegramUI/Components/StorageUsageScreen/Sources/StorageUsageScreen.swift": 1,
+    "submodules/TelegramUI/Sources/Chat/ChatControllerOpenPhoneContextMenu.swift": 1,
+    "submodules/TelegramUI/Sources/Chat/ChatMessageActionOptions.swift": 1,
+    "submodules/TelegramUI/Sources/ContextMenuMorphDebugController.swift": 1,
+    # The SOFTWARE attribute of the STUN messages tgcalls sends to the TURN
+    # servers of a call ("Telegram "): never shown, and the TURN server is
+    # Pluma's own (13.2).
+    "submodules/TgVoipWebrtc/tgcalls/tgcalls/TurnCustomizerImpl.cpp": 1,
+    "submodules/WalletContext/Sources/WalletTonConnect.swift": 1,
+    "submodules/WalletContext/Sources/WalletToncenter.swift": 2,
+}
+TG_LITERAL = re.compile(rb'"tg://')
+TELEGRAM_NAME_LITERAL = re.compile(rb'"[^"\n]*(?<![0-9A-Za-z_])Telegram(?![0-9A-Za-z_])[^"\n]*"')
+TELEGRAM_SITE = re.compile(rb'(?:"|://|\.)(?:telegram\.(?:org|me|dog)|telegra\.ph|telesco\.pe)(?=[/"\\?#])')
+# Entries of the built-in strings that name one of Telegram's sites.
+STRINGS_TELEGRAM_SITES = 33
+
 # Telegram's client sites, which none of those files may open after the edits.
 CLIENT_SITES = re.compile(r"(?:get)?desktop\.telegram\.org|web\.telegram\.org")
 
@@ -368,6 +537,7 @@ CLIENT_SITES = re.compile(r"(?:get)?desktop\.telegram\.org|web\.telegram\.org")
 LINK_HOST = "pluma.chat"
 OPEN_URL = "submodules/TelegramUI/Sources/OpenUrl.swift"
 CHAT_FOLDERS = "submodules/TelegramCore/Sources/TelegramEngine/Peers/ChatFolders.swift"
+WEB_PROXY_LINK = "submodules/TelegramCore/Sources/Settings/ProxySettings.swift"
 _SETTINGS_UI = "submodules/SettingsUI/Sources/"
 _UI_COMPONENTS = "submodules/TelegramUI/Components/"
 _PEER_INFO = _UI_COMPONENTS + "PeerInfo/PeerInfoScreen/Sources/"
@@ -409,6 +579,9 @@ LINK_HOSTS = (
     (_UI_COMPONENTS + "GroupStickerPackSetupController/Sources/GroupStickerPackSetupController.swift",
      'url.host == "t.me" || url.host == "telegram.me" {',
      'url.host == "t.me" || url.host == "telegram.me" || url.host == "pluma.chat" {', 1),
+    # The link of a web proxy, which the app also makes with pluma.chat.
+    (WEB_PROXY_LINK, '&& components.host?.lowercased() == "t.me"\n',
+     '&& (components.host?.lowercased() == "t.me" || components.host?.lowercased() == "pluma.chat")\n', 1),
     # The slug of a shared chat folder's link (the server makes it).
     (CHAT_FOLDERS,
      '            slug = String(slug[slug.index(slug.startIndex, offsetBy: "https://t.me/addlist/".count)...])\n'
@@ -497,6 +670,15 @@ PLUMA_SITE = (
 # set's name: (file, text with {host}, how many times). {host} is t.me
 # upstream.
 SHARE_LINKS = (
+    # The private link of a message in a channel's direct messages; the QR
+    # Studio's code of a profile, a phone number or a channel; a web proxy.
+    (_UI_COMPONENTS + "Chat/ChatMessageItemCommon/Sources/ChatMessageCopyLink.swift",
+     'return "https://{host}/c/\\(messageId.peerId.id._internalGetInt64Value())/\\(messageId.id)"', 1),
+    (_UI_COMPONENTS + "QrStudioScreen/Sources/QrStudioScreen.swift", 'link = "https://{host}/\\(addressName)"', 1),
+    (_UI_COMPONENTS + "QrStudioScreen/Sources/QrStudioScreen.swift", 'link = "https://{host}/+\\(user.phone ?? "")"', 1),
+    (_UI_COMPONENTS + "QrStudioScreen/Sources/QrStudioScreen.swift",
+     'link = "https://{host}/c/\\(peer.id.id._internalGetInt64Value())"', 1),
+    (WEB_PROXY_LINK, 'components.host = "{host}"\n    components.path = "/webproxy"\n', 1),
     # Profiles, channels and groups: share, copy, QR codes, the admin log.
     (_SETTINGS_UI + "UsernameSetupController.swift", 'subject: .url("https://{host}/\\(currentAddressName)")', 1),
     (_PEER_INFO + "PeerInfoScreen.swift", 'strongSelf.openShareLink(url: "https://{host}/\\(username)")', 1),
@@ -591,6 +773,19 @@ SHARE_LINKS = (
 # times). Every other t.me literal of the app's code (TME_LITERAL) is one of
 # SHARE_LINKS, so a new one upstream stops the patch.
 SHARE_KEEP = (
+    # Telegram's own: the wallet, which the server does not offer, and the
+    # link it reads for a transfer; the hosts of a message widget, which the
+    # server does not make; a code generated to warm up the QR code generator,
+    # shown to nobody; the code shown before the real one is ready.
+    ("submodules/InstantPageUI/Sources/InstantPageTextItem.swift", '"https://t.me/sendgrams"', 1),
+    (OPEN_URL, 'handleInternalUrl("https://t.me/sendgrams"', 1),
+    (URL_HANDLING, 'URLComponents(string: "https://t.me/sendgrams")!', 1),
+    ("submodules/WalletContext/Sources/WalletTonConnect.swift", 'host == "t.me"', 1),
+    (_UI_COMPONENTS + "Wallet/WalletCollectibleScreen/Sources/WalletCollectibleScreen.swift", '"https://t.me/nft/\\(slug)"', 1),
+    (_UI_COMPONENTS + "MessageWidget/WidgetRuntime/Sources/Host/Links.cpp", '{"t.me", "telegram.me", "telegram.dog"}', 1),
+    (_UI_COMPONENTS + "MessageWidget/WidgetRuntime/Sources/Host/Links.cpp", 'expected https://t.me/', 1),
+    ("submodules/QrCode/Sources/QrCode.swift", 'qrCode(string: "https://t.me/telegram", ', 1),
+    (_UI_COMPONENTS + "QrStudioScreen/Sources/QrStudioScreen.swift", 'return "https://t.me/contact/" + String(', 1),
     # The host lists above, beside pluma.chat, and the parsers' own forms.
     (URL_HANDLING, '    "t.me", "telegram.dog",\n', 1),
     (URL_HANDLING, '    "t.me/iv?",\n', 1),
@@ -610,6 +805,7 @@ SHARE_KEEP = (
     (_UI_COMPONENTS + "GroupStickerPackSetupController/Sources/GroupStickerPackSetupController.swift",
      'url.host == "t.me"', 1),
     (CHAT_FOLDERS, '"https://t.me/addlist/"', 2),
+    (WEB_PROXY_LINK, '&& (components.host?.lowercased() == "t.me" || ', 1),
     # Links made only to be opened in the app, which still takes t.me.
     (OPEN_URL, 'return appendQueryItems(to: "https://t.me\\(path)", items: queryItems)', 1),
     ("submodules/WebUI/Sources/WebAppUtils.swift", 'let urlString = "https://t.me\\(pathFull)"', 1),
@@ -671,7 +867,6 @@ STRINGS_LINKS = (
     ("Business.Links.SimpleLinkInfoUsernamePhone", 2),
     ("Business.Links.SimpleLinkInfoUsername", 1),
     ("Business.Links.SimpleLinkInfoPhone", 1),
-    ("CreateBot.UsernameStatus.Link", 1),
     # The switch of a proxy's QR code between the app's scheme and an https link.
     ("SocksProxySetup.QrCode.TMeLink", 1),
 )
@@ -750,30 +945,29 @@ SIRI_EXTENSION_INTENTS = ("            <key>IntentsSupported</key>\n"
 # configuration), which take no phrases.
 SIRI_INTENTS = ("INSendMessageIntent", "INStartAudioCallIntent", "INSearchCallHistoryIntent",
                 "INSearchForMessagesIntent", "INSetMessageAttributeIntent")
-_SIRI_ENGLISH = "eb529c93435643cd60ca9bcdb6dc23069bd7c59fb024e884dec78d348807f595"
 SIRI_UPSTREAM = {
-    "ar": "7c27690db9289004832e281f1033f590a2df67958258fdb9c16661a403bd70ba",
-    "be": _SIRI_ENGLISH,
-    "ca": _SIRI_ENGLISH,
-    "de": "4d86522e9f9bd761d1d894ad1794a98620583dce0ef4238f0efed938866d2e0d",
-    "en": _SIRI_ENGLISH,
-    "es": "9c1bb458ee1ab0b323004a987d8baa7a200212bf17222e3c16c4ed1a0d7ee3ec",
-    "fa": _SIRI_ENGLISH,
-    "fr": _SIRI_ENGLISH,
-    "id": _SIRI_ENGLISH,
-    "it": "c2de0830034196c81ae8aabcd217d8d21f04b7afae272dd1b7a39776c7158571",
-    "ko": "a3c3623d6a298e670f707ad36ab27f1105b3bd1fccff7047d5d3650e349c1718",
-    "ms": _SIRI_ENGLISH,
-    "nl": "dc20304adee4e138d0ee7ff25e11c5e9693817dbef60b82bd63c25778d387647",
-    "pl": _SIRI_ENGLISH,
-    "pt": "e8110641eab0da3a89e3c8ce245b9c0d1b68bbf8c2c3cbfb9643b534c63ccfc9",
-    "ru": "58da17b3c6370489ca498af4765a221592b8ccb6d1bcb1539739138b746c0f90",
-    "tr": _SIRI_ENGLISH,
-    "uk": _SIRI_ENGLISH,
-    "uz": _SIRI_ENGLISH,
+    "Base": "31cf9077d2d369d92e73bbf8b1bbebc3f2b6f0abaa059313a6324b390110b673",
+    "ar": "822f6056cb74b2b7206c08787a6e6ddf6665712fe5825be113a760df3d119ef1",
+    "be": "9d3469922a0210ba6cf629e8786af757dfd3d9dc2609a878df1a0968b3b9f9d9",
+    "ca": "93dd7e49318b4436040cb1a2a49b8a0255eb6aee7da9911ec60dd63e1060cfc0",
+    "de": "a0390d21e8e0294b1a13015495115dd69db2ce8c10f4e020040d9e650aa00b1a",
+    "en": "31cf9077d2d369d92e73bbf8b1bbebc3f2b6f0abaa059313a6324b390110b673",
+    "es": "8e45479298b1652693fba9ba3e5ab61abf056b9edbfad88f7066cdfdc10bb4fa",
+    "fa": "9a871ac18b17081ada1386b1b8374fd2699cfff33510f6ad39cf1229bd020737",
+    "fr": "61f8002431f4a4a1adfc38bdf2d089a3c3f008d331bf159bf8b2c37540fa6b35",
+    "id": "5a9c092ac8e28a1a1874af9a901958bedcdc5cd4bd6b0cdb38a4627e37055fae",
+    "it": "877e2c8efe8a9af03295a3adac267459994f31b33922f2d929ddaaf98fbe398f",
+    "ko": "71ca8d0cac218bb9f8f55d88db0ddf3f89cc5d5981a645e7af99b1ca88f67ed8",
+    "ms": "eb9b34066d8984444303a31161096a71dead6d87d08016b00cb115a5da46b4d9",
+    "nl": "3855266144d5535dfc5f3e50550af656fa1ac4b8bda0424aadd5606e1f750720",
+    "pl": "2c63f0616b8daecc3e641ac1f63ac8fb298e0e6671247dbc83f7dcbd7c9301c2",
+    "pt": "d9dcd4acb1320852fffca437e849fa6cfe56217d91c302b38b8623d9919012d8",
+    "ru": "8d139f7dd9aa1701e9abf37c791d4aa6f68ffe1488c0bf3be5963a50a49eb6e9",
+    "tr": "bafb5e672f1376dbb0ea5e613cd3219218cc58925507a2868e1e16331e37ee9d",
+    "uk": "fb4ce7af212dab518d143b4d9eccfc453c78fb485f3a7106844bd2e4602dfb62",
+    "uz": "f685d6c0110c9fadae04ca07ccccf2cd1c1f29c802b1051115571cb351b784a8",
 }
-# Where upstream has a phrase of its own language (ar, de, es, it, ko, nl, pt,
-# ru), the message phrase is upstream's with the app's name.
+# The phrases are Pluma's own, in each language: upstream's name Telegram.
 SIRI_PHRASES = {
     "ar": ("أرسل رسالة لخالد عبر {name} وأخبره أن هديته وصلت إلى المنزل",
            "اتصل بخالد عبر {name}",
@@ -871,6 +1065,8 @@ SIRI_PHRASES = {
            "{name}da Alidan kelgan xabarlarni qidir",
            "{name}da Alidan kelgan xabarlarni o‘qilgan deb belgila"),
 }
+# Upstream's fallback for a language without its own vocabulary (13.2).
+SIRI_PHRASES["Base"] = SIRI_PHRASES["en"]
 
 # Everything the patch reads, edits or checks: the check job fetches only
 # these (ci/fetch-upstream.sh sparse).
@@ -885,12 +1081,13 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + tuple(sorted({rel for rel, _, _, _ in LINK_HOSTS} | {rel for rel, _, _ in SHARE_LINKS + SHARE_KEEP}))
                   + (DAY_THEME, DARK_THEME, PRESENTATION_DATA, THEME_SETTINGS, LEGACY_COLORS, AVATAR_NODE)
                   + (PEER_NAME_COLORS, NOTIFICATION_AVATARS, WIDGET_AVATARS, LIVE_STREAM_AVATARS)
-                  + (SETTINGS_ITEMS, SETTINGS_SEARCH)
+                  + (SETTINGS_ITEMS, SETTINGS_SEARCH, CRASH_REPORTS, WALLET_CONFIGURATION, NEWS_CONFIGURATION, AGENT_CONFIGURATION)
                   + (CHAT_LIST, CHAT_LIST_NOTICE, CHAT_LIST_PANELS, PROFILE_ITEMS, CONTEXT_MENUS)
                   + (CHAT_STATE, CHAT_CONTROLLER, TAG_CONTEXT_MENU, MESSAGE_CONTEXT_MENU, TAG_PANEL, TITLE_PANELS)
                   + (MESSAGE_REACTIONS, UPDATE_INFO)
                   + (MEDIA_FILE, SEARCH_STICKERS, ENTITY_KEYBOARD_INPUT, ENTITY_KEYBOARD_SIGNALS, STICKER_PACK_SCREEN)
-                  + (VIDEO_PRESETS_LEGACY, VIDEO_PRESETS, ROUND_VIDEO_RECORDER, GIF_CONVERTER, VIDEO_FETCH)
+                  + (VIDEO_PRESETS_LEGACY, VIDEO_PRESETS, ROUND_VIDEO_RECORDER, ROUND_VIDEO_RECORDER_NEO, GIF_CONVERTER, VIDEO_FETCH)
+                  + tuple(rel for rel, _ in MEDIA_EDITOR_ACCENTS) + (MAKE_THEME, SEND_BUTTON)
                   + (ACCOUNT_MANAGER,)
                   + (FONT, CAMERA_ASSETS) + tuple(CAMERA_FONTS) + tuple(SIRI_VOCABULARY.format(lang) for lang in SIRI_PHRASES))
 # The same inside upstream's submodules: (submodule, its repository, the
@@ -998,6 +1195,12 @@ def objc_key(pem, indent):
 
 
 # --- edits -------------------------------------------------------------------
+
+
+def is_unit_test(rel):
+    """Whether a source file belongs to the unit tests, none of which are in
+    the app: the directories Tests, RichTextEditorCoreTests, SiriIntentsTests."""
+    return any(part.endswith("Tests") for part in rel.split("/")[:-1])
 
 
 class Tree:
@@ -1114,8 +1317,9 @@ class Tree:
             if not base.is_dir():
                 raise PatchError(f"{d}: missing; not a full checkout of the network code")
             for p in sorted(base.rglob("*")):
-                if p.is_file() and p.suffix in (".swift", ".m", ".h", ".mm", ".c", ".cpp"):
-                    yield p.relative_to(self.root).as_posix()
+                rel = p.relative_to(self.root).as_posix()
+                if p.is_file() and p.suffix in (".swift", ".m", ".h", ".mm", ".c", ".cpp") and not is_unit_test(rel):
+                    yield rel
 
 
 # --- configuration -----------------------------------------------------------
@@ -1205,8 +1409,7 @@ class Config:
             "api_id": str(self.api_id),
             "api_hash": self.api_hash,
             "team_id": self.team_id,
-            # No App Center crash reports, no App Store or in-app purchases.
-            "app_center_id": "0",
+            # No App Store or in-app purchases.
             # A public build, as the App Store's: no internal debug features,
             # and among them the reflector benchmark against Telegram's
             # servers (TelegramUI AppDelegate).
@@ -1298,28 +1501,17 @@ WARMUP_OLD = src(" " * 12, """
     }
 """)
 
-CALL_REFLECTOR_OLD = src(" " * 16, """
-    var unfilteredConnections: [CallSessionConnection]
-    unfilteredConnections = [connections.primary] + connections.alternatives
+# Upstream's list of a call's connections, with no reflector of Telegram's
+# added (12.9.2 added one for the 12.0.0 protocol; the release dropped it).
+CALL_CONNECTIONS = ("                let unfilteredConnections: [CallSessionConnection]\n"
+                    "                unfilteredConnections = [connections.primary] + connections.alternatives\n"
+                    "\n"
+                    "                var reflectorIdList: [Int64] = []\n")
 
-    if version == "12.0.0" {
-        for connection in unfilteredConnections {
-            if case let .reflector(reflector) = connection {
-                unfilteredConnections.append(.reflector(CallSessionConnection.Reflector(
-                    id: 123456,
-                    ip: "91.108.9.38",
-                    ipv6: "",
-                    isTcp: true,
-                    port: 595,
-                    peerTag: reflector.peerTag
-                )))
-            }
-        }
-    }
-""")
-
-DNS_OLD = ("    return [[self resolveHostname:hostname] timeout:10.0 onQueue:[MTQueue concurrentDefaultQueue] "
-           "orSignal:[self resolveHostnameNative:hostname port:port]];\n")
+# How a proxy's host name resolves: the system resolver, with the host name
+# itself after 10 s; the release dropped the query to Google's DNS-over-HTTPS.
+DNS_NATIVE = ("    return [[[self resolveHostnameNative:hostname port:port] timeout:10.0 onQueue:[MTQueue concurrentDefaultQueue] "
+              "orSignal:[MTSignal single:hostname]] take:1];\n")
 
 BACKUP_HEAD = ("+ (MTSignal * _Nonnull)fetchBackupIps:(bool)isTestingEnvironment currentContext:(MTContext * _Nonnull)currentContext "
                "additionalSource:(MTSignal * _Nullable)additionalSource phoneNumber:(NSString * _Nullable)phoneNumber "
@@ -1377,7 +1569,7 @@ def patch(tree, c):
         tree.expect(BUILD_CONFIGURATION, f"'{suffix}': '{name}'")
     tree.expect(APP_BUILD, EXTENSIONS)
     tree.expect(APP_BUILD, '    name = "disableProvisioningProfiles",\n')
-    tree.expect(APP_BUILD, '        ":disableProvisioningProfilesSetting": None,\n', count=10)
+    tree.expect(APP_BUILD, '        ":disableProvisioningProfilesSetting": None,\n', count=9)
     tree.expect(APP_BUILD, "        <string>group.{telegram_bundle_id}</string>\n")
 
     # MtProtoKit: one datacenter, the Pluma server, for the production and
@@ -1416,10 +1608,9 @@ def patch(tree, c):
                  "                // pluma: no backup addresses; Telegram's DNS and CloudKit records point at Telegram.\n")
     tree.replace_body(BACKUP, BACKUP_HEAD, "\n}\n\n@end\n", BACKUP_BODY,
                       must_contain=("fetchBackupIpsResolveGoogle:", "fetchConfigFromAddress:"))
-    # Proxy host names resolve through the system, not Google's DNS-over-HTTPS.
-    tree.replace(DNS, DNS_OLD,
-                 "    // pluma: the system resolver only, no DNS-over-HTTPS at Google.\n"
-                 "    return [self resolveHostnameNative:hostname port:port];\n")
+    # Proxy host names resolve through the system, not Google's DNS-over-HTTPS:
+    # upstream's code already, and it must stay so.
+    tree.expect(DNS, DNS_NATIVE)
 
     # MtProtoKit: the server key replaces Telegram's production and test
     # keys (the key is chosen by the fingerprint the server announces).
@@ -1444,12 +1635,15 @@ def patch(tree, c):
                        f"    NSString *keyString = {objc_key(c.rsa_pem, '')};\n",
                        must_contain=(TELEGRAM_KEY_LINES[2],))
 
-    # Calls: no extra TCP reflector of Telegram's for the 12.0.0 protocol.
-    tree.replace_lines(CALLS, CALL_REFLECTOR_OLD,
-                 src(" " * 16, """
-                     // pluma: the reflectors are the server's; no extra one of Telegram's.
-                     let unfilteredConnections: [CallSessionConnection] = [connections.primary] + connections.alternatives
-                 """))
+    tree.expect(NETWORK_ENGINE, NETWORK_ENGINE_DEFAULT)
+
+    # New sections that open on the server's app config alone, which does not
+    # turn them on: they must stay behind it.
+    for rel, s in OFF_BY_SERVER:
+        tree.expect(rel, s)
+
+    # Calls: the reflectors are the server's, none of Telegram's is added.
+    tree.expect(CALLS, CALL_CONNECTIONS)
 
     # The name under the icon and in the share sheet, and the URL scheme of
     # the app's own links (the widget opens the app with it). The bundle ID,
@@ -1760,7 +1954,7 @@ INTRO_HEADER_MARK = "\n" + src("", """
     @property (class, nonatomic, readonly) CGSize firstPageMarkSize;
 """)
 
-INTRO_IVARS_ANCHOR = "    bool _loadedView;\n}\n@end\n"
+INTRO_IVARS_ANCHOR = "    bool _loadedView;\n"
 INTRO_IVARS = src(" " * 4, """
     bool _loadedView;
 
@@ -1771,7 +1965,7 @@ INTRO_IVARS = src(" " * 4, """
     bool _firstPageMarkOnScreen;
     bool _firstPageMarkShown;
     bool _firstPageMarkWritePending;
-""") + "}\n@end\n"
+""")
 
 # animateIn: the mark comes in as the GL view does, and writes itself from its
 # start as it fades in: (upstream's line, what follows it).
@@ -2500,6 +2694,15 @@ APP_UPDATE_EDITS = (
      "            context.sharedContext.applicationBindings.openAppStorePage()\n"
      "        }\n"
      "    }, linkAction: { action, itemLink in\n"),
+    # The placeholder of a message the app cannot show, of a rich or widget
+    # message, Passport and stories open this page, and the update screen does
+    # without a url. appstore_id is 0: the site says how to get the app (its
+    # root is outside the app's universal links).
+    (APP_DELEGATE,
+     "            let appStoreId = buildConfig.appStoreId\n"
+     "            if let url = URL(string: \"itms-apps://itunes.apple.com/app/id\\(appStoreId)\") {\n",
+     "            // pluma: no App Store page; the site says how to get the current build.\n"
+     "            if let url = URL(string: \"https://pluma.chat/\") {\n"),
     (MT_API_ENVIRONMENT,
      "            suffix = [NSString stringWithFormat:@\"%@\", value];\n"
      "        }\n"
@@ -2928,7 +3131,7 @@ LEGACY_AUDIO_KBPS = (("CompressedVeryLow", 32, 64), ("CompressedLow", 32, 64), (
 LEGACY_AUDIO_CHANNELS = (("CompressedVeryLow", 1, 2), ("CompressedLow", 1, 2))
 # (case, Telegram's value, Pluma's) for MediaQualityPreset.videoBitrateKbps.
 VIDEO_KBPS = (("compressedVeryLow", 400, 800), ("compressedLow", 700, 1500), ("compressedMedium", 1600, 2500),
-              ("compressedHigh", 3000, 5000), ("compressedVeryHigh", 6600, 12000), ("videoMessage", 1000, 2000))
+              ("compressedHigh", 3000, 5000), ("compressedVeryHigh", 6600, 12000), ("videoMessage", 1200, 2000))
 ANIMATION_KBPS = (900, 1800)
 # The default preset of an edited video, capped by the source's size.
 VIDEO_DEFAULT_PRESET_OLD = src(" " * 8, """
@@ -3003,8 +3206,22 @@ def video_quality_edits():
         default:
             return 2
     """)))
+    # A round video is exported with these two, not with the preset's bitrate.
+    edits.append((VIDEO_PRESETS, "        self.bitrateKbps = max(self.dimensions.width, self.dimensions.height) <= 400.0 ? 1000 : 1200\n",
+                  "        self.bitrateKbps = 2000 // pluma: 1000 up to 400 px and 1200 above in Telegram (task 052)\n"))
     edits.append((ROUND_VIDEO_RECORDER, "                AVVideoAverageBitRateKey: 1000 * 1000,\n",
                    "                AVVideoAverageBitRateKey: 2000 * 1000, // pluma: 1000 kbit/s in Telegram (task 052)\n"))
+    edits.append((ROUND_VIDEO_RECORDER_NEO, "            AVVideoAverageBitRateKey: 1_200_000,\n",
+                   "            AVVideoAverageBitRateKey: 2_000_000, // pluma: 1200 kbit/s in Telegram (task 052)\n"))
+    # A round video that is not cropped is sent as recorded, so the table's
+    # 96 kbit/s must be set here as well. A low sample rate (a Bluetooth
+    # headset's microphone) keeps upstream's 64: the recording fails if the
+    # writer refuses the settings, and no device has tried 96 at that rate.
+    edits.append((ROUND_VIDEO_RECORDER_NEO, "            audioSettings[AVSampleRateKey] = streamDescription.pointee.mSampleRate\n",
+                   "            audioSettings[AVSampleRateKey] = streamDescription.pointee.mSampleRate\n"
+                   "            if streamDescription.pointee.mSampleRate >= 44100.0 {\n"
+                   "                audioSettings[AVEncoderBitRateKey] = 96_000 // pluma: 64 kbit/s in Telegram (task 052)\n"
+                   "            }\n"))
     edits.append((GIF_CONVERTER, "              AVVideoAverageBitRateKey: @(500000),\n",
                    "              AVVideoAverageBitRateKey: @(1000000), // pluma: 500000 in Telegram (task 052)\n"))
     edits.append((VIDEO_FETCH, VIDEO_DEFAULT_PRESET_OLD, VIDEO_DEFAULT_PRESET))
@@ -3058,6 +3275,15 @@ AVATAR_SAVED_MESSAGES = ("    static let savedMessagesColors: [UIColor] = [\n"
                          "        UIColor(rgb: 0x2a9ef1), UIColor(rgb: 0x72d5fd)\n")
 AVATAR_REPOST = ("    static let repostColors: [UIColor] = [\n"
                  "        UIColor(rgb: 0x3DA1FD), UIColor(rgb: 0x34C76F)\n")
+
+# Sage is pale enough (HSB saturation 0.16) for the send button without bubbles
+# to take it for a black or white accent and turn system blue.
+SEND_GLASS_OLD = "    if saturation < 0.2 || builtInBlues.contains(accentColor.rgb) {\n"
+SEND_GLASS = ("    // pluma: Night's sage is the accent, not a colourless one.\n"
+              "    if accentColor.rgb != 0x9dbb9f && (saturation < 0.2 || builtInBlues.contains(accentColor.rgb)) {\n")
+SEND_GLASS_ICON_OLD = "        guard let tinted = generateTintedImage(image: image, color: .white) else {\n"
+SEND_GLASS_ICON = ("        // pluma: a dark glyph on Night's sage, as on every control of that accent.\n"
+                   "        guard let tinted = generateTintedImage(image: image, color: interfaceState.theme.chat.inputPanel.panelControlAccentColor.rgb == 0x9dbb9f ? UIColor(rgb: 0x131513) : .white) else {\n")
 
 # (file, text, replacement, how many times).
 PALETTE_EDITS = (
@@ -3231,7 +3457,14 @@ PALETTE_EDITS = (
     (AVATAR_NODE, AVATAR_REPOST, AVATAR_REPOST.replace(
         "UIColor(rgb: 0x3DA1FD), UIColor(rgb: 0x34C76F)\n",
         "UIColor(rgb: 0x4f6e52), UIColor(rgb: 0x9dbb9f) // pluma: sage\n"), 1),
-)
+    # Night without bubbles (13.2).
+    (MAKE_THEME, "/// Only the bubbles are gray: the night half keeps Telegram's blue accent instead of Night's white.\n"
+     "private let neutralNightAccentColor = UIColor(rgb: 0x3e88f7)\n",
+     "/// Only the bubbles are gray: the night half keeps Night's accent.\n"
+     "private let neutralNightAccentColor = UIColor(rgb: 0x9dbb9f) // pluma: sage\n", 1),
+    (SEND_BUTTON, SEND_GLASS_OLD, SEND_GLASS, 1),
+    (SEND_BUTTON, SEND_GLASS_ICON_OLD, SEND_GLASS_ICON, 1),
+) + tuple((rel, "UIColor(rgb: 0x0088ff)", "UIColor(rgb: 0x5b7a5e)", count) for rel, count in MEDIA_EDITOR_ACCENTS)
 
 # Night's message colours, each kind on one long line: (file, a text that
 # only that line has, edits within the line).
@@ -3285,6 +3518,27 @@ SUPPORT_SEARCH_OLD = src(" " * 8, """
 """)
 
 
+# The menu of a crash log: this item sends it to a bot of Telegram's team, by a
+# username anybody could take on the server.
+CRASH_REPORT_TEAM_OLD = src(" " * 12, """
+    .action(ContextMenuActionItem(text: "Send to Telegram Team", icon: { theme in
+        return generateTintedImage(image: UIImage(bundleImageName: "Chat/Context Menu/Forward"), color: theme.contextMenu.primaryColor)
+    }, action: { controller, _ in
+        controller?.dismiss(completion: {
+            self.confirmSend(report)
+        })
+    })),
+""")
+CRASH_REPORT_TEAM = "            // pluma: no item that sends the log to Telegram's team.\n"
+# The prompt after a crash (off by default, a switch on the Crash Logs screen)
+# sent to the same bot. Its button lets the user pick the chat, as "Share Log".
+CRASH_REPORT_SHARE_OLD = "    private func share(_ report: CrashReport) {\n"
+CRASH_REPORT_SHARE = "    func share(_ report: CrashReport) {\n"
+CRASH_REPORT_PROMPT_OLD = "                actions.send(pending[0], context: context)\n"
+CRASH_REPORT_PROMPT = ("                // pluma: to a chat the user picks; the username of Telegram's crash bot is anybody's here.\n"
+                       "                actions.share(pending[0])\n")
+
+
 def patch_support(tree):
     """The last section of Settings leads to Telegram's services only: "Ask a
     Question" asks the server for Telegram's support account (help.getSupport,
@@ -3295,6 +3549,18 @@ def patch_support(tree):
                        "    // pluma: no support section; its items lead to Telegram's support, FAQ and channel.\n")
     tree.replace_lines(SETTINGS_SEARCH, SUPPORT_SEARCH_OLD,
                        "        // pluma: no support, FAQ or features items (see PeerInfoSettingsItems.swift).\n")
+    tree.replace(CRASH_REPORTS, CRASH_REPORT_TEAM_OLD, CRASH_REPORT_TEAM)
+    tree.replace(CRASH_REPORTS, CRASH_REPORT_SHARE_OLD, CRASH_REPORT_SHARE)
+    tree.replace(CRASH_REPORTS, CRASH_REPORT_PROMPT_OLD, CRASH_REPORT_PROMPT)
+
+
+def verify_crash_reports(tree):
+    """Nothing may reach the send to the bot: confirmSend has no caller, and
+    the one call of send left is its own."""
+    text = tree.read(CRASH_REPORTS)
+    if (text.count(CRASH_REPORT_TEAM) != 1 or text.count(CRASH_REPORT_PROMPT) != 1
+            or ".confirmSend(" in text or len(re.findall(r"\.send\(", text)) != 1):
+        raise PatchError(f"{CRASH_REPORTS}: a crash log can still be sent to Telegram's team")
 
 
 def verify_support(tree):
@@ -3302,6 +3568,7 @@ def verify_support(tree):
         raise PatchError(f"{SETTINGS_ITEMS}: Settings still lead to Telegram's support")
     if "helpSearchableItems(context: context)" in tree.read(SETTINGS_SEARCH):
         raise PatchError(f"{SETTINGS_SEARCH}: the settings search still leads to Telegram's support")
+    verify_crash_reports(tree)
 
 
 # --- login code screens ----------------------------------------------------------
@@ -3320,18 +3587,18 @@ def verify_support(tree):
 #     app on your other device"); its link, "Get the code via SMS" upstream
 #     (AuthorizationOptionText.swift 109, 122), is "Didn't get the code?";
 #   - FragmentSms keeps the layout of Fragment's screen
-#     (AuthorizationSequenceCodeEntryControllerNode.swift 534-543, 750-753):
+#     (AuthorizationSequenceCodeEntryControllerNode.swift 546-555, 759-762):
 #     the title "Check Telegram", the text naming the phone, and the big
 #     button "Open Telegram", which opens the chat with the account in the
 #     Telegram app; not Fragment's sticker, icon and colours but the sticker
 #     of the other code screens (played three times, as Fragment's is) and
 #     the accent of the app. Fragment's screen has no link; it gets "Didn't
 #     get the code?" over the button, laid out as the word and phrase codes
-#     lay out theirs (771-783);
+#     lay out theirs (780-792);
 #   - Sms takes the same layout: "Code didn't reach Telegram", the way to let
 #     Telegram find the person by number, the button "Open Telegram settings"
 #     (tg://settings/phone_privacy, which Telegram opens on that setting:
-#     OpenUrl.swift 965-966), and "Send again in m:ss", then "Send again";
+#     OpenUrl.swift 1025-1026), and "Send again in m:ss", then "Send again";
 #   - with no next_type, "Didn't get the code?" shows "Ask the administrator"
 #     instead of a mail to Telegram's sms@telegram.org with
 #     auth.reportMissingCode (AuthorizationSequenceController.swift 642-649,
@@ -3358,19 +3625,19 @@ def verify_support(tree):
 #     (LoginActivity.java 1903-1905): TelegramCore keeps no seconds of
 #     FLOOD_WAIT (Authorization.swift 550-551).
 #
-# The text of a code that did not reach Telegram is long. The screens of
-# task 076 fit between the bars and the keyboard as 13.2 makes every code
-# screen fit (AuthorizationSequenceCodeEntryControllerNode.swift 813-822 of
-# 13.2): the sticker goes when the content does not fit, and the navigation
-# bar becomes the top. What still does not fit (an iPhone SE or mini with
-# the keyboard up) is the text: it scrolls between the title and
-# the code, so the field, the link and the button stay in view. Under the
+# The text of a code that did not reach Telegram is long. Upstream makes
+# every code screen fit between the bars and the keyboard (Authorization-
+# SequenceCodeEntryControllerNode.swift 813-822): the sticker goes when the
+# content does not fit, and the navigation bar becomes the top. What still
+# does not fit on the screens of task 076 (an iPhone SE or mini with the
+# keyboard up) is the text: it scrolls between the title and the code, so
+# the field, the link and the button stay in view. Under the
 # code there is room for the error line (40 pt: animateError puts it 24 pt
 # under the field), not Fragment's 104 pt for a screen without a link.
 #
 # The buttons open Telegram's links in the Telegram app: Pluma does not
 # register tg:// (patch_scheme). openUrl drops every tg:// link
-# (AppDelegate.swift 803-805); it lets these two through and nothing else.
+# (AppDelegate.swift 851-853); it lets these two through and nothing else.
 # Each button shows only when the Telegram app is there to open its link
 # (canOpenURL, with tg in LSApplicationQueriesSchemes), checked again in the
 # login when the app becomes active (the change of the phone number checks it
@@ -3521,14 +3788,13 @@ LOGIN_CODE_EDITS = (
          }
 
          // pluma: a screen of a code in Telegram or of one that did not reach it fits between the
-         // bars and the keyboard (task 076). As 13.2 makes every code screen fit
-         // (AuthorizationSequenceCodeEntryControllerNode.swift 813-822 of 13.2), the sticker goes
-         // when the content does not fit at half its spacing, and the navigation bar becomes the
-         // top. What still does not fit is the text: it scrolls between the title and the code,
-         // so the field, the link and the button stay in view. Its spacing goes too when it would
-         // leave less than three lines of the text.
-         private func fitTelegramCodeScreen(items: inout [AuthorizationLayoutItem], insets: inout UIEdgeInsets, layoutHeight: CGFloat, additionalBottomInset: CGFloat, navigationBarHeight: CGFloat, textSize: CGSize) {
-             guard self.isTelegramCodeScreen, var textIndex = items.firstIndex(where: { $0.node === self.currentOptionNode }) else {
+         // bars and the keyboard (task 076). Without the sticker, which goes as on every code screen
+         // when the content does not fit at half its spacing (authorizationLayoutItemsFit), what
+         // still does not fit is the text: it scrolls between the title and the code, so the field,
+         // the link and the button stay in view. Its spacing goes too when it would leave less than
+         // three lines of the text.
+         private func fitTelegramCodeScreen(items: inout [AuthorizationLayoutItem], height: CGFloat, textSize: CGSize) {
+             guard self.isTelegramCodeScreen, let textIndex = items.firstIndex(where: { $0.node === self.currentOptionNode }) else {
                  return
              }
              func spacing(_ items: [AuthorizationLayoutItem]) -> CGFloat {
@@ -3537,13 +3803,6 @@ LOGIN_CODE_EDITS = (
              func heights(_ items: [AuthorizationLayoutItem]) -> CGFloat {
                  return items.reduce(0.0, { $0 + $1.size.height })
              }
-             if items.first?.node === self.animationNode, heights(items) + spacing(items) > layoutHeight - insets.top - insets.bottom - additionalBottomInset {
-                 items.removeFirst()
-                 textIndex -= 1
-                 insets.top = navigationBarHeight
-                 self.animationNode.isHidden = true
-             }
-             let height = layoutHeight - insets.top - insets.bottom - additionalBottomInset
              let otherHeights = heights(items) - textSize.height
              var textHeight = height - otherHeights - spacing(items)
              if textHeight < min(textSize.height, ceil(Font.regular(17.0).lineHeight * 3.0)) {
@@ -3656,10 +3915,10 @@ LOGIN_CODE_EDITS = (
      "                    items.append(AuthorizationLayoutItem(node: self.codeInputView, size: codeFieldSize, spacingBefore: AuthorizationLayoutItemSpacing(weight: 30.0, maxValue: 30.0), spacingAfter: codeSpacingAfter))\n"),
     # The screen fits between the bars and the keyboard.
     (LOGIN_CODE_NODE,
-     "        let _ = layoutAuthorizationItems(bounds: CGRect(origin: CGPoint(x: 0.0, y: insets.top), size: CGSize(width: layout.size.width, height: layout.size.height - insets.top - insets.bottom - additionalBottomInset)), items: items, transition: transition, failIfDoesNotFit: false)\n",
-     "        // pluma: without the sticker, or with the text scrolled, when the content does not fit (task 076).\n"
-     "        self.fitTelegramCodeScreen(items: &items, insets: &insets, layoutHeight: layout.size.height, additionalBottomInset: additionalBottomInset, navigationBarHeight: navigationBarHeight, textSize: currentOptionSize)\n"
-     "        let _ = layoutAuthorizationItems(bounds: CGRect(origin: CGPoint(x: 0.0, y: insets.top), size: CGSize(width: layout.size.width, height: layout.size.height - insets.top - insets.bottom - additionalBottomInset)), items: items, transition: transition, failIfDoesNotFit: false)\n"),
+     "        let _ = layoutAuthorizationItems(bounds: CGRect(origin: CGPoint(x: bandMinX, y: insets.top), size: CGSize(width: bandWidth, height: layout.size.height - insets.top - insets.bottom - additionalBottomInset)), items: items, transition: transition, failIfDoesNotFit: false)\n",
+     "        // pluma: with the text scrolled when the content does not fit without the sticker either (task 076).\n"
+     "        self.fitTelegramCodeScreen(items: &items, height: layout.size.height - insets.top - insets.bottom - additionalBottomInset, textSize: currentOptionSize)\n"
+     "        let _ = layoutAuthorizationItems(bounds: CGRect(origin: CGPoint(x: bandMinX, y: insets.top), size: CGSize(width: bandWidth, height: layout.size.height - insets.top - insets.bottom - additionalBottomInset)), items: items, transition: transition, failIfDoesNotFit: false)\n"),
     (LOGIN_CODE_NODE,
      "        self.currentOptionActivateAreaNode.frame = self.currentOptionNode.frame\n",
      "        // pluma: the text of a screen of task 076 lies in its scroll node.\n"
@@ -3891,7 +4150,6 @@ def verify_login_codes(tree, c):
     if "Login_EnterCodeFragmentText" in options:
         raise PatchError(f"{LOGIN_OPTION_TEXT}: a code in Telegram still reads as Fragment's")
 
-
 # --- App Store ---------------------------------------------------------------
 
 
@@ -3958,6 +4216,10 @@ def verify_store(tree, c):
     assets = tree.read(CAMERA_ASSETS)
     if any(new not in assets for _, new in CAMERA_ASSETS_FALLBACKS):
         raise PatchError(f"{CAMERA_ASSETS}: the camera's font has no fallback without SF Camera")
+    bundled = (p.parent.name.removesuffix(".lproj") for p in (tree.root / SIRI_VOCABULARY).parent.parent.glob("*.lproj/AppIntentVocabulary.plist"))
+    unknown = sorted(set(bundled) - set(SIRI_PHRASES))
+    if unknown:
+        raise PatchError(f"{SIRI_VOCABULARY.format(unknown[0])}: a vocabulary the patch does not replace")
     for lang, phrases in SIRI_PHRASES.items():
         rel = SIRI_VOCABULARY.format(lang)
         text = tree.read(rel)
@@ -3972,12 +4234,22 @@ def patch_palette(tree):
         tree.replace_in_line(rel, anchor, edits)
 
 
+def verify_media_editor_accent(tree):
+    for rel, _ in MEDIA_EDITOR_ACCENTS:
+        if "0x0088ff" in tree.read(rel).lower():
+            raise PatchError(f"{rel}: a media editor still has Telegram's blue")
+
+
 def verify_palette(tree):
-    for rel in (DAY_THEME, DARK_THEME):
+    for rel in (DAY_THEME, DARK_THEME, MAKE_THEME):
         text = tree.read(rel)
         for blue in TELEGRAM_BLUES:
             if blue in text:
                 raise PatchError(f"{rel}: Telegram's blue {blue} is still there")
+    verify_media_editor_accent(tree)
+    send_button = tree.read(SEND_BUTTON)
+    if send_button.count(SEND_GLASS) != 1 or send_button.count(SEND_GLASS_ICON) != 1:
+        raise PatchError(f"{SEND_BUTTON}: Night's sage does not reach the send button")
     if "PresentationThemeAccentColor(baseColor: .blue)" in tree.read(PRESENTATION_DATA):
         raise PatchError(f"{PRESENTATION_DATA}: Night still gets the blue accent")
     # The other avatar colours are the peer colours, one per user
@@ -4201,8 +4473,8 @@ def verify_identity(tree):
 # the caller passes, so no image of the app is blue. Every place on a theme's
 # background passes the theme's check colours, list.itemCheckColors: the chat
 # list, the chat title, the profile, member, contact and call lists, search,
-# reactions, the stories bar, messages of channels, voice chats, link previews
-# and mini apps. The two images that resources draw take the same colours
+# reactions, the stories bar, messages of channels, the news feed, voice
+# chats, link previews and mini apps. The two images that resources draw take the same colours
 # (PresentationResourcesChatList.verifiedIcon, the call list) or the unread
 # counter's (PresentationResourcesItemList.verifiedPeerIcon, the profile's
 # name in item lists). The palette makes all of them sage with the text colour
@@ -4238,6 +4510,7 @@ VERIFIED_BADGE_SITES = (
     ("submodules/TelegramUI/Components/ChatTitleView/Sources/ChatTitleComponent.swift", 1, ()),
     ("submodules/TelegramUI/Components/ChatTitleView/Sources/ChatTitleView.swift", 2, ()),
     ("submodules/TelegramUI/Components/JoinSubjectScreen/Sources/JoinSubjectScreen.swift", 1, ()),
+    ("submodules/TelegramUI/Components/News/NewsFeedComponents/Sources/NewsFeedPostComponent.swift", 2, ()),
     ("submodules/TelegramUI/Components/Stories/PeerListItemComponent/Sources/PeerListItemComponent.swift", 1, ()),
     ("submodules/TelegramUI/Components/Stories/StoryPeerListComponent/Sources/StoryPeerListItemComponent.swift", 1, ()),
     ("submodules/WebUI/Sources/WebAppLaunchConfirmationController.swift", 1, ()),
@@ -4348,7 +4621,7 @@ TELEGRAM_WORD = re.compile(r"(?:(?<![0-9A-Za-z_])|(?<=\\n))(Telegram|TELEGRAM)(?
 # they do, in the pinned commit. Keys never change (the code refers to them),
 # nor do URLs, user names or link targets: they are lower case or part of
 # another word (telegram.org, t.me, TelegramTips, (telegram)).
-STRINGS_RENAMED = (556, 609)
+STRINGS_RENAMED = (585, 638)
 
 
 def rename_strings(text, name):
@@ -4403,11 +4676,16 @@ def patch_scheme(tree, c):
     between Pluma clients only. Links of Telegram's scheme inside the app
     (in messages, from bots) still open in the app, as they always did."""
     # The scheme of the app's own links (the build configuration) already
-    # replaces telegram:// (patch()); tg:// is no longer registered beside it.
-    tree.replace(APP_BUILD, "                <string>tg</string>\n                <string>tonsite</string>\n",
+    # replaces telegram:// (patch()); tg:// is no longer registered beside it,
+    # nor TON's ton:// and tc://, which open the wallet Pluma's server does not
+    # offer (wallet_available) and are for the apps that have one.
+    tree.replace(APP_BUILD, "                <string>tg</string>\n                <string>tonsite</string>\n"
+                 "                <string>ton</string>\n                <string>tc</string>\n",
                  "                <string>tonsite</string>\n")
     for rel, text, count in SCHEME_LINKS:
         tree.replace(rel, text.replace("{scheme}", "tg"), text.replace("{scheme}", c.url_scheme), count=count)
+    # The switch of a proxy's QR code names the scheme of the link it makes.
+    tree.replace(STRINGS, SCHEME_TEXT.format(scheme="tg"), SCHEME_TEXT.format(scheme=c.url_scheme))
     tree.replace(URL_HANDLING, URL_HANDLING_TG, URL_HANDLING_OWN, count=4)
 
 
@@ -4469,7 +4747,7 @@ def link_sources(tree):
     """The app's source files in the tree (all of them in a full checkout)."""
     for top in ("submodules", "Telegram"):
         for p in sorted((tree.root / top).rglob("*")):
-            if p.suffix in (".swift", ".m", ".mm", ".h") and p.is_file():
+            if p.suffix in (".swift", ".m", ".mm", ".h", ".cpp") and p.is_file() and not is_unit_test(p.relative_to(tree.root).as_posix()):
                 yield p.relative_to(tree.root).as_posix()
 
 
@@ -4501,10 +4779,20 @@ def verify_links(tree):
         if found != kept.get(rel, 0):
             raise PatchError(f"{rel}: {found} t.me links, {kept.get(rel, 0)} of them kept (SHARE_KEEP); "
                              f"the links the app makes are {LINK_HOST}'s")
+    for rel in link_sources(tree):
+        data = (tree.root / rel).read_bytes()
+        for literal, kept_table, what in ((TG_LITERAL, KEPT_TG_LINKS, "tg://"), (TELEGRAM_SITE, KEPT_TELEGRAM_SITES, "telegram.org"),
+                                          (TELEGRAM_NAME_LITERAL, KEPT_TELEGRAM_NAMES, "Telegram")):
+            found = len(literal.findall(data))
+            if found != kept_table.get(rel, 0):
+                raise PatchError(f"{rel}: {found} {what} literals, {kept_table.get(rel, 0)} of them kept; upstream changed them")
     strings = tree.read(STRINGS)
     for m in STRINGS_ENTRY.finditer(strings):
         if STRINGS_TME.search(m.group(2)) and m.group(1).split('"')[1] not in STRINGS_KEEP:
             raise PatchError(f"{STRINGS}: {m.group(0)[:80]!r} still shows a t.me link")
+    sites = sum(1 for m in STRINGS_ENTRY.finditer(strings) if TELEGRAM_SITE.search(m.group(2).encode("utf-8")))
+    if sites != STRINGS_TELEGRAM_SITES:
+        raise PatchError(f"{STRINGS}: {sites} entries name Telegram's sites, expected {STRINGS_TELEGRAM_SITES}; upstream changed them")
     for key, count in STRINGS_LINKS:
         lines = [line for line in strings.split("\n") if line.startswith(f'"{key}" = "')]
         if len(lines) != 1 or lines[0].count(LINK_HOST) != count:
@@ -4521,6 +4809,8 @@ def verify_scheme(tree, c):
         text = tree.read(rel)
         if '"tg://' in text or 'appSpecificScheme: "tg"' in text:
             raise PatchError(f"{rel}: still makes tg:// links")
+    if SCHEME_TEXT.format(scheme=c.url_scheme) not in tree.read(STRINGS):
+        raise PatchError(f"{STRINGS}: the QR code of a proxy does not name {c.url_scheme}://")
 
 
 def verify_names(tree, c):
@@ -4729,6 +5019,10 @@ PREMIUM_FOR_EVERYONE_EDITS = (
     ("submodules/PeerInfoUI/Sources/ChannelPermissionsController.swift",
      "        if !canSendText || !canSendMedia || slowModeTimeout > 0 {\n            let unrestrictBoosters = state.modifiedUnrestrictBoosters ?? (cachedData.boostsToUnrestrict ?? 0)\n",
      "        if false && (!canSendText || !canSendMedia || slowModeTimeout > 0) { // pluma: boosts do not exist here (ADR 0041)\n            let unrestrictBoosters = state.modifiedUnrestrictBoosters ?? (cachedData.boostsToUnrestrict ?? 0)\n", 1),
+    # The tab of collectibles: the server has none, and when empty it offers the gift shop.
+    ("submodules/TelegramUI/Components/QrStudioScreen/Sources/QrStudioLook.swift",
+     "        return [.color, .emoji, .gift]\n",
+     "        return [.color, .emoji] // pluma: no gifts to buy or show (ADR 0041)\n", 1),
     ("submodules/TelegramUI/Components/Settings/PeerNameColorScreen/Sources/ChannelAppearanceScreen.swift",
      "            let boostSectionFrame = CGRect(origin: CGPoint(x: sideInset, y: contentHeight), size: boostSectionSize)\n            if let boostSectionView = self.boostSection.view {\n                if boostSectionView.superview == nil {\n                    self.scrollView.addSubview(boostSectionView)\n                }\n                transition.setFrame(view: boostSectionView, frame: boostSectionFrame)\n            }\n            contentHeight += boostSectionSize.height\n            contentHeight += sectionSpacing - 8.0\n",
      "            // pluma: boosts do not exist here (ADR 0041), the section is never added.\n            let _ = boostSectionSize\n", 1),
@@ -4781,10 +5075,10 @@ NO_AI_EDITOR_EDITS = (
      "        }\n",
      "        // pluma: no AI editor for a caption, Pluma runs no language model (task 079).\n", 1),
     ("submodules/TelegramUI/Components/RichTextAttachmentScreen/Sources/RichTextAttachmentScreen.swift",
-     "                containerSize: CGSize(width: availableSize.width - (sideInset + environment.safeInsets.left) * 2.0 - actionBarSpacing * 2.0 - aiButtonSize.width - sendButtonSize.width, height: 44.0)\n",
-     "                containerSize: CGSize(width: availableSize.width - (sideInset + environment.safeInsets.left) * 2.0 - actionBarSpacing - sendButtonSize.width, height: 44.0) // pluma: no AI button\n", 1),
+     "                containerSize: CGSize(width: availableSize.width - sideInset * 2.0 - bottomRowInsets.left - bottomRowInsets.right - actionBarSpacing * 2.0 - aiButtonSize.width - sendButtonSize.width, height: 44.0)\n",
+     "                containerSize: CGSize(width: availableSize.width - sideInset * 2.0 - bottomRowInsets.left - bottomRowInsets.right - actionBarSpacing - sendButtonSize.width, height: 44.0) // pluma: no AI button\n", 1),
     ("submodules/TelegramUI/Components/RichTextAttachmentScreen/Sources/RichTextAttachmentScreen.swift",
-     "            let aiButtonFrame = CGRect(origin: CGPoint(x: sideInset + environment.safeInsets.left, y: availableSize.height - bottomInset - 6.0 - aiButtonSize.height), size: aiButtonSize)\n"
+     "            let aiButtonFrame = CGRect(origin: CGPoint(x: sideInset + bottomRowInsets.left, y: availableSize.height - bottomInset - 6.0 - aiButtonSize.height), size: aiButtonSize)\n"
      "            if let aiButtonView = self.aiButton.view {\n"
      "                if aiButtonView.superview == nil {\n"
      "                    self.addSubview(aiButtonView)\n"
@@ -4794,8 +5088,8 @@ NO_AI_EDITOR_EDITS = (
      "            // pluma: no AI editor, Pluma runs no language model (task 079); the button is never added.\n"
      "            let _ = aiButtonSize\n", 1),
     ("submodules/TelegramUI/Components/RichTextAttachmentScreen/Sources/RichTextAttachmentScreen.swift",
-     "            let actionBarFrame = CGRect(origin: CGPoint(x: sideInset + environment.safeInsets.left + aiButtonSize.width + actionBarSpacing, y: availableSize.height - bottomInset - 6.0 - actionBarSize.height), size: actionBarSize)\n",
-     "            let actionBarFrame = CGRect(origin: CGPoint(x: sideInset + environment.safeInsets.left, y: availableSize.height - bottomInset - 6.0 - actionBarSize.height), size: actionBarSize) // pluma: no AI button\n", 1),
+     "            let actionBarFrame = CGRect(origin: CGPoint(x: sideInset + bottomRowInsets.left + aiButtonSize.width + actionBarSpacing, y: availableSize.height - bottomInset - 6.0 - actionBarSize.height), size: actionBarSize)\n",
+     "            let actionBarFrame = CGRect(origin: CGPoint(x: sideInset + bottomRowInsets.left, y: availableSize.height - bottomInset - 6.0 - actionBarSize.height), size: actionBarSize) // pluma: no AI button\n", 1),
 )
 # What would open the editor past the edits: another place that enables a
 # caption's AI button or adds the rich editor's. Upstream adding one stops
@@ -4832,19 +5126,19 @@ def verify_no_ai_editor(tree):
 # person signed in, and the app came back to the intro screen right after a
 # successful auth.signUp, with no error (the owner's report of 2026-11-11, and
 # the same on 2026-11-01, docs/tasks/029-ios-install-from-site.md):
-#   - managedCleanupAccounts (AccountManager.swift 392-475) deletes every
+#   - managedCleanupAccounts (AccountManager.swift 395-480) deletes every
 #     account-* directory that no record names. It takes the names from one
 #     view of the records, then deletes on the global utility queue later. The
 #     first view at launch is empty; meanwhile beginNewAuth creates the auth
 #     record and accountWithId its account-<id>/postbox
-#     (SharedAccountContext.swift 803-805, 1758-1762; Postbox.swift 1455), and
+#     (SharedAccountContext.swift 846-848, 1944-1948; Postbox.swift 1584), and
 #     a late delete removes the live directory. SQLite keeps the open files, so
 #     the login works on unlinked files to the end;
 #   - after the login switchToAuthorizedAccount (Authorization.swift 18-39)
 #     turns the auth record into an account record and SharedAccountContext
-#     opens account-<id> again (SharedAccountContext.swift 640-641): it is
+#     opens account-<id> again (SharedAccountContext.swift 684): it is
 #     empty, accountWithId answers .unauthorized, the record is deleted
-#     (751-756) and beginNewAuth starts a new login with new keys.
+#     (795-799) and beginNewAuth starts a new login with new keys.
 # The server saw auth.signUp answered and, 0.14 s later, the client close the
 # key and make new ones with nothing sent in between.
 # The directories are now matched with the records inside a transaction of
@@ -4997,7 +5291,7 @@ def verify_account_cleanup(tree):
 # parameters: it drops frames to 30 a second and sends the screen at its own
 # size (BroadcastUploadExtension.swift 234-254). The app hands those frames to
 # tgcalls through the custom capture (":ios_custom",
-# OngoingCallThreadLocalContext.mm 1320), which has no format and so no
+# OngoingCallThreadLocalContext.mm 1532), which has no format and so no
 # resolution (VideoCapturerInterfaceImpl.mm 193-195, 359-361), and
 # updateAspectRateAdaptation adapts nothing without one. The server's 30
 # frames a second is what the extension sends; a smaller long side than the
