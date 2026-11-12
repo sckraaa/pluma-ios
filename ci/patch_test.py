@@ -1651,6 +1651,47 @@ DAMAGE = (
      "                    let botStatus: String\n"
      "                    let support = user.flags.contains(.isSupport)\n"),
     (patch.STRINGS, '"Bot.GenericSupportStatus" = "support";\n', '"Bot.GenericSupportStatus" = "Support";\n'),
+    # Group calls end to end: a place of each edited file that moved, the
+    # patch's key already upstream, an entry to RTMP elsewhere, another
+    # message over the data channel.
+    (patch.CALL_MANAGER, "            joinAsPeerId: joinAsPeerId,\n", "            joinAsPeerId: joinAsPeerId ?? nil,\n"),
+    (patch.CALL_MANAGER, "                            initialCall: nil,\n", "                            initialCall: Optional.none,\n"),
+    (patch.GROUP_CALL, "guard let self, isFailed else {", "guard let self, isFailed == true else {"),
+    (patch.GROUP_CALL, '"ios_use_inprocess_screencast"', '"ios_use_inprocess_screencast_v2"'),
+    (patch.GROUP_CALL, 'let _ = try? "ipc".write(', 'try? "ipc".write('),
+    (patch.GROUP_CALL, "let userId = self.joinAsPeerId.id._internalGetInt64Value()", "let userId = self.joinAsPeerId.toInt64()"),
+    (patch.GROUP_CALL, "        self.startDisposable.set((self.accountContext.engine.calls.createGroupCall(peerId: peerId, title: nil, scheduleDate: timestamp, isExternalStream: false)\n"
+     "        |> deliverOnMainQueue).start(next: { [weak self] callInfo in\n",
+     "        self.startDisposable.set((self.accountContext.engine.calls.createGroupCall(peerId: peerId, title: nil, scheduleDate: timestamp, isExternalStream: false)\n"
+     "        |> deliverOnMainQueue).startStandalone(next: { [weak self] callInfo in\n"),
+    (patch.GROUP_CALL_SCREENCAST, "// Prevent non-encrypted conference calls", "// Prevent unencrypted conference calls"),
+    (patch.VIDEO_CHAT_SCREEN, "                    navigationHeight -= 2.0\n", "                    navigationHeight -= 4.0\n"),
+    (patch.VIDEO_CHAT_SCREEN, "            var encryptionKeyFrame: CGRect?\n",
+     "            var encryptionKeyFrame: CGRect?\n            let _ = environment.strings.ChannelInfo_CreateExternalStream\n"),
+    (patch.E2E_CONTEXT, "guard let state = initializeState(keyPair, userId, block) else {",
+     "guard let state = self.initializeState(keyPair, userId, block) else {"),
+    (patch.ENGINE_CALLS, "_internal_cachedGroupCallDisplayAsAvailablePeers(account: self.account, peerId: peerId)",
+     "_internal_cachedGroupCallDisplayAsAvailablePeers(account: self.account, peerId: peerId, includeSelf: false)"),
+    (patch.GROUP_CALL_CONTEXT, "            self.context.addExternalAudioData(data)\n", "            self.context.addExternalAudioData(data as Data)\n"),
+    (patch.CALL_CONTEXT_HEADER, "- (void)getStats:(void (^ _Nonnull)(OngoingGroupCallStats * _Nonnull))completion;",
+     "- (void)getStats:(void (^ _Nullable)(OngoingGroupCallStats * _Nonnull))completion;"),
+    (patch.CALL_CONTEXT, "- (void)getStats:(void (^ _Nonnull)(OngoingGroupCallStats * _Nonnull))completion {",
+     "- (void)getStats:(void (^ _Nullable)(OngoingGroupCallStats * _Nonnull))completion {"),
+    (patch.GROUP_INSTANCE, "virtual void internal_addCustomNetworkEvent(bool isRemoteConnected) = 0;",
+     "virtual void internal_addCustomNetworkEvent(bool isRemoteConnected, bool isLocal) = 0;"),
+    (patch.GROUP_INSTANCE_CUSTOM_HEADER, "    void internal_addCustomNetworkEvent(bool isRemoteConnected);\n",
+     "    void internal_addCustomNetworkEvent(bool connected);\n"),
+    (patch.GROUP_INSTANCE_CUSTOM, "            networkManager->sendDataChannelMessage(result);\n",
+     "            networkManager->sendDataChannelMessage(result);\n            networkManager->sendDataChannelMessage(\"{}\");\n"),
+    (patch.TD_BINDING, "tde2e_api::call_decrypt(_callId, userId, 0, mappedMessage);", "tde2e_api::call_decrypt(_callId, userId, 1, mappedMessage);"),
+    (patch.TD_BINDING, "    auto result = tde2e_api::call_apply_block(_callId, mappedBlock);\n    if (!result.is_ok()) {\n        return false;\n",
+     "    auto result = tde2e_api::call_apply_block(_callId, mappedBlock);\n    if (result.is_error()) {\n        return false;\n"),
+    (patch.TD_BINDING_HEADER, "- (nullable NSData *)decrypt:(NSData *)message userId:(int64_t)userId;",
+     "- (nullable NSData *)decrypt:(NSData *)message userId:(int64_t)userId channelId:(int32_t)channelId;"),
+    (patch.PEER_INFO_CALLS, "strings.ChannelInfo_CreateExternalStream", "strings.ChannelInfo_StreamWith"),
+    (patch.MEDIA_STREAM, "strings.LiveStream_ViewCredentials", "strings.LiveStream_ViewStreamKey"),
+    (patch.STORY_CAMERA, "                self.canLivestream = true\n", "                self.canLivestream = !self.isTablet\n"),
+    (patch.STRINGS, '"Common.OK" = "OK";\n', '"Common.OK" = "OK";\n"Pluma.GroupCall.EncryptionFailed" = "x";\n'),
 )
 
 
@@ -2241,6 +2282,103 @@ class UpstreamTest(unittest.TestCase):
                     patch.verify(tree, c)
                 self.assertIn(rel, str(e.exception))
 
+    def test_group_calls(self):
+        # Each file of the group calls is upstream's with the edits and
+        # nothing else.
+        # The rest of the patch alone, then the whole of it.
+        with unittest.mock.patch.object(patch, "patch_group_calls", lambda tree: None):
+            tree = RecordingTree(self.root, self.written)
+            patch.patch(tree, config())
+        rels = {rel for rel, _, _ in patch.group_call_edits()} | {patch.STRINGS}
+        before = {rel: tree.read(rel) for rel in rels}
+        self.tearDown()
+        tree, _ = self.run_patch()
+        expected = {patch.STRINGS: before[patch.STRINGS] + patch.GROUP_CALL_STRINGS_HEAD
+                    + "".join(entry + "\n" for entry in patch.group_call_entries())}
+        for rel, old, new in patch.group_call_edits():
+            text = expected.get(rel, before[rel])
+            self.assertEqual(text.count(old), 1, (rel, old[:60]))
+            expected[rel] = text.replace(old, new)
+        for rel, text in expected.items():
+            self.assertEqual(tree.read(rel), text, rel)
+        self.assertEqual(len(expected), 18)
+        # Every group call the manager makes has its own key and joins as
+        # oneself; a call made at init or scheduled gets its context.
+        manager = tree.read(patch.CALL_MANAGER)
+        self.assertEqual(manager.count("guard let keyPair = TelegramE2EEncryptionProviderImpl.shared.generateKeyPair() else {"), 2)
+        self.assertEqual(manager.count("keyPair: keyPair,"), 3)
+        self.assertNotIn("keyPair: nil", manager)
+        call = tree.read(patch.GROUP_CALL)
+        self.assertEqual(call.count("PresentationGroupCallImpl.plumaMakeE2EContext("), 2)
+        self.assertEqual(call.count("ConferenceCallE2EContext(\n"), 1)
+        self.assertEqual(call.count("OngoingGroupCallEncryptionContextImpl(e2eCall: Atomic(value: ConferenceCallE2EContext.ContextStateHolder()), channelId: 0)"), 1)
+        self.assertIn("                self.e2eContext = e2eContext\n"
+                      "                (self.screencastIPCContext as? ScreencastInProcessIPCContext)?.e2eContext = e2eContext\n", call)
+        schedule = call.index("    public func schedule(timestamp: Int32) {")
+        self.assertLess(schedule, call.index("PresentationGroupCallImpl.plumaMakeE2EContext(accountContext: self.accountContext"))
+        # The screen goes out of the app's engine only, with no branch left
+        # that could never run (a warning, an error under -warnings-as-errors).
+        self.assertEqual(call.count("ScreencastInProcessIPCContext(basePath:"), 1)
+        self.assertNotIn("ScreencastEmbeddedIPCContext(", call)
+        self.assertNotIn("useIPCContext", call)
+        # The failure rejoins; the only way out of it is the notice.
+        self.assertIn("isFailed else {\n                        return\n                    }\n"
+                      "                    self.plumaRejoinAfterE2EFailure()", call)
+        rejoin = call[call.index("    private func plumaRejoinAfterE2EFailure() {"):call.index("    public func reconnect(with invite: String) {")]
+        self.assertIn("self.plumaE2ERejoinTimestamps.count < 3", rejoin)
+        self.assertIn("timestamp - $0 >= 5.0 * 60.0", rejoin)
+        self.assertLess(rejoin.index("e2eContext.reset(keyPair: keyPair)"), rejoin.index("self.requestCall(movingFromBroadcastToRtc: false)"))
+        self.assertLess(rejoin.index("Pluma_GroupCall_EncryptionFailed"), rejoin.index("self.leave(terminateIfPossible: false)"))
+        # The report: from the context, through the engine, to the data
+        # channel.
+        self.assertIn("callContext.sendE2EStatus(report)", call)
+        self.assertIn("self.context.sendE2EStatus(status)", tree.read(patch.GROUP_CALL_CONTEXT))
+        self.assertIn("_instance->sendE2EStatus(status.UTF8String", tree.read(patch.CALL_CONTEXT))
+        custom = tree.read(patch.GROUP_INSTANCE_CUSTOM)
+        self.assertIn("internal->sendE2EStatus(status);", custom)
+        self.assertIn('json["colibriClass"].string_value() != "PlumaE2EStatus"', custom)
+        self.assertIn("    virtual void sendE2EStatus(std::string const &) {}\n", tree.read(patch.GROUP_INSTANCE))
+        context = tree.read(patch.E2E_CONTEXT)
+        self.assertIn("return ([], Data(), [], [:], true)", context)
+        self.assertEqual(context.count("withTimeInterval: 5.0, repeats: true"), 1)
+        # No join as a channel, no RTMP, no live story.
+        self.assertIn("            return .single([])\n", tree.read(patch.ENGINE_CALLS))
+        self.assertNotIn("CreateExternalMediaStreamScreen(", tree.read(patch.MEDIA_STREAM))
+        self.assertNotIn("getGroupCallStreamCredentials(", tree.read(patch.PEER_INFO_CALLS))
+        self.assertNotIn("canLivestream = true", tree.read(patch.STORY_CAMERA))
+        self.assertIn('\n// pluma: group calls (task 094).\n"Pluma.GroupCall.EncryptionFailed" = ', tree.read(patch.STRINGS))
+
+    def test_group_calls_check(self):
+        # The check after the edits finds a group call without a key or
+        # joined as a channel, an entry to RTMP or a live story, another
+        # message over the data channel.
+        for rel, old, new in (
+            (patch.CALL_MANAGER, "                            keyPair: keyPair, // pluma: task 094\n", "                            keyPair: nil,\n"),
+            (patch.CALL_MANAGER, "            joinAsPeerId: nil, // pluma", "            joinAsPeerId: joinAsPeerId, // pluma"),
+            (patch.CALL_MANAGER, "    public func joinConferenceCall(\n",
+             "    func another() {\n        let call = PresentationGroupCallImpl(\n            joinAsPeerId: nil\n        )\n    }\n\n"
+             "    public func joinConferenceCall(\n"),
+            (patch.GROUP_CALL, "                    } else {\n                        // pluma: no group call goes unencrypted",
+             "                    } else if self.isConference {\n                        // pluma: no group call goes unencrypted"),
+            (patch.STORY_CAMERA, "            // pluma: no live stories", "            self.canLivestream = true\n            // pluma: no live stories"),
+            (patch.GROUP_CALL, "        self.screencastIPCContext = screencastIPCContext\n",
+             "        self.screencastIPCContext = ScreencastEmbeddedIPCContext(basePath: self.accountContext.sharedContext.basePath)\n"),
+            (patch.MEDIA_STREAM, "                        let _ = peerId\n", "                        let _ = presentationData.strings.LiveStream_ViewCredentials\n"),
+            (patch.ENGINE_CALLS, "            return .single([])\n",
+             "            return _internal_cachedGroupCallDisplayAsAvailablePeers(account: self.account, peerId: peerId)\n"),
+            (patch.GROUP_INSTANCE_CUSTOM, "            networkManager->sendDataChannelMessage(status);\n",
+             "            networkManager->sendDataChannelMessage(status);\n            networkManager->sendDataChannelMessage(status);\n"),
+        ):
+            with self.subTest(rel=rel, old=old[:60]):
+                self.tearDown()
+                tree, c = self.run_patch()
+                text = tree.read(rel)
+                self.assertEqual(text.count(old), 1)
+                tree.write(rel, text.replace(old, new))
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify(tree, c)
+                self.assertIn(pathlib.PurePath(rel).name, str(e.exception))
+
     def test_damage(self):
         for rel, old, new in DAMAGE:
             with self.subTest(rel=rel, old=old[:60]):
@@ -2272,7 +2410,9 @@ class CallParametersTest(unittest.TestCase):
         # the submodule it belongs to.
         (sub, url, paths), = patch.SUBMODULES
         self.assertEqual((sub, url), (patch.TGCALLS, patch.TGCALLS_URL))
-        self.assertEqual({rel for rel, _, _ in patch.call_parameter_edits()}, set(paths))
+        group_calls = {rel for rel, _, _ in patch.group_call_edits() if rel.startswith(sub + "/")}
+        self.assertEqual({rel for rel, _, _ in patch.call_parameter_edits()} | group_calls, set(paths))
+        self.assertEqual(len(paths), len(set(paths)))
         for rel in paths:
             self.assertTrue(rel.startswith(sub + "/"), rel)
             self.assertNotIn(rel, patch.UPSTREAM_PATHS)
@@ -2280,7 +2420,8 @@ class CallParametersTest(unittest.TestCase):
         with unittest.mock.patch("sys.stdout", out):
             self.assertEqual(patch.main(["--submodules"]), 0)
         self.assertEqual(out.getvalue(), f"{sub} {url} tgcalls/v2/InstanceV2Impl.cpp tgcalls/VideoCaptureInterfaceImpl.cpp "
-                                         "tgcalls/VideoCaptureInterfaceImpl.h\n")
+                                         "tgcalls/VideoCaptureInterfaceImpl.h tgcalls/group/GroupInstanceCustomImpl.cpp "
+                                         "tgcalls/group/GroupInstanceCustomImpl.h tgcalls/group/GroupInstanceImpl.h\n")
 
     def test_telegram_defaults(self):
         # With no key from the server every value is the literal it replaces.
@@ -2896,6 +3037,113 @@ class ServiceAccountTest(unittest.TestCase):
             tree.write("submodules/New/Sources/New.swift", self.LINE)
             with self.assertRaisesRegex(patch.PatchError, "New.swift: 1 uses of Bot_GenericSupportStatus, expected 0"):
                 patch.verify_service_account(tree)
+
+
+class GroupCallsTest(unittest.TestCase):
+    # The upstream files, made of the texts the edits expect, and the third
+    # group call of the manager (a conference), keyed already upstream.
+    CONFERENCE = "PresentationGroupCallImpl(\n    joinAsPeerId: nil,\n    keyPair: keyPair,\n)\n"
+
+    def tree(self, root):
+        (root / "Telegram").mkdir(exist_ok=True)
+        (root / "Telegram/BUILD").write_text("")
+        (root / "versions.json").write_text("{}")
+        files = {patch.STRINGS: '"Common.OK" = "OK";\n',
+                 patch.GROUP_INSTANCE_CUSTOM: "            networkManager->sendDataChannelMessage(result);\n"}
+        for rel, old, _ in patch.group_call_edits():
+            files[rel] = files.get(rel, "") + old + "x\n"
+        # The manager's calls whole: the scheduled one, the joined one, the
+        # conference.
+        (_, scheduled, _), (_, scheduled_key, _), (_, joined, _), (_, joined_key, _) = patch.group_call_edits()[:4]
+        files[patch.CALL_MANAGER] = (scheduled + scheduled_key + "                        )\n"
+                                     + joined + joined_key + "        )\n" + self.CONFERENCE)
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaises(patch.PatchError):
+                patch.verify_group_calls(tree)
+            patch.patch_group_calls(tree)
+            patch.verify_group_calls(tree)
+            self.assertIn('"Pluma.GroupCall.EncryptionFailed" = "Couldn\'t restore end-to-end encryption, so you left the call. '
+                          'Try joining again.";\n', tree.read(patch.STRINGS))
+            # A second run is refused: the key is there and nothing is left to edit.
+            with self.assertRaises(patch.PatchError):
+                patch.patch_group_calls(tree)
+
+    def test_paths(self):
+        # Every file the edits touch is fetched for the check job: tgcalls'
+        # from its submodule, the others from the app's repository (TdBinding
+        # is in it; tde2e, its submodule, is not edited).
+        (sub, _, paths), = patch.SUBMODULES
+        for rel, _, _ in patch.group_call_edits():
+            if rel.startswith(sub + "/"):
+                self.assertIn(rel, paths)
+                self.assertNotIn(rel, patch.UPSTREAM_PATHS)
+            else:
+                self.assertIn(rel, patch.UPSTREAM_PATHS)
+        self.assertFalse(any(rel.startswith("third-party/td/td/") for rel, _, _ in patch.group_call_edits()))
+
+    def test_one_edit_each(self):
+        # No two edits of a file touch the same text, and each adds what
+        # it says (pluma:), so the result reads as the patch's.
+        edits = patch.group_call_edits()
+        for i, (rel, old, new) in enumerate(edits):
+            self.assertNotEqual(old, new)
+            self.assertIn("pluma:", new.replace(old, ""), (rel, old[:60]))
+            for other_rel, other_old, _ in edits[i + 1:]:
+                if other_rel == rel:
+                    self.assertNotIn(other_old, old)
+                    self.assertNotIn(old, other_old)
+
+    def test_report_contract(self):
+        # The report the SFU reads (ADR 0060 of the server, colibriClass
+        # PlumaE2EStatus): what each field is called, and that none is a key,
+        # a nonce, emoji or bytes of a frame.
+        context = patch._E2E_CONTEXT_RESET
+        counters = patch._TD_BINDING_DECRYPT
+        top = set(re.findall(r'report\["([A-Za-z0-9]+)"\]', context)) | set(re.findall(r'status\[@"([A-Za-z0-9]+)"\]', counters))
+        self.assertEqual(top, {"colibriClass", "v", "offset0", "offset1", "height0", "lastBlock", "epochs", "error",
+                               "encryptFailures", "senders", "unknownEpochs"})
+        sender = set(re.findall(r'@"([A-Za-z0-9]+)": @\(', counters))
+        self.assertEqual(sender, {"user", "ok", "unknownEpoch", "tooOld", "replayed", "other", "lastOkMs"})
+        for name in top | sender:
+            for word in ("key", "nonce", "emoji", "secret", "frame"):
+                self.assertNotIn(word, name.lower())
+        self.assertIn('report["colibriClass"] = "PlumaE2EStatus"', context)
+        self.assertIn('report["v"] = 1', context)
+        # Hashes go as their first 8 bytes in hex; at most 8 unknown epochs
+        # and 128 senders.
+        self.assertIn('@"%02x%02x%02x%02x%02x%02x%02x%02x"', patch._TD_BINDING_COUNTERS)
+        self.assertIn("_plumaUnknownEpochs.count >= 8", counters)
+        self.assertIn("_plumaSenders.size() < 128", counters)
+        # tgcalls sends nothing but a status report.
+        self.assertIn('json["colibriClass"].string_value() != "PlumaE2EStatus"', patch._TGCALLS_SEND_STATUS)
+        self.assertIn("if (!_isDataChannelOpen) {", patch._TGCALLS_SEND_STATUS)
+
+    def test_epoch_header(self):
+        # The open header the counters read is tde2e's: an int32 whose low
+        # byte is the number of epochs (at most 15), 32 bytes per epoch, after
+        # the open prefix; the decrypting side finds the prefix's length in
+        # the last 4 bytes (CallEncryption::decrypt).
+        counters = patch._TD_BINDING_COUNTERS
+        self.assertIn("size_t count = head & 0xff;", counters)
+        self.assertIn("if (count > 15 || size - offset - 4 < count * 32) {", counters)
+        self.assertIn("return std::string((const char *)data + offset, 4 + count * 32);", counters)
+        self.assertIn("memcpy(&prefixLength, bytes + message.length - 4, 4);", patch._TD_BINDING_DECRYPT)
+        self.assertIn("plumaEpochHeader(bytes, message.length >= 4 ? message.length - 4 : 0, prefixLength)", patch._TD_BINDING_DECRYPT)
+        # A block's hash is over the form the client built, magic less 1.
+        self.assertIn("magic -= 1;", counters)
+
+    def test_strings(self):
+        # The patch's texts are used, each once, by the code it adds.
+        edited = "".join(new for _, _, new in patch.group_call_edits())
+        for key, _ in patch.GROUP_CALL_STRINGS:
+            self.assertEqual(edited.count("strings." + key.replace(".", "_")), 1, key)
 
 
 if __name__ == "__main__":

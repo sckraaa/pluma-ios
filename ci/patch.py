@@ -44,6 +44,10 @@ Videos are encoded before sending at about twice Telegram's bitrate at every
 quality the user can choose, and with better sound; so are round videos and
 GIF files.
 
+Every group call is end-to-end encrypted, as Telegram's conferences are, and
+is joined as oneself; the client reports the state of its encryption to the
+SFU. No RTMP stream and no live story is offered.
+
 Standard library only, so the CI and a developer machine run it as is.
 """
 
@@ -1678,6 +1682,7 @@ def patch(tree, c):
     patch_account_cleanup(tree)
     patch_call_parameters(tree)
     patch_service_account(tree)
+    patch_group_calls(tree)
 
     # The build configuration of Make.py, with exactly the keys it reads.
     conf = c.build_configuration()
@@ -4957,6 +4962,7 @@ def verify(tree, c):
     verify_account_cleanup(tree)
     verify_call_parameters(tree)
     verify_service_account(tree)
+    verify_group_calls(tree)
 
     build = tree.read(APP_BUILD)
     if "<string>Telegram</string>" in build or "<string>telegram</string>" in build:
@@ -5703,6 +5709,878 @@ def verify_service_account(tree):
         if found != sites.get(rel, 0):
             raise PatchError(f"{rel}: {found} uses of {SERVICE_ACCOUNT_NAME}, expected {sites.get(rel, 0)}; "
                              "check who reads as a service account there")
+
+
+# --- group calls end to end -------------------------------------------------
+#
+# Every group call of Pluma is end-to-end encrypted (task 094 of the server,
+# ADR 0060): a call of a group or a channel keeps the interface and the rights
+# of a chat's call, and takes the cryptography of a conference: the join
+# carries a public key and a block of the call's chain, the client keeps the
+# chain (ConferenceCallE2EContext over tde2e) and tgcalls encrypts every frame.
+# Upstream does that for conferences only: a chat's call is made with
+# keyPair: nil and isConference: false (PresentationCallManager.swift 917,
+# 1101), and with no key PresentationGroupCallImpl makes no end-to-end
+# context (PresentationGroupCall.swift 922-942) and passes tgcalls no
+# encryption (1872-1878). isConference stays false: it is the interface of a
+# conference (invitations and links, VideoChatScreen.swift 2151-2167, the
+# microphone of 3165) and its single video layer in tgcalls
+# (GroupInstanceCustomImpl.cpp 2963-2966); encryption in tgcalls follows the
+# encryption callback alone (869-870, 1383, 1798-1800, 2009-2011). What
+# changes:
+#   - every group call gets a key: one the manager joins (createGroupCall)
+#     and one this client schedules, whose context is made once the server
+#     has made the call (schedule(); upstream makes the context at init only,
+#     from the call it joins);
+#   - the block of the join and the context are the account's own: a group
+#     call is joined as oneself only. The chain holds the account's key, and
+#     the server refuses another join_as. No channel to join as is offered
+#     anywhere: the peers to join as come from one engine call
+#     (cachedGroupCallDisplayAsAvailablePeers), which returns none, the
+#     manager ignores a channel a caller picked, and reconnect(as:) goes to
+#     nobody else;
+#   - no frame goes unencrypted: without a context tgcalls gets a dead one,
+#     as upstream does for a conference (1873-1878; GroupCallScreencast.swift
+#     70-75), and the screen goes out of the app's own engine, never the
+#     broadcast extension's, which has no encryption
+#     (BroadcastUploadExtension.swift 174), whatever the server's
+#     ios_use_inprocess_screencast says;
+#   - the emoji of the key show in every group call, as in a conference
+#     (VideoChatScreen.swift 2549-2556);
+#   - a failure of the end-to-end state rejoins the call with a new key.
+#     Upstream leaves the call: ConferenceCallE2EContext.isFailed (176-178,
+#     217-219) becomes the participants context's isFailedEvent
+#     (GroupCalls.swift 1988-1997), on which the call leaves
+#     (PresentationGroupCall.swift 2774-2782). tdesktop rejoins instead
+#     ("TdE2E: Got failure, scheduling rejoin!", calls_group_call.cpp
+#     787-789). The rejoin needs a new key (tde2e refuses a second call with
+#     the same one: Call.cpp 611-617), so the context starts over with it
+#     (reset). A state that cannot be made from the last block (TdCall.make
+#     returns nil) is a failure too; upstream stays without a state, silent.
+#     After 3 rejoins in 5 minutes the call is left with a notice
+#     (Pluma.GroupCall.EncryptionFailed);
+#   - every 5 s the client reports the state of its encryption to the SFU
+#     over the call's data channel (colibriClass "PlumaE2EStatus", ADR 0060
+#     §5): its heights, the hash of its last block and its epochs, the
+#     sticky error of tde2e and, per sender, what it decrypted and why it
+#     could not. No key, nonce, emoji or byte of a frame. tde2e has no
+#     counters (e2e_api.h 300-340): TdCall counts in encrypt, decrypt and
+#     applyBlock (TdBinding.mm), the context makes the report, tgcalls sends
+#     it next to ReceiverVideoConstraints (GroupInstanceCustomImpl.cpp
+#     2769-2834), and only while the channel is open.
+# RTMP streams and live stories go too (ADR 0060 §4): no "Stream with…" in
+# the call menu of a profile, no stream key in a stream's menu, no live mode
+# in the story camera. The rest of their code is left: nothing leads to it.
+CALL_MANAGER = "submodules/TelegramCallsUI/Sources/PresentationCallManager.swift"
+GROUP_CALL = "submodules/TelegramCallsUI/Sources/PresentationGroupCall.swift"
+GROUP_CALL_SCREENCAST = "submodules/TelegramCallsUI/Sources/GroupCallScreencast.swift"
+VIDEO_CHAT_SCREEN = "submodules/TelegramCallsUI/Sources/VideoChatScreen.swift"
+MEDIA_STREAM = "submodules/TelegramCallsUI/Sources/Components/MediaStreamComponent.swift"
+E2E_CONTEXT = "submodules/TelegramCore/Sources/State/ConferenceCallE2EContext.swift"
+ENGINE_CALLS = "submodules/TelegramCore/Sources/TelegramEngine/Calls/TelegramEngineCalls.swift"
+GROUP_CALL_CONTEXT = "submodules/TelegramVoip/Sources/GroupCallContext.swift"
+CALL_CONTEXT_HEADER = "submodules/TgVoipWebrtc/PublicHeaders/TgVoipWebrtc/OngoingCallThreadLocalContext.h"
+CALL_CONTEXT = "submodules/TgVoipWebrtc/Sources/OngoingCallThreadLocalContext.mm"
+GROUP_INSTANCE = TGCALLS + "/tgcalls/group/GroupInstanceImpl.h"
+GROUP_INSTANCE_CUSTOM_HEADER = TGCALLS + "/tgcalls/group/GroupInstanceCustomImpl.h"
+GROUP_INSTANCE_CUSTOM = TGCALLS + "/tgcalls/group/GroupInstanceCustomImpl.cpp"
+TD_BINDING = "third-party/td/TdBinding/Sources/TdBinding.mm"
+TD_BINDING_HEADER = "third-party/td/TdBinding/Public/TdBinding/TdBinding.h"
+PEER_INFO_CALLS = _PEER_INFO + "PeerInfoScreenCallActions.swift"
+STORY_CAMERA = _UI_COMPONENTS + "CameraScreen/Sources/CameraScreen.swift"
+
+GROUP_CALL_STRINGS = (
+    ("Pluma.GroupCall.EncryptionFailed", "Couldn't restore end-to-end encryption, so you left the call. Try joining again."),
+)
+GROUP_CALL_STRINGS_HEAD = "\n// pluma: group calls (task 094).\n"
+
+# The key of a call the manager makes, or none and no call.
+_GROUP_CALL_KEY = """
+    // pluma: every group call is end-to-end (task 094); with no key there is no call.
+    guard let keyPair = TelegramE2EEncryptionProviderImpl.shared.generateKeyPair() else {
+        return
+    }
+"""
+# The end-to-end context of a call: made at init from the call it joins, as
+# upstream does, or by schedule() for a call this client schedules.
+_MAKE_E2E_CONTEXT = """
+    // pluma: the end-to-end context of a call, made at init for a call that is
+    // joined and by schedule() for one this client schedules (task 094).
+    private static func plumaMakeE2EContext(accountContext: AccountContext, callId: Int64, accessHash: Int64, reference: InternalGroupCallReference, keyPair: TelegramKeyPair) -> ConferenceCallE2EContext {
+        return ConferenceCallE2EContext(
+            engine: accountContext.engine,
+            callId: callId,
+            accessHash: accessHash,
+            userId: accountContext.account.peerId.id._internalGetInt64Value(),
+            reference: reference,
+            keyPair: keyPair,
+            initializeState: { keyPair, userId, block in
+                guard let keyPair = TdKeyPair(keyId: keyPair.id, publicKey: keyPair.publicKey.data) else {
+                    return nil
+                }
+                guard let call = TdCall.make(with: keyPair, userId: userId, latestBlock: block) else {
+                    return nil
+                }
+                return ConferenceCallE2EContextStateImpl(call: call)
+            }
+        )
+    }
+
+    // pluma: the state of the end-to-end encryption goes to the SFU over the
+    // call's data channel every 5 s (task 094, ADR 0060 of the server).
+    private func plumaForwardE2EStatus() {
+        self.plumaE2EStatusDisposable?.dispose()
+        self.plumaE2EStatusDisposable = nil
+        guard let e2eContext = self.e2eContext else {
+            return
+        }
+        self.plumaE2EStatusDisposable = (e2eContext.plumaStatusReport
+        |> deliverOnMainQueue).startStrict(next: { [weak self] report in
+            guard let self, case let .call(callContext) = self.genericCallContext else {
+                return
+            }
+            callContext.sendE2EStatus(report)
+        })
+    }
+
+    // pluma: a failure of the end-to-end state rejoins the call with a new key,
+    // as tdesktop does; upstream leaves the call. After 3 rejoins in 5 minutes
+    // the call is left with a notice (task 094). Outside an established
+    // connection the join under way is let finish: the next participants
+    // context sees the failure again.
+    private func plumaRejoinAfterE2EFailure() {
+        guard let e2eContext = self.e2eContext, !self.leaving, case .established = self.internalState else {
+            return
+        }
+        let timestamp = CFAbsoluteTimeGetCurrent()
+        self.plumaE2ERejoinTimestamps.removeAll(where: { timestamp - $0 >= 5.0 * 60.0 })
+        if self.plumaE2ERejoinTimestamps.count < 3, let keyPair = TelegramE2EEncryptionProviderImpl.shared.generateKeyPair() {
+            self.plumaE2ERejoinTimestamps.append(timestamp)
+            self.keyPair = keyPair
+            e2eContext.reset(keyPair: keyPair)
+            self.requestCall(movingFromBroadcastToRtc: false)
+        } else {
+            let presentationData = self.accountContext.sharedContext.currentPresentationData.with { $0 }
+            self.accountContext.sharedContext.mainWindow?.present(textAlertController(context: self.accountContext, title: nil, text: presentationData.strings.Pluma_GroupCall_EncryptionFailed, actions: [
+                TextAlertAction(type: .genericAction, title: presentationData.strings.Common_OK, action: {})
+            ]), on: .root, blockInteraction: false, completion: {})
+            let _ = self.leave(terminateIfPossible: false).startStandalone()
+        }
+    }
+
+"""
+_E2E_CONTEXT_INIT_OLD = """
+    if let keyPair, let initialCall {
+        self.e2eContext = ConferenceCallE2EContext(
+            engine: accountContext.engine,
+            callId: initialCall.description.id,
+            accessHash: initialCall.description.accessHash,
+            userId: accountContext.account.peerId.id._internalGetInt64Value(),
+            reference: initialCall.reference,
+            keyPair: keyPair,
+            initializeState: { keyPair, userId, block in
+                guard let keyPair = TdKeyPair(keyId: keyPair.id, publicKey: keyPair.publicKey.data) else {
+                    return nil
+                }
+                guard let call = TdCall.make(with: keyPair, userId: userId, latestBlock: block) else {
+                    return nil
+                }
+                return ConferenceCallE2EContextStateImpl(call: call)
+            }
+        )
+    } else {
+"""
+_SCHEDULED_OLD = """
+    |> deliverOnMainQueue).start(next: { [weak self] callInfo in
+        guard let self else {
+            return
+        }
+        self.updateSessionState(internalState: .active(callInfo), audioSessionControl: self.audioSessionControl)
+    }, error: { [weak self] error in
+"""
+_SCHEDULED_CONTEXT = """\
+        // pluma: the call's end-to-end context, now that the server has made it (task 094).
+        if self.e2eContext == nil, let keyPair = self.keyPair {
+            let e2eContext = PresentationGroupCallImpl.plumaMakeE2EContext(accountContext: self.accountContext, callId: callInfo.id, accessHash: callInfo.accessHash, reference: .id(id: callInfo.id, accessHash: callInfo.accessHash), keyPair: keyPair)
+            self.e2eContext = e2eContext
+            (self.screencastIPCContext as? ScreencastInProcessIPCContext)?.e2eContext = e2eContext
+            self.plumaScheduledE2EContext.set(.single(e2eContext))
+        }
+"""
+_FAILED_OLD = """
+    |> deliverOnMainQueue).startStrict(next: { [weak self] isFailed in
+        guard let self, isFailed else {
+            return
+        }
+        let _ = self.leave(terminateIfPossible: false).startStandalone()
+    })
+"""
+_E2E_CONTEXT_RESET = """
+    // pluma: back to before the join, with a new key, for a rejoin after a
+    // failure of the end-to-end state: tde2e refuses a second call with the
+    // same key (CallKeyAlreadyUsed), so the state starts over (task 094).
+    func reset(keyPair: TelegramKeyPair) {
+        self.e2ePoll0Timer?.invalidate()
+        self.e2ePoll0Timer = nil
+        self.e2ePoll0Disposable?.dispose()
+        self.e2ePoll0Disposable = nil
+        self.e2ePoll0Offset = nil
+        self.e2ePoll1Timer?.invalidate()
+        self.e2ePoll1Timer = nil
+        self.e2ePoll1Disposable?.dispose()
+        self.e2ePoll1Disposable = nil
+        self.e2ePoll1Offset = nil
+        self.synchronizeRemovedParticipantsTimer?.invalidate()
+        self.synchronizeRemovedParticipantsTimer = nil
+        self.synchronizeRemovedParticipantsDisposable?.dispose()
+        self.synchronizeRemovedParticipantsDisposable = nil
+        self.isSynchronizingRemovedParticipants = false
+        self.scheduledSynchronizeRemovedParticipants = false
+        self.scheduledSynchronizeRemovedParticipantsAfterPoll = false
+        self.pendingKickPeers.removeAll()
+        self.keyPair = keyPair
+        self.state.with { callState in
+            callState.state = nil
+            callState.pendingIncomingBroadcastBlocks.removeAll()
+        }
+        self.e2eEncryptionKeyHashValue.set(nil)
+        self.blockchainParticipantsValue.set([])
+        self.isFailed.set(false)
+    }
+
+    // pluma: the report of the end-to-end state for the SFU (task 094, ADR
+    // 0060 of the server): TdCall's counters, or no height before the state
+    // is made, and the next blocks the client waits for on both sub-chains.
+    // Its values are numbers, strings and arrays of them; one that is not
+    // valid JSON is a bug of the counters and is not sent.
+    private func plumaReportStatus() {
+        var report: [String: Any] = self.state.with({ $0.state?.plumaStatus() }) ?? ["height0": -1]
+        report["colibriClass"] = "PlumaE2EStatus"
+        report["v"] = 1
+        report["offset0"] = self.e2ePoll0Offset ?? -1
+        report["offset1"] = self.e2ePoll1Offset ?? -1
+        guard JSONSerialization.isValidJSONObject(report), let data = try? JSONSerialization.data(withJSONObject: report), let string = String(data: data, encoding: .utf8) else {
+            assertionFailure("the end-to-end state report is not JSON")
+            return
+        }
+        self.statusReportPipe.putNext(string)
+    }
+
+"""
+# TdCall's counters of the state report: per sender what was decrypted and
+# why not (tde2e's codes and messages: Call.cpp 285-470, Decrypt_UnknownEpoch
+# and the "Message is too old" and "Message is already processed" of
+# check_not_seen), the failures of encryption, the code of the error that
+# made the call fail (Call::apply_block keeps it: Call.cpp 667-678), the hash
+# of the last block and the epochs of the open header (Call.cpp 383-440).
+# TdCall is used under the lock of ConferenceCallE2EContext.state, encrypt and
+# decrypt included (OngoingGroupCallEncryptionContextImpl), so the counters
+# need none of their own.
+_TD_BINDING_INCLUDES = """
+// pluma: for the counters of the state report (task 094).
+#include <map>
+#include <string>
+
+#import <CommonCrypto/CommonDigest.h>
+"""
+_TD_BINDING_COUNTERS = """
+// pluma: the counters of the state report of the end-to-end encryption
+// (task 094): what one sender's packets came to.
+struct PlumaSenderCounters {
+    int64_t decrypted = 0;
+    int64_t unknownEpoch = 0;
+    int64_t tooOld = 0;
+    int64_t replayed = 0;
+    int64_t other = 0;
+    double lastDecryptedAt = 0.0;
+};
+
+// The first 8 bytes of a 32-byte hash, in hex.
+static NSString *plumaHashPrefix(const uint8_t *hash) {
+    return [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7]];
+}
+
+// The hash of a block the server sent, as tde2e counts it: the SHA-256 of the
+// block's own form (Block::calc_hash), whose first int32 is one less than in the
+// form the server keeps and sends (Blockchain::from_server_to_local).
+static NSString * _Nullable plumaBlockHashPrefix(NSData *serverBlock) {
+    if (serverBlock.length < 4) {
+        return nil;
+    }
+    NSMutableData *block = [serverBlock mutableCopy];
+    uint32_t magic = 0;
+    memcpy(&magic, block.bytes, 4);
+    magic -= 1;
+    memcpy(block.mutableBytes, &magic, 4);
+    uint8_t hash[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(block.bytes, (CC_LONG)block.length, hash);
+    return plumaHashPrefix(hash);
+}
+
+// The open header of an encrypted packet after its open prefix: an int32
+// with the number of epochs in its low byte, then 32 bytes of each epoch's
+// hash (CallEncryption::encrypt of tde2e). Empty when the packet has none.
+static std::string plumaEpochHeader(const uint8_t *data, size_t size, size_t offset) {
+    if (offset > size || size - offset < 4) {
+        return std::string();
+    }
+    uint32_t head = 0;
+    memcpy(&head, data + offset, 4);
+    size_t count = head & 0xff;
+    if (count > 15 || size - offset - 4 < count * 32) {
+        return std::string();
+    }
+    return std::string((const char *)data + offset, 4 + count * 32);
+}
+
+static NSArray<NSString *> *plumaEpochHashes(std::string const &header) {
+    NSMutableArray<NSString *> *hashes = [[NSMutableArray alloc] init];
+    for (size_t offset = 4; offset + 32 <= header.size(); offset += 32) {
+        [hashes addObject:plumaHashPrefix((const uint8_t *)header.data() + offset)];
+    }
+    return hashes;
+}
+
+@interface TdCall () {
+    std::map<int64_t, PlumaSenderCounters> _plumaSenders;
+    int64_t _plumaEncryptFailures;
+    int _plumaError;
+    NSString *_plumaLastBlock;
+    std::string _plumaOutgoingHeader;
+    NSArray<NSString *> *_plumaEpochs;
+    NSMutableOrderedSet<NSString *> *_plumaUnknownEpochs;
+}
+"""
+_TD_BINDING_DECRYPT_OLD = """
+    auto result = tde2e_api::call_decrypt(_callId, userId, 0, mappedMessage);
+    if (!result.is_ok()) {
+        return nil;
+    }
+    return [[NSData alloc] initWithBytes:result.value().data() length:result.value().size()];
+"""
+_TD_BINDING_DECRYPT = """
+    auto result = tde2e_api::call_decrypt(_callId, userId, 0, mappedMessage);
+    // pluma: counted for the state report (task 094), at most 128 senders.
+    auto counters = _plumaSenders.find(userId);
+    if (counters == _plumaSenders.end() && _plumaSenders.size() < 128) {
+        counters = _plumaSenders.emplace(userId, PlumaSenderCounters()).first;
+    }
+    if (!result.is_ok()) {
+        if (counters != _plumaSenders.end()) {
+            std::string const &errorMessage = result.error().message;
+            if (result.error().code == tde2e_api::ErrorCode::Decrypt_UnknownEpoch) {
+                counters->second.unknownEpoch += 1;
+                const uint8_t *bytes = (const uint8_t *)message.bytes;
+                uint32_t prefixLength = 0;
+                if (message.length >= 4) {
+                    memcpy(&prefixLength, bytes + message.length - 4, 4);
+                }
+                for (NSString *hash in plumaEpochHashes(plumaEpochHeader(bytes, message.length >= 4 ? message.length - 4 : 0, prefixLength))) {
+                    if (![_plumaUnknownEpochs containsObject:hash]) {
+                        if (_plumaUnknownEpochs.count >= 8) {
+                            [_plumaUnknownEpochs removeObjectAtIndex:0];
+                        }
+                        [_plumaUnknownEpochs addObject:hash];
+                    }
+                }
+            } else if (errorMessage.find("Message is too old") != std::string::npos) {
+                counters->second.tooOld += 1;
+            } else if (errorMessage.find("Message is already processed") != std::string::npos) {
+                counters->second.replayed += 1;
+            } else {
+                counters->second.other += 1;
+            }
+        }
+        return nil;
+    }
+    if (counters != _plumaSenders.end()) {
+        counters->second.decrypted += 1;
+        counters->second.lastDecryptedAt = CFAbsoluteTimeGetCurrent();
+    }
+    return [[NSData alloc] initWithBytes:result.value().data() length:result.value().size()];
+}
+
+// pluma: the counters of the state report of the end-to-end encryption (task 094).
+- (NSDictionary<NSString *, id> *)plumaStatus {
+    NSMutableDictionary<NSString *, id> *status = [[NSMutableDictionary alloc] init];
+    auto height = tde2e_api::call_get_height(_callId);
+    status[@"height0"] = @(height.is_ok() ? height.value() : -1);
+    if (_plumaLastBlock != nil) {
+        status[@"lastBlock"] = _plumaLastBlock;
+    }
+    status[@"epochs"] = _plumaEpochs ?: @[];
+    status[@"error"] = @(_plumaError);
+    status[@"encryptFailures"] = @(_plumaEncryptFailures);
+    double timestamp = CFAbsoluteTimeGetCurrent();
+    NSMutableArray<NSDictionary<NSString *, id> *> *senders = [[NSMutableArray alloc] init];
+    for (auto const &it : _plumaSenders) {
+        PlumaSenderCounters const &counters = it.second;
+        int64_t lastOkMs = counters.lastDecryptedAt > 0.0 ? (int64_t)((timestamp - counters.lastDecryptedAt) * 1000.0) : -1;
+        [senders addObject:@{
+            @"user": @(it.first),
+            @"ok": @(counters.decrypted),
+            @"unknownEpoch": @(counters.unknownEpoch),
+            @"tooOld": @(counters.tooOld),
+            @"replayed": @(counters.replayed),
+            @"other": @(counters.other),
+            @"lastOkMs": @(lastOkMs)
+        }];
+    }
+    status[@"senders"] = senders;
+    status[@"unknownEpochs"] = _plumaUnknownEpochs.array;
+    return status;
+"""
+_TGCALLS_SEND_STATUS = """
+    // pluma: the client's report of its end-to-end encryption for the SFU (task
+    // 094, ADR 0060 of the server), next to ReceiverVideoConstraints. Only a
+    // status report goes, and only while the data channel is open: the next
+    // one comes in 5 s.
+    void sendE2EStatus(std::string const &status) {
+        if (!_isDataChannelOpen) {
+            return;
+        }
+        std::string parsingError;
+        auto json = json11::Json::parse(status, parsingError);
+        if (!json.is_object() || json["colibriClass"].string_value() != "PlumaE2EStatus") {
+            RTC_LOG(LS_WARNING) << "sendE2EStatus: not a status report";
+            return;
+        }
+        _networkManager->perform([status](GroupNetworkManager *networkManager) {
+            networkManager->sendDataChannelMessage(status);
+        });
+    }
+
+"""
+_TGCALLS_ADD_EVENT = """
+void GroupInstanceCustomImpl::internal_addCustomNetworkEvent(bool isRemoteConnected) {
+    _internal->perform([isRemoteConnected](GroupInstanceCustomInternal *internal) {
+        internal->internal_addCustomNetworkEvent(isRemoteConnected);
+    });
+}
+"""
+_PROFILE_STREAM_OLD = (
+    "            var credentialsPromise: Promise<GroupCallStreamCredentials>?\n"
+    "            var canCreateStream = false\n"
+    "            switch chatPeer {\n"
+    "            case let .legacyGroup(group):\n"
+    "                if case .creator = group.role {\n"
+    "                    canCreateStream = true\n"
+    "                }\n"
+    "            case let .channel(channel):\n"
+    "                if channel.hasPermission(.manageCalls) {\n"
+    "                    canCreateStream = true\n"
+    "                    credentialsPromise = Promise()\n"
+    "                    credentialsPromise?.set(context.engine.calls.getGroupCallStreamCredentials(peerId: peerId, isLiveStream: false, revokePreviousCredentials: false) |> `catch` { _ -> Signal<GroupCallStreamCredentials, NoError> in return .never() })\n"
+    "                }\n"
+    "            default:\n"
+    "                break\n"
+    "            }\n"
+    "            \n"
+    "            if canCreateStream {\n"
+    "                items.append(.action(ContextMenuActionItem(text: strongSelf.presentationData.strings.ChannelInfo_CreateExternalStream, icon: { theme in return generateTintedImage(image: UIImage(bundleImageName: \"Chat/Context Menu/VoiceChat\"), color: theme.contextMenu.primaryColor) }, action: { _, f in\n"
+    "                    f(.dismissWithoutContent)\n"
+    "                    \n"
+    "                    self?.createExternalStream(credentialsPromise: credentialsPromise)\n"
+    "                })))\n"
+    "            }\n")
+_STREAM_KEY_OLD = (
+    "                        let credentialsPromise = Promise<GroupCallStreamCredentials>()\n"
+    "                        credentialsPromise.set(call.accountContext.engine.calls.getGroupCallStreamCredentials(peerId: peerId, isLiveStream: false, revokePreviousCredentials: false) |> `catch` { _ -> Signal<GroupCallStreamCredentials, NoError> in return .never() })\n"
+    "                        \n"
+    "                        items.append(.action(ContextMenuActionItem(id: nil, text: presentationData.strings.LiveStream_ViewCredentials, textColor: .primary, textLayout: .singleLine, textFont: .regular, badge: nil, icon: { theme in\n"
+    "                            return generateTintedImage(image: UIImage(bundleImageName: \"Chat/Context Menu/Info\"), color: theme.contextMenu.primaryColor, backgroundColor: nil)\n"
+    "                        }, action: { [weak call, weak controller] _, a in\n"
+    "                            guard let call = call, let controller = controller else {\n"
+    "                                return\n"
+    "                            }\n"
+    "                            \n"
+    "                            controller.push(CreateExternalMediaStreamScreen(context: call.accountContext, peerId: peerId, credentialsPromise: credentialsPromise, mode: .view))\n"
+    "                            \n"
+    "                            a(.default)\n"
+    "                        })))\n")
+
+
+def group_call_edits():
+    """The edits of the end-to-end group calls, RTMP and live stories, as
+    (file, upstream's text, Pluma's)."""
+    return (
+        # Every group call gets a key: one this client schedules ...
+        (CALL_MANAGER,
+         "                        let call = PresentationGroupCallImpl(\n"
+         "                            accountContext: accountContext,\n"
+         "                            audioSession: self.audioSession,\n"
+         "                            callKitIntegration: nil,\n"
+         "                            getDeviceAccessData: self.getDeviceAccessData,\n"
+         "                            initialCall: nil,\n",
+         src(" " * 24, _GROUP_CALL_KEY)
+         + "                        let call = PresentationGroupCallImpl(\n"
+           "                            accountContext: accountContext,\n"
+           "                            audioSession: self.audioSession,\n"
+           "                            callKitIntegration: nil,\n"
+           "                            getDeviceAccessData: self.getDeviceAccessData,\n"
+           "                            initialCall: nil,\n"),
+        (CALL_MANAGER,
+         "                            joinAsPeerId: nil,\n                            isStream: false,\n"
+         "                            streamPeerId: nil,\n                            keyPair: nil,\n",
+         "                            joinAsPeerId: nil,\n                            isStream: false,\n"
+         "                            streamPeerId: nil,\n                            keyPair: keyPair, // pluma: task 094\n"),
+        # ... and one the manager joins, as oneself.
+        (CALL_MANAGER,
+         "        let call = PresentationGroupCallImpl(\n"
+         "            accountContext: accountContext,\n"
+         "            audioSession: self.audioSession,\n"
+         "            callKitIntegration: nil,\n"
+         "            getDeviceAccessData: self.getDeviceAccessData,\n"
+         "            initialCall: (initialCall, .id(id: initialCall.id, accessHash: initialCall.accessHash)),\n",
+         src(" " * 8, _GROUP_CALL_KEY)
+         + "        let call = PresentationGroupCallImpl(\n"
+           "            accountContext: accountContext,\n"
+           "            audioSession: self.audioSession,\n"
+           "            callKitIntegration: nil,\n"
+           "            getDeviceAccessData: self.getDeviceAccessData,\n"
+           "            initialCall: (initialCall, .id(id: initialCall.id, accessHash: initialCall.accessHash)),\n"),
+        (CALL_MANAGER,
+         "            joinAsPeerId: joinAsPeerId,\n            isStream: initialCall.isStream ?? false,\n"
+         "            streamPeerId: nil,\n            keyPair: nil,\n",
+         "            joinAsPeerId: nil, // pluma: a group call is joined as oneself only (task 094)\n"
+         "            isStream: initialCall.isStream ?? false,\n"
+         "            streamPeerId: nil,\n            keyPair: keyPair,\n"),
+        # The call keeps its key and its context where both can change.
+        (GROUP_CALL, "    private let keyPair: TelegramKeyPair?\n",
+         "    private var keyPair: TelegramKeyPair? // pluma: a new one for a rejoin after a failure of the end-to-end state (task 094)\n"),
+        (GROUP_CALL, "    private let e2eContext: ConferenceCallE2EContext?\n",
+         "    private var e2eContext: ConferenceCallE2EContext? // pluma: made by schedule() for a call this client schedules (task 094)\n"),
+        (GROUP_CALL, "    private var isFailedEventDisposable: Disposable?\n",
+         "    private var isFailedEventDisposable: Disposable?\n"
+         "    private var plumaE2EStatusDisposable: Disposable? // pluma: task 094\n"
+         "    private var plumaE2ERejoinTimestamps: [Double] = [] // pluma: task 094\n"),
+        (GROUP_CALL,
+         "    public var e2eEncryptionKeyHash: Signal<Data?, NoError> {\n"
+         "        return self.e2eContext?.e2eEncryptionKeyHash ?? .single(nil)\n    }\n",
+         src(" " * 4, """
+             public var e2eEncryptionKeyHash: Signal<Data?, NoError> {
+                 if let e2eContext = self.e2eContext {
+                     return e2eContext.e2eEncryptionKeyHash
+                 }
+                 // pluma: a call this client schedules gets its end-to-end context once the server has made it (task 094).
+                 return self.plumaScheduledE2EContext.get()
+                 |> take(1)
+                 |> mapToSignal { e2eContext -> Signal<Data?, NoError> in
+                     return e2eContext.e2eEncryptionKeyHash
+                 }
+             }
+             private let plumaScheduledE2EContext = Promise<ConferenceCallE2EContext>() // pluma: task 094
+         """)),
+        (GROUP_CALL, src(" " * 8, _E2E_CONTEXT_INIT_OLD),
+         src(" " * 8, """
+             if let keyPair, let initialCall {
+                 // pluma: the same context as schedule() makes for a call this client schedules (task 094).
+                 self.e2eContext = PresentationGroupCallImpl.plumaMakeE2EContext(accountContext: accountContext, callId: initialCall.description.id, accessHash: initialCall.description.accessHash, reference: initialCall.reference, keyPair: keyPair)
+             } else {
+         """)),
+        # No screen from the broadcast extension's engine. The branch goes
+        # whole: a constant condition would leave code that is never run,
+        # which Swift warns about, and the module builds with
+        # -warnings-as-errors.
+        (GROUP_CALL,
+         "        var useIPCContext = false\n"
+         "        if let data = self.accountContext.currentAppConfiguration.with({ $0 }).data, let value = data[\"ios_use_inprocess_screencast\"] as? Double {\n"
+         "            useIPCContext = value != 0.0\n        }\n"
+         "        \n"
+         "        let embeddedBroadcastImplementationTypePath = self.accountContext.sharedContext.basePath + \"/broadcast-coordination-type-v2\"\n"
+         "        \n"
+         "        let screencastIPCContext: ScreencastIPCContext\n"
+         "        if useIPCContext {\n"
+         "            screencastIPCContext = ScreencastEmbeddedIPCContext(basePath: self.accountContext.sharedContext.basePath)\n"
+         "            let _ = try? \"ipc\".write(toFile: embeddedBroadcastImplementationTypePath, atomically: true, encoding: .utf8)\n"
+         "        } else {\n"
+         "            screencastIPCContext = ScreencastInProcessIPCContext(basePath: self.accountContext.sharedContext.basePath, isConference: self.isConference, e2eContext: self.e2eContext)\n"
+         "            let _ = try? \"legacy\".write(toFile: embeddedBroadcastImplementationTypePath, atomically: true, encoding: .utf8)\n"
+         "        }\n",
+         src(" " * 8, """
+             // pluma: the screen goes out of the app's own engine, which encrypts it end to end, not the broadcast
+             // extension's, which does not, whatever ios_use_inprocess_screencast says (task 094). "legacy" tells the
+             // extension to hand its frames to the app (BroadcastUploadExtension.swift 339-351).
+             let embeddedBroadcastImplementationTypePath = self.accountContext.sharedContext.basePath + "/broadcast-coordination-type-v2"
+
+             let screencastIPCContext: ScreencastIPCContext = ScreencastInProcessIPCContext(basePath: self.accountContext.sharedContext.basePath, isConference: self.isConference, e2eContext: self.e2eContext)
+             let _ = try? "legacy".write(toFile: embeddedBroadcastImplementationTypePath, atomically: true, encoding: .utf8)
+         """)),
+        # No frame goes unencrypted.
+        (GROUP_CALL,
+         "                    } else if self.isConference {\n"
+         "                        // Prevent non-encrypted conference calls\n",
+         "                    } else {\n"
+         "                        // pluma: no group call goes unencrypted (task 094); with no end-to-end context its frames are dropped.\n"),
+        (GROUP_CALL_SCREENCAST,
+         "            } else if self.isConference {\n"
+         "                // Prevent non-encrypted conference calls\n",
+         "            } else {\n"
+         "                // pluma: no group call goes unencrypted (task 094); with no end-to-end context its frames are dropped.\n"),
+        (GROUP_CALL_SCREENCAST, "    private let e2eContext: ConferenceCallE2EContext?\n",
+         "    var e2eContext: ConferenceCallE2EContext? // pluma: set by schedule() for a call this client schedules (task 094)\n"),
+        # The block of the join is the account's own, as the context.
+        (GROUP_CALL, "                        let userId = self.joinAsPeerId.id._internalGetInt64Value()\n",
+         "                        let userId = self.accountContext.account.peerId.id._internalGetInt64Value() // pluma: as the end-to-end context's (task 094)\n"),
+        # The state report, once the engine is there.
+        (GROUP_CALL, "                self.genericCallContext = genericCallContext\n                self.stateVersionValue += 1\n",
+         "                self.genericCallContext = genericCallContext\n                self.stateVersionValue += 1\n"
+         "                self.plumaForwardE2EStatus() // pluma: task 094\n"),
+        # A failure of the end-to-end state rejoins.
+        (GROUP_CALL, src(" " * 16, _FAILED_OLD),
+         src(" " * 16, _FAILED_OLD.replace(
+             "    let _ = self.leave(terminateIfPossible: false).startStandalone()\n",
+             "    self.plumaRejoinAfterE2EFailure() // pluma: upstream leaves the call (task 094)\n"))),
+        # The context of a call this client schedules.
+        (GROUP_CALL, src(" " * 8, _SCHEDULED_OLD),
+         src(" " * 8, _SCHEDULED_OLD.replace("        self.updateSessionState(", _SCHEDULED_CONTEXT + "        self.updateSessionState("))),
+        # Nobody else to join as.
+        (GROUP_CALL,
+         "    public func reconnect(as peerId: EnginePeer.Id) {\n        if peerId == self.joinAsPeerId {\n",
+         "    public func reconnect(as peerId: EnginePeer.Id) {\n"
+         "        // pluma: a group call is joined as oneself only (task 094).\n"
+         "        if peerId == self.joinAsPeerId || peerId != self.accountContext.account.peerId {\n"),
+        (ENGINE_CALLS,
+         "            return _internal_cachedGroupCallDisplayAsAvailablePeers(account: self.account, peerId: peerId)\n",
+         "            // pluma: a group call is joined as oneself only (task 094): its end-to-end chain\n"
+         "            // holds the account's own key, and the server refuses another join_as.\n"
+         "            return .single([])\n"),
+        (GROUP_CALL, "    public func reconnect(with invite: String) {\n",
+         src(" " * 4, _MAKE_E2E_CONTEXT) + "\n    public func reconnect(with invite: String) {\n"),
+        (GROUP_CALL, "        self.participantsContextStateDisposable.dispose()\n        self.isFailedEventDisposable?.dispose()\n    }\n",
+         "        self.participantsContextStateDisposable.dispose()\n        self.isFailedEventDisposable?.dispose()\n"
+         "        self.plumaE2EStatusDisposable?.dispose() // pluma: task 094\n    }\n"),
+        (GROUP_CALL,
+         "    func decrypt(message: Data, userId: Int64) -> Data? {\n"
+         "        return self.call.decrypt(message, userId: userId)\n    }\n",
+         "    func decrypt(message: Data, userId: Int64) -> Data? {\n"
+         "        return self.call.decrypt(message, userId: userId)\n    }\n\n"
+         "    // pluma: the counters of the state report (task 094).\n"
+         "    func plumaStatus() -> [String: Any] {\n        return self.call.plumaStatus()\n    }\n"),
+        # The emoji of the key in every group call.
+        (VIDEO_CHAT_SCREEN,
+         "            if isConference {\n                if !isLandscape {\n                    navigationHeight -= 2.0\n",
+         src(" " * 12, """
+             // pluma: every group call is end-to-end (task 094); the emoji of its key show in each, as in a conference.
+             var showsEncryptionKey = isConference
+             if case .group = self.currentCall {
+                 showsEncryptionKey = true
+             }
+             if showsEncryptionKey {
+                 if !isLandscape {
+                     navigationHeight -= 2.0
+         """)),
+        # The context: its report, its new start, a state that cannot be made.
+        (E2E_CONTEXT,
+         "    func decrypt(message: Data, userId: Int64) -> Data?\n}\n",
+         "    func decrypt(message: Data, userId: Int64) -> Data?\n\n"
+         "    // pluma: the counters of the state report of the end-to-end encryption (task 094).\n"
+         "    func plumaStatus() -> [String: Any]\n}\n"),
+        (E2E_CONTEXT, "        private let keyPair: TelegramKeyPair\n",
+         "        private var keyPair: TelegramKeyPair // pluma: a new one by reset(keyPair:) (task 094)\n"
+         "        let statusReportPipe = ValuePipe<String>() // pluma: task 094\n"
+         "        private var plumaStatusTimer: Foundation.Timer? // pluma: task 094\n"),
+        (E2E_CONTEXT,
+         "            self.synchronizeRemovedParticipantsTimer?.invalidate()\n        }\n\n"
+         "        func begin(initialState: JoinGroupCallResult.E2EState?) {\n",
+         "            self.synchronizeRemovedParticipantsTimer?.invalidate()\n"
+         "            self.plumaStatusTimer?.invalidate() // pluma: task 094\n        }\n\n"
+         "        func begin(initialState: JoinGroupCallResult.E2EState?) {\n" + src(" " * 12, """
+             // pluma: the state report every 5 s from the join on (task 094).
+             self.plumaStatusTimer?.invalidate()
+             self.plumaStatusTimer = Foundation.Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true, block: { [weak self] _ in
+                 self?.plumaReportStatus()
+             })
+         """)),
+        (E2E_CONTEXT,
+         "                        guard let state = initializeState(keyPair, userId, block) else {\n"
+         "                            return ([], Data(), [], [:], false)\n                        }\n",
+         "                        guard let state = initializeState(keyPair, userId, block) else {\n"
+         "                            // pluma: a failure, as a block that does not apply; upstream stays without a state (task 094).\n"
+         "                            return ([], Data(), [], [:], true)\n                        }\n"),
+        (E2E_CONTEXT, "        func kickPeer(id: EnginePeer.Id) {\n",
+         src(" " * 8, _E2E_CONTEXT_RESET) + "\n        func kickPeer(id: EnginePeer.Id) {\n"),
+        (E2E_CONTEXT, "    public func begin(initialState: JoinGroupCallResult.E2EState?) {\n",
+         src(" " * 4, """
+             // pluma: the report of the end-to-end state, every 5 s from the join on (task 094).
+             public var plumaStatusReport: Signal<String, NoError> {
+                 return self.impl.signalWith { impl, subscriber in
+                     return impl.statusReportPipe.signal().start(next: subscriber.putNext)
+                 }
+             }
+
+             // pluma: a new start with a new key, for a rejoin after a failure of the end-to-end state (task 094).
+             public func reset(keyPair: TelegramKeyPair) {
+                 self.impl.with { impl in
+                     impl.reset(keyPair: keyPair)
+                 }
+             }
+
+         """) + "\n    public func begin(initialState: JoinGroupCallResult.E2EState?) {\n"),
+        # The report through the engine to the data channel.
+        (GROUP_CALL_CONTEXT,
+         "        func addExternalAudioData(data: Data) {\n            self.context.addExternalAudioData(data)\n        }\n",
+         "        func addExternalAudioData(data: Data) {\n            self.context.addExternalAudioData(data)\n        }\n\n"
+         "        // pluma: task 094\n"
+         "        func sendE2EStatus(_ status: String) {\n            self.context.sendE2EStatus(status)\n        }\n"),
+        (GROUP_CALL_CONTEXT,
+         "    public func addExternalAudioData(data: Data) {\n        self.impl.with { impl in\n"
+         "            impl.addExternalAudioData(data: data)\n        }\n    }\n",
+         "    public func addExternalAudioData(data: Data) {\n        self.impl.with { impl in\n"
+         "            impl.addExternalAudioData(data: data)\n        }\n    }\n\n"
+         "    // pluma: the state report of the end-to-end encryption, for the SFU over the data channel (task 094).\n"
+         "    public func sendE2EStatus(_ status: String) {\n        self.impl.with { impl in\n"
+         "            impl.sendE2EStatus(status)\n        }\n    }\n"),
+        (CALL_CONTEXT_HEADER,
+         "- (void)getStats:(void (^ _Nonnull)(OngoingGroupCallStats * _Nonnull))completion;\n",
+         "- (void)sendE2EStatus:(NSString * _Nonnull)status; // pluma: task 094\n\n"
+         "- (void)getStats:(void (^ _Nonnull)(OngoingGroupCallStats * _Nonnull))completion;\n"),
+        (CALL_CONTEXT,
+         "- (void)getStats:(void (^ _Nonnull)(OngoingGroupCallStats * _Nonnull))completion {\n",
+         "// pluma: the state report of the end-to-end encryption, for the SFU (task 094).\n"
+         "- (void)sendE2EStatus:(NSString * _Nonnull)status {\n    if (_instance) {\n"
+         "        _instance->sendE2EStatus(status.UTF8String ?: \"\");\n    }\n}\n\n"
+         "- (void)getStats:(void (^ _Nonnull)(OngoingGroupCallStats * _Nonnull))completion {\n"),
+        (GROUP_INSTANCE, "    virtual void internal_addCustomNetworkEvent(bool isRemoteConnected) = 0;\n",
+         "    virtual void internal_addCustomNetworkEvent(bool isRemoteConnected) = 0;\n"
+         "    // pluma: the state report of the end-to-end encryption for the SFU (task 094); an engine\n"
+         "    // with no data channel to it has nothing to send it over.\n"
+         "    virtual void sendE2EStatus(std::string const &) {}\n"),
+        (GROUP_INSTANCE_CUSTOM_HEADER, "    void internal_addCustomNetworkEvent(bool isRemoteConnected);\n",
+         "    void internal_addCustomNetworkEvent(bool isRemoteConnected);\n"
+         "    void sendE2EStatus(std::string const &status); // pluma: task 094\n"),
+        (GROUP_INSTANCE_CUSTOM, "    void internal_addCustomNetworkEvent(bool isRemoteConnected) {\n",
+         src(" " * 4, _TGCALLS_SEND_STATUS) + "\n    void internal_addCustomNetworkEvent(bool isRemoteConnected) {\n"),
+        (GROUP_INSTANCE_CUSTOM, src("", _TGCALLS_ADD_EVENT),
+         src("", _TGCALLS_ADD_EVENT) + "\n" + src("", """
+             // pluma: task 094
+             void GroupInstanceCustomImpl::sendE2EStatus(std::string const &status) {
+                 _internal->perform([status](GroupInstanceCustomInternal *internal) {
+                     internal->sendE2EStatus(status);
+                 });
+             }
+         """)),
+        # TdCall counts.
+        (TD_BINDING, "#include <td/e2e/e2e_api.h>\n",
+         "#include <td/e2e/e2e_api.h>\n" + src("", _TD_BINDING_INCLUDES)),
+        (TD_BINDING, "@interface TdCall ()\n\n@property (nonatomic, strong) TdKeyPair *keyPair;\n",
+         src("", _TD_BINDING_COUNTERS) + "\n@property (nonatomic, strong) TdKeyPair *keyPair;\n"),
+        (TD_BINDING, "        _callId = callId;\n        _keyPair = keyPair;\n",
+         "        _callId = callId;\n        _keyPair = keyPair;\n"
+         "        _plumaUnknownEpochs = [[NSMutableOrderedSet alloc] init]; // pluma: task 094\n"),
+        (TD_BINDING, "    return [[TdCall alloc] initWithId:call.value() keyPair: keyPair];\n",
+         "    TdCall *result = [[TdCall alloc] initWithId:call.value() keyPair: keyPair];\n"
+         "    result->_plumaLastBlock = plumaBlockHashPrefix(latestBlock); // pluma: task 094\n"
+         "    return result;\n"),
+        (TD_BINDING,
+         "    auto result = tde2e_api::call_apply_block(_callId, mappedBlock);\n"
+         "    if (!result.is_ok()) {\n        return false;\n    }\n    return true;\n",
+         "    auto result = tde2e_api::call_apply_block(_callId, mappedBlock);\n"
+         "    if (!result.is_ok()) {\n"
+         "        // pluma: the error that made the call fail, for the state report (task 094).\n"
+         "        if (_plumaError == 0) {\n            _plumaError = (int)result.error().code;\n        }\n"
+         "        return false;\n    }\n"
+         "    _plumaLastBlock = plumaBlockHashPrefix(block); // pluma: task 094\n"
+         "    return true;\n"),
+        (TD_BINDING,
+         "    auto result = tde2e_api::call_encrypt(_callId, channelId, mappedMessage, (size_t)plaintextPrefixLength);\n"
+         "    if (!result.is_ok()) {\n        return nil;\n    }\n",
+         "    auto result = tde2e_api::call_encrypt(_callId, channelId, mappedMessage, (size_t)plaintextPrefixLength);\n"
+         "    if (!result.is_ok()) {\n"
+         "        _plumaEncryptFailures += 1; // pluma: task 094\n"
+         "        return nil;\n    }\n" + src(" " * 4, """
+             // pluma: the epochs the packets go out with, for the state report (task 094).
+             std::string header = plumaEpochHeader((const uint8_t *)result.value().data(), result.value().size(), (size_t)plaintextPrefixLength);
+             if (header != _plumaOutgoingHeader) {
+                 _plumaOutgoingHeader = header;
+                 _plumaEpochs = plumaEpochHashes(header);
+             }
+         """)),
+        (TD_BINDING, src(" " * 4, _TD_BINDING_DECRYPT_OLD), _TD_BINDING_DECRYPT.lstrip("\n")),
+        (TD_BINDING_HEADER, "- (nullable NSData *)decrypt:(NSData *)message userId:(int64_t)userId;\n",
+         "- (nullable NSData *)decrypt:(NSData *)message userId:(int64_t)userId;\n\n"
+         "// pluma: the counters of the state report of the end-to-end encryption (task 094).\n"
+         "- (NSDictionary<NSString *, id> *)plumaStatus;\n"),
+        # No RTMP stream and no live story.
+        (PEER_INFO_CALLS, _PROFILE_STREAM_OLD,
+         "            // pluma: no RTMP stream (task 094): no \"Stream with…\".\n"
+         "            let _ = chatPeer\n"),
+        (MEDIA_STREAM, _STREAM_KEY_OLD,
+         "                        // pluma: no RTMP stream (task 094): no stream key.\n"
+         "                        let _ = peerId\n"),
+        (STORY_CAMERA, "            if case .story = mode {\n                self.canLivestream = true\n            }\n",
+         "            // pluma: no live stories (task 094): they are group calls with no end-to-end\n"
+         "            // encryption and an RTMP option; the story camera has no live mode.\n"),
+    )
+
+
+# The check job fetches only the paths the patch reads (ci/fetch-upstream.sh
+# sparse); the files of tgcalls come from the submodule.
+UPSTREAM_PATHS += tuple(sorted({rel for rel, _, _ in group_call_edits() if not rel.startswith(TGCALLS + "/")} - set(UPSTREAM_PATHS)))
+SUBMODULES = tuple((sub, url, paths + tuple(sorted({rel for rel, _, _ in group_call_edits() if rel.startswith(sub + "/")} - set(paths))))
+                   for sub, url, paths in SUBMODULES)
+
+
+def group_call_entries():
+    """The entries of the English strings, as the file writes them."""
+    return [f'"{key}" = "{value}";' for key, value in GROUP_CALL_STRINGS]
+
+
+def patch_group_calls(tree):
+    """Every group call end to end, joined as oneself; no RTMP stream and no
+    live story."""
+    for key, _ in GROUP_CALL_STRINGS:
+        tree.expect(STRINGS, f'"{key}" = ', 0)
+    text = tree.read(STRINGS)
+    tree.write(STRINGS, text + ("" if text.endswith("\n") else "\n") + GROUP_CALL_STRINGS_HEAD
+               + "".join(entry + "\n" for entry in group_call_entries()))
+    for rel, old, new in group_call_edits():
+        tree.replace(rel, old, new)
+
+
+def verify_group_calls(tree):
+    strings = tree.read(STRINGS)
+    for (key, _), entry in zip(GROUP_CALL_STRINGS, group_call_entries()):
+        if strings.count(f'"{key}" = ') != 1 or entry + "\n" not in strings:
+            raise PatchError(f"{STRINGS}: {key} is not the text of group calls")
+    for rel, old, new in group_call_edits():
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text.replace(new, ""):
+            raise PatchError(f"{rel}: the group call edit {new.strip().splitlines()[0]!r} is not there")
+    # Every group call the manager makes has a key, joins as oneself, and
+    # has no conference interface.
+    calls = re.findall(r"PresentationGroupCallImpl\((.*?)\n *\)\n", tree.read(CALL_MANAGER), re.S)
+    if len(calls) != 3:
+        raise PatchError(f"{CALL_MANAGER}: {len(calls)} group calls made, expected 3 (scheduled, joined, conference)")
+    for arguments in calls:
+        if "keyPair: nil" in arguments:
+            raise PatchError(f"{CALL_MANAGER}: a group call is made without an end-to-end key")
+        if "joinAsPeerId: nil" not in arguments:
+            raise PatchError(f"{CALL_MANAGER}: a group call is joined as a peer the caller picked")
+    call = tree.read(GROUP_CALL)
+    for s in ("self.joinAsPeerId.id._internalGetInt64Value()", "else if self.isConference {", 'data["ios_use_inprocess_screencast"]',
+              "ScreencastEmbeddedIPCContext(", "if useIPCContext {"):
+        if s in call:
+            raise PatchError(f"{GROUP_CALL}: {s!r} is still there")
+    if "else if self.isConference {" in tree.read(GROUP_CALL_SCREENCAST):
+        raise PatchError(f"{GROUP_CALL_SCREENCAST}: a screen of a group call may go unencrypted")
+    # Every place of the fetched sources: no entry to RTMP or a live story,
+    # no picker of whom to join as, nothing else that sends over the data
+    # channel or reads the counters.
+    for rel in link_sources(tree):
+        text = tree.read(rel)
+        for s, why in (("strings.ChannelInfo_CreateExternalStream", "offers an RTMP stream"),
+                       ("strings.LiveStream_ViewCredentials", "shows a stream key"),
+                       ("self?.createExternalStream(", "opens an RTMP stream"),
+                       ("canLivestream = true", "offers a live story")):
+            if s in text:
+                raise PatchError(f"{rel}: {why} ({s})")
+    if "_internal_cachedGroupCallDisplayAsAvailablePeers(" in tree.read(ENGINE_CALLS):
+        raise PatchError(f"{ENGINE_CALLS}: a group call offers peers to join as")
+    custom = tree.read(GROUP_INSTANCE_CUSTOM)
+    if custom.count("networkManager->sendDataChannelMessage(") != 2:
+        raise PatchError(f"{GROUP_INSTANCE_CUSTOM}: {custom.count('networkManager->sendDataChannelMessage(')} sends over "
+                         "the data channel, expected 2 (video constraints, the state report)")
 
 
 def main(argv=None):
