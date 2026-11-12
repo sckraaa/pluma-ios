@@ -1677,6 +1677,7 @@ def patch(tree, c):
     patch_store(tree, c)
     patch_account_cleanup(tree)
     patch_call_parameters(tree)
+    patch_service_account(tree)
 
     # The build configuration of Make.py, with exactly the keys it reads.
     conf = c.build_configuration()
@@ -4948,12 +4949,14 @@ def verify(tree, c):
     verify_saved_tags(tree)
     verify_premium_stickers(tree)
     verify_premium_for_everyone(tree)
+    verify_transcribe_view_once(tree)
     verify_no_ai_editor(tree)
     verify_app_update(tree)
     verify_video_quality(tree)
     verify_store(tree, c)
     verify_account_cleanup(tree)
     verify_call_parameters(tree)
+    verify_service_account(tree)
 
     build = tree.read(APP_BUILD)
     if "<string>Telegram</string>" in build or "<string>telegram</string>" in build:
@@ -4987,12 +4990,6 @@ PREMIUM_FOR_EVERYONE_EDITS = (
     ("submodules/TelegramUI/Components/EntityKeyboard/Sources/EmojiPagerContentSignals.swift",
      "        let isPremiumDisabled = premiumConfiguration.isPremiumDisabled\n",
      "        // pluma: custom emoji and premium stickers stay in the keyboard: everybody has Premium.\n        _ = premiumConfiguration\n        let isPremiumDisabled = false\n", 3),
-    ("submodules/TelegramUI/Components/Chat/ChatMessageInteractiveFileNode/Sources/ChatMessageInteractiveFileNode.swift",
-     "                if Namespaces.Message.allNonRegular.contains(arguments.message.id.namespace) {\n                    displayTranscribe = false\n",
-     "                // pluma: the server has no transcription to offer.\n                if true || Namespaces.Message.allNonRegular.contains(arguments.message.id.namespace) {\n                    displayTranscribe = false\n", 1),
-    ("submodules/TelegramUI/Components/Chat/ChatMessageInteractiveInstantVideoNode/Sources/ChatMessageInteractiveInstantVideoNode.swift",
-     "                    if item.message.id.peerId.namespace != Namespaces.Peer.SecretChat && statusDisplayType == .free && !isViewOnceMessage && !item.presentationData.isPreview {\n                        let premiumConfiguration",
-     "                    // pluma: the server has no transcription to offer.\n                    if false && item.message.id.peerId.namespace != Namespaces.Peer.SecretChat && statusDisplayType == .free && !isViewOnceMessage && !item.presentationData.isPreview {\n                        let premiumConfiguration", 1),
     # Boosts do not exist here: nothing waits for a level of a channel, no
     # screen, prompt or link offers one.
     ("submodules/TelegramUI/Components/PeerAllowedReactionsScreen/Sources/PeerAllowedReactionsScreen.swift",
@@ -5041,6 +5038,43 @@ def verify_premium_for_everyone(tree):
         text = tree.read(rel)
         if text.count(new) != count or old in text.replace(new, ""):
             raise PatchError(f"{rel}: the edit of task 071 is not there")
+
+
+# --- Transcription of voice and round messages ---------------------------------
+# The server transcribes for everybody (messages.transcribeAudio; everybody has
+# Premium, ADR 0041), so the button shows as for a Premium user of Telegram.
+# The server refuses a view-once message, and upstream never offers the button
+# on one: these are its gates, in the layout of a voice message and of a round
+# one. Each gate is the first condition on displayTranscribe, and every place
+# that sets it is inside the gate. An update that drops, moves or bypasses them
+# stops the patch until it is read.
+TRANSCRIBE_FILE_NODE = "submodules/TelegramUI/Components/Chat/ChatMessageInteractiveFileNode/Sources/ChatMessageInteractiveFileNode.swift"
+TRANSCRIBE_VIDEO_NODE = "submodules/TelegramUI/Components/Chat/ChatMessageInteractiveInstantVideoNode/Sources/ChatMessageInteractiveInstantVideoNode.swift"
+TRANSCRIBE_VIEW_ONCE_GATES = (
+    (TRANSCRIBE_FILE_NODE,
+     "                let isViewOnceMessage = isVoice && arguments.message.minAutoremoveOrClearTimeout == viewOnceTimeout\n", 1),
+    (TRANSCRIBE_FILE_NODE,
+     "                var displayTranscribe = false\n"
+     "                if Namespaces.Message.allNonRegular.contains(arguments.message.id.namespace) {\n"
+     "                    displayTranscribe = false\n"
+     "                } else if arguments.message.id.peerId.namespace != Namespaces.Peer.SecretChat && !isViewOnceMessage && !arguments.presentationData.isPreview {\n", 1),
+    (TRANSCRIBE_VIDEO_NODE,
+     "            let isViewOnceMessage = item.message.minAutoremoveOrClearTimeout == viewOnceTimeout\n", 1),
+    (TRANSCRIBE_VIDEO_NODE,
+     "                    var displayTranscribe = false\n"
+     "                    if item.message.id.peerId.namespace != Namespaces.Peer.SecretChat && statusDisplayType == .free && !isViewOnceMessage && !item.presentationData.isPreview {\n", 1),
+)
+# The places that show the button, all inside the gates above.
+TRANSCRIBE_BUTTON_SETTERS = (
+    (TRANSCRIBE_FILE_NODE, "displayTranscribe = true\n", 4),
+    (TRANSCRIBE_VIDEO_NODE, "displayTranscribe = true\n", 3),
+)
+UPSTREAM_PATHS += tuple(sorted({TRANSCRIBE_FILE_NODE, TRANSCRIBE_VIDEO_NODE} - set(UPSTREAM_PATHS)))
+
+
+def verify_transcribe_view_once(tree):
+    for rel, s, count in TRANSCRIBE_VIEW_ONCE_GATES + TRANSCRIBE_BUTTON_SETTERS:
+        tree.expect(rel, s, count=count)
 
 
 # --- No AI message editor (task 079) ------------------------------------------
@@ -5579,6 +5613,96 @@ def verify_call_parameters(tree):
             raise PatchError(f"{CALL_ENGINE}: {literal} is still Telegram's literal")
     if ", 25);" in tree.read(CALL_CAPTURE):
         raise PatchError(f"{CALL_CAPTURE}: the camera is still adapted to Telegram's 25 frames a second")
+
+
+# --- the service account ----------------------------------------------------
+#
+# The server's support account (user.support, no status: ADR 0048 of the
+# server) is a service account here, not Telegram's support: where a last
+# seen goes it reads "service account". That line is upstream's
+# Bot.GenericSupportStatus ("support"); its text changes, the key and the
+# places that read it stay. English is bundled; the other languages come with
+# the server's language pack, which writes the same key in Pluma's words
+# (pkg/langpack/override.json of the server), so a downloaded pack does not
+# bring Telegram's "support" back.
+SERVICE_ACCOUNT_OLD = '"Bot.GenericSupportStatus" = "support";\n'
+SERVICE_ACCOUNT_ENTRY = '"Bot.GenericSupportStatus" = "service account";\n'
+SERVICE_ACCOUNT_NAME = "Bot_GenericSupportStatus"
+CONTACTS_ITEM = "submodules/ContactsPeerItem/Sources/ContactsPeerItem.swift"
+# Where upstream shows the line, each for a user with the support flag only:
+# (file, how many times). The chat's title (both views), the profile, the
+# header of the profile's edit and the search of the chat list.
+SERVICE_ACCOUNT_SITES = (
+    ("submodules/ChatListUI/Sources/ChatListSearchListPaneNode.swift", 1),
+    ("submodules/ItemListAvatarAndNameInfoItem/Sources/ItemListAvatarAndNameItem.swift", 1),
+    ("submodules/TelegramUI/Components/ChatTitleView/Sources/ChatTitleComponent.swift", 1),
+    ("submodules/TelegramUI/Components/ChatTitleView/Sources/ChatTitleView.swift", 1),
+    (_PEER_INFO + "PeerInfoData.swift", 1),
+)
+# The rows of contacts (the contact list, the pickers of people) show a last
+# seen to every user but a bot: upstream has no line for a support account
+# there, and with no status its row would read "last seen a long time ago"
+# (ContactListNode.swift:183). The same line as everywhere else, next to the
+# bot's.
+SERVICE_ACCOUNT_CONTACT_OLD = ("                            }\n"
+                               "                        } else {\n"
+                               "                            userPresence = presence\n")
+SERVICE_ACCOUNT_CONTACT = ("                            }\n" + src(" " * 24, """
+    } else if case let .peer(peer, _) = item.peer, let peer, case let .user(user) = peer, user.flags.contains(.isSupport) {
+        // pluma: a support account is a service account with no last seen (task 080).
+        statusAttributedString = NSAttributedString(string: item.presentationData.strings.Bot_GenericSupportStatus, font: statusFont, textColor: item.presentationData.theme.list.itemSecondaryTextColor)
+    } else {
+        userPresence = presence
+"""))
+# The rows of the settings' lists (the blocked users, the exceptions of a
+# privacy rule, the members of a group) do the same: a bot's line, then the
+# last seen, and "offline" with no status. The same line there too.
+PEER_ITEM = "submodules/ItemListPeerItem/Sources/ItemListPeerItem.swift"
+SERVICE_ACCOUNT_PEER_OLD = (
+    "                    statusAttributedString = NSAttributedString(string: botStatus, font: statusFont, "
+    "textColor: item.presentationData.theme.list.itemSecondaryTextColor)\n"
+    "                } else if let presence = item.presence {\n")
+SERVICE_ACCOUNT_PEER = SERVICE_ACCOUNT_PEER_OLD.replace("                } else if let presence", src(" " * 16, """
+    } else if case let .user(user) = item.peer, user.flags.contains(.isSupport) {
+        // pluma: a support account is a service account with no last seen (task 080).
+        statusAttributedString = NSAttributedString(string: item.presentationData.strings.Bot_GenericSupportStatus, font: statusFont, textColor: item.presentationData.theme.list.itemSecondaryTextColor)
+""") + "                } else if let presence")
+# The rows the patch adds the line to: (file, upstream's text, the patched one).
+SERVICE_ACCOUNT_ROWS = (
+    (CONTACTS_ITEM, SERVICE_ACCOUNT_CONTACT_OLD, SERVICE_ACCOUNT_CONTACT),
+    (PEER_ITEM, SERVICE_ACCOUNT_PEER_OLD, SERVICE_ACCOUNT_PEER),
+)
+# The check job fetches only the paths the patch reads (ci/fetch-upstream.sh sparse).
+UPSTREAM_PATHS += tuple(rel for rel in sorted({rel for rel, _ in SERVICE_ACCOUNT_SITES} | {rel for rel, _, _ in SERVICE_ACCOUNT_ROWS})
+                        if rel not in UPSTREAM_PATHS)
+
+
+def patch_service_account(tree):
+    """A support account reads "service account" where a last seen goes."""
+    tree.replace(STRINGS, SERVICE_ACCOUNT_OLD, SERVICE_ACCOUNT_ENTRY)
+    for rel, count in SERVICE_ACCOUNT_SITES:
+        tree.expect(rel, SERVICE_ACCOUNT_NAME, count)
+    for rel, old, new in SERVICE_ACCOUNT_ROWS:
+        tree.expect(rel, ".isSupport", 0)
+        tree.replace(rel, old, new)
+
+
+def verify_service_account(tree):
+    strings = tree.read(STRINGS)
+    if strings.count('"Bot.GenericSupportStatus" = ') != 1 or strings.count(SERVICE_ACCOUNT_ENTRY) != 1:
+        raise PatchError(f"{STRINGS}: Bot.GenericSupportStatus is not the line of a service account")
+    for rel, _, new in SERVICE_ACCOUNT_ROWS:
+        if tree.read(rel).count(new) != 1:
+            raise PatchError(f"{rel}: a support account does not read as a service account")
+    # The line is read where the patch knows it and nowhere else: a new place
+    # may show it to someone who is not a support account (every source file
+    # of a full checkout, the fetched ones of a sparse one).
+    sites = dict(SERVICE_ACCOUNT_SITES + tuple((rel, 1) for rel, _, _ in SERVICE_ACCOUNT_ROWS))
+    for rel in link_sources(tree):
+        found = tree.read(rel).count(SERVICE_ACCOUNT_NAME)
+        if found != sites.get(rel, 0):
+            raise PatchError(f"{rel}: {found} uses of {SERVICE_ACCOUNT_NAME}, expected {sites.get(rel, 0)}; "
+                             "check who reads as a service account there")
 
 
 def main(argv=None):
