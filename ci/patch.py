@@ -46,7 +46,8 @@ GIF files.
 
 Every group call is end-to-end encrypted, as Telegram's conferences are, and
 is joined as oneself; the client reports the state of its encryption to the
-SFU. No RTMP stream and no live story is offered.
+SFU. No RTMP stream, no live story and no recording of a call is offered.
+The call screens are in the sage palette.
 
 Standard library only, so the CI and a developer machine run it as is.
 """
@@ -1683,6 +1684,7 @@ def patch(tree, c):
     patch_call_parameters(tree)
     patch_service_account(tree)
     patch_group_calls(tree)
+    patch_call_colors(tree)
 
     # The build configuration of Make.py, with exactly the keys it reads.
     conf = c.build_configuration()
@@ -4963,6 +4965,7 @@ def verify(tree, c):
     verify_call_parameters(tree)
     verify_service_account(tree)
     verify_group_calls(tree)
+    verify_call_colors(tree)
 
     build = tree.read(APP_BUILD)
     if "<string>Telegram</string>" in build or "<string>telegram</string>" in build:
@@ -5757,20 +5760,40 @@ def verify_service_account(tree):
 #     the same one: Call.cpp 611-617), so the context starts over with it
 #     (reset). A state that cannot be made from the last block (TdCall.make
 #     returns nil) is a failure too; upstream stays without a state, silent.
-#     After 3 rejoins in 5 minutes the call is left with a notice
-#     (Pluma.GroupCall.EncryptionFailed);
+#     The other reasons of the self-healing rule of ADR 0060 §5 rejoin the
+#     same way: sub-chain 0 behind the server's next_offset with no block
+#     applied for over 12 s, GROUPCALL_FORBIDDEN on a write to the chain
+#     (upstream drops the error: GroupCalls.swift 1041-1043, 3455-3457; a
+#     read's error it drops too, 3421-3423, and the rule leaves that to the
+#     first two reasons), and 15 s with no frame decrypted from anyone while
+#     frames come and the chain is current (Web K's watchdog has the same
+#     15 s, groupCallInstance.ts 51). The rejoins of 5 minutes wait 0, 2 and
+#     5 s, each plus up to 1 s, so that members who failed together do not
+#     write their joins at once; a fourth leaves the call with a notice
+#     (Pluma.GroupCall.EncryptionFailed). A rejoin of the transport keeps its
+#     key (PresentationGroupCall.swift 1909-1916, 2050-2077) and is none of
+#     these;
 #   - every 5 s the client reports the state of its encryption to the SFU
-#     over the call's data channel (colibriClass "PlumaE2EStatus", ADR 0060
-#     §5): its heights, the hash of its last block and its epochs, the
-#     sticky error of tde2e and, per sender, what it decrypted and why it
-#     could not. No key, nonce, emoji or byte of a frame. tde2e has no
-#     counters (e2e_api.h 300-340): TdCall counts in encrypt, decrypt and
-#     applyBlock (TdBinding.mm), the context makes the report, tgcalls sends
-#     it next to ReceiverVideoConstraints (GroupInstanceCustomImpl.cpp
-#     2769-2834), and only while the channel is open.
+#     over the call's data channel: PlumaE2EStatus v1 of ADR 0060 §5, its
+#     fields, no others. The height of sub-chain 0 and the hash of its last
+#     block as the server keeps it, the next blocks it polls for, the
+#     sticky error of tde2e, the epochs it encrypts with, decrypted and did
+#     not know, and per sender what it decrypted and why it could not.
+#     Counters of frames and the epochs of received frames are since the
+#     last report; tgcalls takes the report only while the channel is open,
+#     so one that cannot go is not made and its counters go with the next.
+#     No key, nonce, emoji or byte of a frame. tde2e has no counters
+#     (e2e_api.h 300-340): TdCall counts in encrypt, decrypt and applyBlock
+#     (TdBinding.mm), the context makes the report, tgcalls sends it next to
+#     ReceiverVideoConstraints (GroupInstanceCustomImpl.cpp 2769-2834).
 # RTMP streams and live stories go too (ADR 0060 §4): no "Stream with…" in
 # the call menu of a profile, no stream key in a stream's menu, no live mode
 # in the story camera. The rest of their code is left: nothing leads to it.
+# The server does not record a call (phone.toggleGroupCallRecord is not
+# served, ADR 0060 §4), so no menu offers to start a recording: the call's
+# menu (VideoChatScreenMoreMenu.swift 426-493) and a stream's
+# (MediaStreamComponent.swift 562-602). A recording that is on shows as
+# upstream shows it; the server never starts one.
 CALL_MANAGER = "submodules/TelegramCallsUI/Sources/PresentationCallManager.swift"
 GROUP_CALL = "submodules/TelegramCallsUI/Sources/PresentationGroupCall.swift"
 GROUP_CALL_SCREENCAST = "submodules/TelegramCallsUI/Sources/GroupCallScreencast.swift"
@@ -5778,6 +5801,7 @@ VIDEO_CHAT_SCREEN = "submodules/TelegramCallsUI/Sources/VideoChatScreen.swift"
 MEDIA_STREAM = "submodules/TelegramCallsUI/Sources/Components/MediaStreamComponent.swift"
 E2E_CONTEXT = "submodules/TelegramCore/Sources/State/ConferenceCallE2EContext.swift"
 ENGINE_CALLS = "submodules/TelegramCore/Sources/TelegramEngine/Calls/TelegramEngineCalls.swift"
+ENGINE_GROUP_CALLS = "submodules/TelegramCore/Sources/TelegramEngine/Calls/GroupCalls.swift"
 GROUP_CALL_CONTEXT = "submodules/TelegramVoip/Sources/GroupCallContext.swift"
 CALL_CONTEXT_HEADER = "submodules/TgVoipWebrtc/PublicHeaders/TgVoipWebrtc/OngoingCallThreadLocalContext.h"
 CALL_CONTEXT = "submodules/TgVoipWebrtc/Sources/OngoingCallThreadLocalContext.mm"
@@ -5827,45 +5851,73 @@ _MAKE_E2E_CONTEXT = """
     }
 
     // pluma: the state of the end-to-end encryption goes to the SFU over the
-    // call's data channel every 5 s (task 094, ADR 0060 of the server).
+    // call's data channel every 5 s (task 094, ADR 0060 §5 of the server).
+    // tgcalls takes the report on its thread, and only while the channel is
+    // open: a report that cannot go is not made, its counters go with the next.
     private func plumaForwardE2EStatus() {
         self.plumaE2EStatusDisposable?.dispose()
         self.plumaE2EStatusDisposable = nil
         guard let e2eContext = self.e2eContext else {
             return
         }
-        self.plumaE2EStatusDisposable = (e2eContext.plumaStatusReport
-        |> deliverOnMainQueue).startStrict(next: { [weak self] report in
+        self.plumaE2EStatusDisposable = (e2eContext.plumaStatusReportRequests
+        |> deliverOnMainQueue).startStrict(next: { [weak self, weak e2eContext] _ in
             guard let self, case let .call(callContext) = self.genericCallContext else {
                 return
             }
-            callContext.sendE2EStatus(report)
+            callContext.sendE2EStatus({
+                return e2eContext?.plumaTakeStatusReport()
+            })
         })
     }
 
-    // pluma: a failure of the end-to-end state rejoins the call with a new key,
-    // as tdesktop does; upstream leaves the call. After 3 rejoins in 5 minutes
-    // the call is left with a notice (task 094). Outside an established
-    // connection the join under way is let finish: the next participants
-    // context sees the failure again.
+    // pluma: a reason of the self-healing rule of ADR 0060 §5 of the server (a
+    // failure of the end-to-end state, a chain left behind, a write to the chain
+    // the server forbids, nothing decrypted) rejoins the call with a new key, as
+    // tdesktop does on a failure; upstream leaves the call. The rejoins of 5
+    // minutes wait 0, 2 and 5 s, each plus up to 1 s: a rejoin changes the key
+    // of everyone, and members who failed together would write their joins at
+    // once. A fourth leaves the call with a notice (task 094). One rejoin at a
+    // time; outside an established connection the join under way is let
+    // finish: the next participants context sees the failure again.
     private func plumaRejoinAfterE2EFailure() {
-        guard let e2eContext = self.e2eContext, !self.leaving, case .established = self.internalState else {
+        guard self.e2eContext != nil, !self.leaving, !self.plumaE2ERejoinScheduled, case .established = self.internalState else {
             return
         }
         let timestamp = CFAbsoluteTimeGetCurrent()
         self.plumaE2ERejoinTimestamps.removeAll(where: { timestamp - $0 >= 5.0 * 60.0 })
-        if self.plumaE2ERejoinTimestamps.count < 3, let keyPair = TelegramE2EEncryptionProviderImpl.shared.generateKeyPair() {
-            self.plumaE2ERejoinTimestamps.append(timestamp)
+        let delays: [Double] = [0.0, 2.0, 5.0]
+        if self.plumaE2ERejoinTimestamps.count >= delays.count {
+            self.plumaLeaveAfterE2EFailure()
+            return
+        }
+        self.plumaE2ERejoinScheduled = true
+        Queue.mainQueue().after(delays[self.plumaE2ERejoinTimestamps.count] + Double.random(in: 0.0 ..< 1.0), { [weak self] in
+            guard let self else {
+                return
+            }
+            self.plumaE2ERejoinScheduled = false
+            guard let e2eContext = self.e2eContext, !self.leaving, case .established = self.internalState else {
+                return
+            }
+            guard let keyPair = TelegramE2EEncryptionProviderImpl.shared.generateKeyPair() else {
+                self.plumaLeaveAfterE2EFailure()
+                return
+            }
+            self.plumaE2ERejoinTimestamps.append(CFAbsoluteTimeGetCurrent())
             self.keyPair = keyPair
             e2eContext.reset(keyPair: keyPair)
             self.requestCall(movingFromBroadcastToRtc: false)
-        } else {
-            let presentationData = self.accountContext.sharedContext.currentPresentationData.with { $0 }
-            self.accountContext.sharedContext.mainWindow?.present(textAlertController(context: self.accountContext, title: nil, text: presentationData.strings.Pluma_GroupCall_EncryptionFailed, actions: [
-                TextAlertAction(type: .genericAction, title: presentationData.strings.Common_OK, action: {})
-            ]), on: .root, blockInteraction: false, completion: {})
-            let _ = self.leave(terminateIfPossible: false).startStandalone()
-        }
+        })
+    }
+
+    // pluma: the end-to-end encryption could not be restored: the call is left with a notice (task 094).
+    private func plumaLeaveAfterE2EFailure() {
+        let presentationData = self.accountContext.sharedContext.currentPresentationData.with { $0 }
+        self.accountContext.sharedContext.mainWindow?.present(textAlertController(context: self.accountContext, title: nil, text: presentationData.strings.Pluma_GroupCall_EncryptionFailed, actions: [
+            TextAlertAction(type: .genericAction, title: presentationData.strings.Common_OK, action: {})
+        ]), on: .root, blockInteraction: false, completion: {})
+        let _ = self.leave(terminateIfPossible: false).startStandalone()
     }
 
 """
@@ -5916,9 +5968,11 @@ _FAILED_OLD = """
     })
 """
 _E2E_CONTEXT_RESET = """
-    // pluma: back to before the join, with a new key, for a rejoin after a
-    // failure of the end-to-end state: tde2e refuses a second call with the
-    // same key (CallKeyAlreadyUsed), so the state starts over (task 094).
+    // pluma: back to before the join, with a new key, for a rejoin of the
+    // self-healing rule: tde2e refuses a second call with the same key
+    // (CallKeyAlreadyUsed), so the state starts over (task 094). Until the
+    // join is done nothing is checked and no report goes; begin() starts both
+    // again, the report from seq 1.
     func reset(keyPair: TelegramKeyPair) {
         self.e2ePoll0Timer?.invalidate()
         self.e2ePoll0Timer = nil
@@ -5938,77 +5992,197 @@ _E2E_CONTEXT_RESET = """
         self.scheduledSynchronizeRemovedParticipants = false
         self.scheduledSynchronizeRemovedParticipantsAfterPoll = false
         self.pendingKickPeers.removeAll()
+        self.plumaStatusTimer?.invalidate()
+        self.plumaStatusTimer = nil
+        self.plumaChainTimer?.invalidate()
+        self.plumaChainTimer = nil
+        self.plumaServerOffset0 = nil
+        self.plumaBehindSince = nil
         self.keyPair = keyPair
         self.state.with { callState in
             callState.state = nil
             callState.pendingIncomingBroadcastBlocks.removeAll()
+            callState.plumaSeq = 0
+            callState.plumaOffset0 = -1
+            callState.plumaOffset1 = -1
         }
         self.e2eEncryptionKeyHashValue.set(nil)
         self.blockchainParticipantsValue.set([])
         self.isFailed.set(false)
     }
 
-    // pluma: the report of the end-to-end state for the SFU (task 094, ADR
-    // 0060 of the server): TdCall's counters, or no height before the state
-    // is made, and the next blocks the client waits for on both sub-chains.
-    // Its values are numbers, strings and arrays of them; one that is not
-    // valid JSON is a bug of the counters and is not sent.
-    private func plumaReportStatus() {
-        var report: [String: Any] = self.state.with({ $0.state?.plumaStatus() }) ?? ["height0": -1]
-        report["colibriClass"] = "PlumaE2EStatus"
-        report["v"] = 1
-        report["offset0"] = self.e2ePoll0Offset ?? -1
-        report["offset1"] = self.e2ePoll1Offset ?? -1
-        guard JSONSerialization.isValidJSONObject(report), let data = try? JSONSerialization.data(withJSONObject: report), let string = String(data: data, encoding: .utf8) else {
-            assertionFailure("the end-to-end state report is not JSON")
+    // pluma: from a join on, the state report every 5 s, the first 5 s after
+    // the join, from seq 1, and the checks of the chain every second (task 094).
+    private func plumaBegin() {
+        self.state.with { callState in
+            callState.plumaSeq = 0
+        }
+        self.plumaStatusTimer?.invalidate()
+        self.plumaStatusTimer = Foundation.Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true, block: { [weak self] _ in
+            self?.plumaRequestStatusReport()
+        })
+        self.plumaBehindSince = nil
+        self.plumaChainTimer?.invalidate()
+        self.plumaChainTimer = Foundation.Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true, block: { [weak self] _ in
+            self?.plumaCheckChain()
+        })
+    }
+
+    // pluma: the next blocks the client polls for go into the report, which
+    // tgcalls takes when the data channel is open (plumaTakeStatusReport).
+    private func plumaRequestStatusReport() {
+        let offset0 = self.e2ePoll0Offset ?? -1
+        let offset1 = self.e2ePoll1Offset ?? -1
+        self.state.with { callState in
+            callState.plumaOffset0 = offset0
+            callState.plumaOffset1 = offset1
+        }
+        self.statusReportPipe.putNext(Void())
+    }
+
+    // pluma: the next_offset of sub-chain 0 the server gave last, in an
+    // answer to a poll, a push or the join (task 094).
+    private func plumaServerHas(nextOffset: Int) {
+        self.plumaServerOffset0 = max(self.plumaServerOffset0 ?? nextOffset, nextOffset)
+    }
+
+    // pluma: two reasons of the self-healing rule of ADR 0060 §5 of the
+    // server, a failure for the call to rejoin with a new key (task 094): the
+    // server has blocks of sub-chain 0 past the height + 1 the client has
+    // applied, and none applies for over 12 s (10 s of tde2e's forgetting of an
+    // old epoch, Call.h 98, and a margin); or the chain is current, frames come,
+    // and none from anyone was decrypted for 15 s. A sender who alone cannot be
+    // decrypted is that sender's fault, not a reason here.
+    private func plumaCheckChain() {
+        let (height, isStalled) = self.state.with { callState -> (Int, Bool) in
+            guard let state = callState.state else {
+                return (-1, false)
+            }
+            return (state.plumaHeight(), state.plumaDecryptionStalled(window: 15.0))
+        }
+        if let serverOffset0 = self.plumaServerOffset0, serverOffset0 > height + 1 {
+            let timestamp = CFAbsoluteTimeGetCurrent()
+            if let behindSince = self.plumaBehindSince, behindSince.height == height {
+                if timestamp - behindSince.since > 12.0 {
+                    self.isFailed.set(true)
+                }
+            } else {
+                self.plumaBehindSince = (since: timestamp, height: height)
+            }
             return
         }
-        self.statusReportPipe.putNext(string)
+        self.plumaBehindSince = nil
+        if isStalled {
+            self.isFailed.set(true)
+        }
     }
 
 """
-# TdCall's counters of the state report: per sender what was decrypted and
-# why not (tde2e's codes and messages: Call.cpp 285-470, Decrypt_UnknownEpoch
-# and the "Message is too old" and "Message is already processed" of
-# check_not_seen), the failures of encryption, the code of the error that
-# made the call fail (Call::apply_block keeps it: Call.cpp 667-678), the hash
-# of the last block and the epochs of the open header (Call.cpp 383-440).
-# TdCall is used under the lock of ConferenceCallE2EContext.state, encrypt and
-# decrypt included (OngoingGroupCallEncryptionContextImpl), so the counters
-# need none of their own.
+# The report itself (PlumaE2EStatus v1, ADR 0060 §5 of the server), made on
+# tgcalls' thread when the data channel is open: every field of the contract
+# and no other. The counters of frames come from TdCall since the last report;
+# with no state the report says so (height -1, lastBlock ""). seq counts the
+# reports since the join. A report over 16 KiB, or with more than 100 senders,
+# loses the senders decrypted longest ago first. Its values are numbers,
+# strings and arrays of them; one that is not valid JSON is a bug of the
+# counters and is not sent.
+_E2E_CONTEXT_TAKE = """
+    // pluma: the state report of the end-to-end encryption for the SFU
+    // (task 094, PlumaE2EStatus v1 of ADR 0060 §5 of the server), from any
+    // thread: tgcalls takes it when the data channel is open.
+    public func plumaTakeStatusReport() -> String? {
+        return self.state.with { callState -> String? in
+            var report: [String: Any] = callState.state?.plumaTakeStatus() ?? [
+                "height": -1,
+                "lastBlock": "",
+                "error": 0,
+                "sendEpochs": [String](),
+                "decryptEpochs": [String](),
+                "unknownEpochs": [String](),
+                "encrypted": 0,
+                "encryptFailed": 0,
+                "senders": [[String: Any]]()
+            ]
+            callState.plumaSeq += 1
+            report["colibriClass"] = "PlumaE2EStatus"
+            report["v"] = 1
+            report["seq"] = callState.plumaSeq
+            report["offset0"] = callState.plumaOffset0
+            report["offset1"] = callState.plumaOffset1
+            var senders = report["senders"] as? [[String: Any]] ?? []
+            while true {
+                report["senders"] = senders
+                guard JSONSerialization.isValidJSONObject(report), let data = try? JSONSerialization.data(withJSONObject: report) else {
+                    assertionFailure("the end-to-end state report is not JSON")
+                    return nil
+                }
+                if data.count <= 16 * 1024 && senders.count <= 100 {
+                    return String(data: data, encoding: .utf8)
+                }
+                guard let index = senders.indices.max(by: { (senders[$0]["lastOkMs"] as? Int ?? 0) < (senders[$1]["lastOkMs"] as? Int ?? 0) }) else {
+                    return nil
+                }
+                senders.remove(at: index)
+            }
+        }
+    }
+
+"""
+# TdCall's counters of the state report (PlumaE2EStatus v1, ADR 0060 §5 of
+# the server): per sender what was decrypted and why not (tde2e's codes and
+# messages: Call.cpp 285-470, Decrypt_UnknownEpoch and the "Message is too
+# old" and "Message is already processed" of check_not_seen), the frames
+# encrypted and not, the epochs of the open header (Call.cpp 383-440) of the
+# frames sent, decrypted and refused for an unknown epoch, the code of the
+# error that made the call fail and the hash of the last block. Counters and
+# the epochs of received frames are since the last report, which takes them;
+# the time of a sender's last decrypted frame stays, and so do the times the
+# check of "nothing decrypted for 15 s" reads. TdCall is used under the lock
+# of ConferenceCallE2EContext.state, encrypt and decrypt included
+# (OngoingGroupCallEncryptionContextImpl), so the counters need none of their
+# own.
 _TD_BINDING_INCLUDES = """
 // pluma: for the counters of the state report (task 094).
+#include <algorithm>
+#include <cstdio>
 #include <map>
 #include <string>
+#include <vector>
 
 #import <CommonCrypto/CommonDigest.h>
 """
 _TD_BINDING_COUNTERS = """
 // pluma: the counters of the state report of the end-to-end encryption
-// (task 094): what one sender's packets came to.
+// (task 094): what one sender's packets came to since the last report, and
+// when one of them was last decrypted.
 struct PlumaSenderCounters {
-    int64_t decrypted = 0;
+    int64_t ok = 0;
     int64_t unknownEpoch = 0;
     int64_t tooOld = 0;
-    int64_t replayed = 0;
-    int64_t other = 0;
-    double lastDecryptedAt = 0.0;
+    int64_t duplicate = 0;
+    int64_t failed = 0;
+    double lastOkAt = 0.0;
 };
+
+static int64_t plumaSenderFrames(PlumaSenderCounters const &counters) {
+    return counters.ok + counters.unknownEpoch + counters.tooOld + counters.duplicate + counters.failed;
+}
 
 // The first 8 bytes of a 32-byte hash, in hex.
 static NSString *plumaHashPrefix(const uint8_t *hash) {
     return [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7]];
 }
 
-// The hash of a block the server sent, as tde2e counts it: the SHA-256 of the
-// block's own form (Block::calc_hash), whose first int32 is one less than in the
-// form the server keeps and sends (Blockchain::from_server_to_local).
+// The hash of a block the server sent, in the form the server keeps it: the
+// block as its author wrote it, whose first int32 is one less than in the form
+// the server sends (Blockchain::from_server_to_local). It is tde2e's own hash of
+// the block too (Block::calc_hash), so the server finds it among its blocks.
 static NSString * _Nullable plumaBlockHashPrefix(NSData *serverBlock) {
     if (serverBlock.length < 4) {
         return nil;
     }
     NSMutableData *block = [serverBlock mutableCopy];
-    uint32_t magic = 0;
+    int32_t magic = 0;
     memcpy(&magic, block.bytes, 4);
     magic -= 1;
     memcpy(block.mutableBytes, &magic, 4);
@@ -6033,22 +6207,68 @@ static std::string plumaEpochHeader(const uint8_t *data, size_t size, size_t off
     return std::string((const char *)data + offset, 4 + count * 32);
 }
 
-static NSArray<NSString *> *plumaEpochHashes(std::string const &header) {
-    NSMutableArray<NSString *> *hashes = [[NSMutableArray alloc] init];
-    for (size_t offset = 4; offset + 32 <= header.size(); offset += 32) {
-        [hashes addObject:plumaHashPrefix((const uint8_t *)header.data() + offset)];
+// The open header of a received packet: the length of its open prefix is in
+// its last 4 bytes (CallEncryption::decrypt).
+static std::string plumaReceivedEpochHeader(NSData *message) {
+    if (message.length < 4) {
+        return std::string();
     }
-    return hashes;
+    const uint8_t *bytes = (const uint8_t *)message.bytes;
+    uint32_t prefixLength = 0;
+    memcpy(&prefixLength, bytes + message.length - 4, 4);
+    return plumaEpochHeader(bytes, message.length - 4, prefixLength);
+}
+
+// The epochs of a header that are not among epochs yet, while there are
+// fewer than limit.
+static void plumaAddEpochs(std::vector<std::string> &epochs, size_t limit, std::string const &header) {
+    for (size_t offset = 4; offset + 32 <= header.size() && epochs.size() < limit; offset += 32) {
+        std::string hash = header.substr(offset, 32);
+        if (std::find(epochs.begin(), epochs.end(), hash) == epochs.end()) {
+            epochs.push_back(hash);
+        }
+    }
+}
+
+static NSArray<NSString *> *plumaEpochPrefixes(std::vector<std::string> const &epochs) {
+    NSMutableArray<NSString *> *prefixes = [[NSMutableArray alloc] init];
+    for (auto const &hash : epochs) {
+        [prefixes addObject:plumaHashPrefix((const uint8_t *)hash.data())];
+    }
+    return prefixes;
+}
+
+// The code of the error that made the call fail (e2e_errors.h). Once a block
+// fails, call_apply_block answers CallFailed with that failure in its message,
+// "CALL_FAILED: [Error : <code> : ...]" (Call::get_status, the Error of
+// e2e/utils.h; Status::print of tdutils); its code reads as tde2e reads any
+// (to_error, utils.h).
+static int plumaFailureCode(tde2e_api::Error const &error) {
+    int code = 0;
+    std::string::size_type failure = error.message.find("[Error : ");
+    if (error.code != tde2e_api::ErrorCode::CallFailed || failure == std::string::npos
+        || sscanf(error.message.c_str() + failure, "[Error : %d :", &code) != 1) {
+        return (int)error.code;
+    }
+    if (tde2e_api::error_string(tde2e_api::ErrorCode(code)) == "UNKNOWN_ERROR") {
+        return (int)tde2e_api::ErrorCode::UnknownError;
+    }
+    return code;
 }
 
 @interface TdCall () {
     std::map<int64_t, PlumaSenderCounters> _plumaSenders;
-    int64_t _plumaEncryptFailures;
+    int64_t _plumaEncrypted;
+    int64_t _plumaEncryptFailed;
     int _plumaError;
     NSString *_plumaLastBlock;
-    std::string _plumaOutgoingHeader;
-    NSArray<NSString *> *_plumaEpochs;
-    NSMutableOrderedSet<NSString *> *_plumaUnknownEpochs;
+    std::string _plumaSendHeader;
+    NSArray<NSString *> *_plumaSendEpochs;
+    std::vector<std::string> _plumaDecryptEpochs;
+    std::vector<std::string> _plumaUnknownEpochs;
+    double _plumaMadeAt;
+    double _plumaLastDecryptedAt;
+    double _plumaLastUndecryptableAt;
 }
 """
 _TD_BINDING_DECRYPT_OLD = """
@@ -6060,83 +6280,135 @@ _TD_BINDING_DECRYPT_OLD = """
 """
 _TD_BINDING_DECRYPT = """
     auto result = tde2e_api::call_decrypt(_callId, userId, 0, mappedMessage);
-    // pluma: counted for the state report (task 094), at most 128 senders.
+    // pluma: counted for the state report (task 094). A sender keeps its entry
+    // for the time of its last decrypted packet; at 1024 the senders with no
+    // packet since the last report make room.
     auto counters = _plumaSenders.find(userId);
-    if (counters == _plumaSenders.end() && _plumaSenders.size() < 128) {
-        counters = _plumaSenders.emplace(userId, PlumaSenderCounters()).first;
-    }
-    if (!result.is_ok()) {
-        if (counters != _plumaSenders.end()) {
-            std::string const &errorMessage = result.error().message;
-            if (result.error().code == tde2e_api::ErrorCode::Decrypt_UnknownEpoch) {
-                counters->second.unknownEpoch += 1;
-                const uint8_t *bytes = (const uint8_t *)message.bytes;
-                uint32_t prefixLength = 0;
-                if (message.length >= 4) {
-                    memcpy(&prefixLength, bytes + message.length - 4, 4);
+    if (counters == _plumaSenders.end()) {
+        if (_plumaSenders.size() >= 1024) {
+            for (auto it = _plumaSenders.begin(); it != _plumaSenders.end();) {
+                if (plumaSenderFrames(it->second) == 0) {
+                    it = _plumaSenders.erase(it);
+                } else {
+                    ++it;
                 }
-                for (NSString *hash in plumaEpochHashes(plumaEpochHeader(bytes, message.length >= 4 ? message.length - 4 : 0, prefixLength))) {
-                    if (![_plumaUnknownEpochs containsObject:hash]) {
-                        if (_plumaUnknownEpochs.count >= 8) {
-                            [_plumaUnknownEpochs removeObjectAtIndex:0];
-                        }
-                        [_plumaUnknownEpochs addObject:hash];
-                    }
-                }
-            } else if (errorMessage.find("Message is too old") != std::string::npos) {
-                counters->second.tooOld += 1;
-            } else if (errorMessage.find("Message is already processed") != std::string::npos) {
-                counters->second.replayed += 1;
-            } else {
-                counters->second.other += 1;
             }
+        }
+        if (_plumaSenders.size() < 1024) {
+            counters = _plumaSenders.emplace(userId, PlumaSenderCounters()).first;
+        }
+    }
+    double timestamp = CFAbsoluteTimeGetCurrent();
+    if (!result.is_ok()) {
+        std::string const &errorMessage = result.error().message;
+        bool isUndecryptable = true;
+        if (result.error().code == tde2e_api::ErrorCode::Decrypt_UnknownEpoch) {
+            if (counters != _plumaSenders.end()) {
+                counters->second.unknownEpoch += 1;
+            }
+            plumaAddEpochs(_plumaUnknownEpochs, 8, plumaReceivedEpochHeader(message));
+        } else if (errorMessage.find("Message is too old") != std::string::npos) {
+            isUndecryptable = false;
+            if (counters != _plumaSenders.end()) {
+                counters->second.tooOld += 1;
+            }
+        } else if (errorMessage.find("Message is already processed") != std::string::npos) {
+            isUndecryptable = false;
+            if (counters != _plumaSenders.end()) {
+                counters->second.duplicate += 1;
+            }
+        } else if (counters != _plumaSenders.end()) {
+            counters->second.failed += 1;
+        }
+        if (isUndecryptable) {
+            _plumaLastUndecryptableAt = timestamp;
         }
         return nil;
     }
     if (counters != _plumaSenders.end()) {
-        counters->second.decrypted += 1;
-        counters->second.lastDecryptedAt = CFAbsoluteTimeGetCurrent();
+        counters->second.ok += 1;
+        counters->second.lastOkAt = timestamp;
     }
+    _plumaLastDecryptedAt = timestamp;
+    plumaAddEpochs(_plumaDecryptEpochs, 15, plumaReceivedEpochHeader(message));
     return [[NSData alloc] initWithBytes:result.value().data() length:result.value().size()];
 }
 
-// pluma: the counters of the state report of the end-to-end encryption (task 094).
-- (NSDictionary<NSString *, id> *)plumaStatus {
+// pluma: the state report since the last one (task 094, PlumaE2EStatus v1 of
+// ADR 0060 §5 of the server): the counters of packets and the epochs of the
+// received ones are taken and start over; the rest are current values. The
+// senders are those with packets since the last report, by user id.
+- (NSDictionary<NSString *, id> *)plumaTakeStatus {
     NSMutableDictionary<NSString *, id> *status = [[NSMutableDictionary alloc] init];
     auto height = tde2e_api::call_get_height(_callId);
-    status[@"height0"] = @(height.is_ok() ? height.value() : -1);
-    if (_plumaLastBlock != nil) {
-        status[@"lastBlock"] = _plumaLastBlock;
-    }
-    status[@"epochs"] = _plumaEpochs ?: @[];
+    status[@"height"] = @(height.is_ok() ? height.value() : -1);
+    status[@"lastBlock"] = (height.is_ok() && _plumaLastBlock != nil) ? _plumaLastBlock : @"";
     status[@"error"] = @(_plumaError);
-    status[@"encryptFailures"] = @(_plumaEncryptFailures);
+    status[@"sendEpochs"] = _plumaSendEpochs ?: @[];
+    status[@"decryptEpochs"] = plumaEpochPrefixes(_plumaDecryptEpochs);
+    status[@"unknownEpochs"] = plumaEpochPrefixes(_plumaUnknownEpochs);
+    status[@"encrypted"] = @(_plumaEncrypted);
+    status[@"encryptFailed"] = @(_plumaEncryptFailed);
     double timestamp = CFAbsoluteTimeGetCurrent();
     NSMutableArray<NSDictionary<NSString *, id> *> *senders = [[NSMutableArray alloc] init];
-    for (auto const &it : _plumaSenders) {
-        PlumaSenderCounters const &counters = it.second;
-        int64_t lastOkMs = counters.lastDecryptedAt > 0.0 ? (int64_t)((timestamp - counters.lastDecryptedAt) * 1000.0) : -1;
+    for (auto &it : _plumaSenders) {
+        PlumaSenderCounters &counters = it.second;
+        if (plumaSenderFrames(counters) == 0) {
+            continue;
+        }
+        int64_t lastOkMs = counters.lastOkAt > 0.0 ? (int64_t)((timestamp - counters.lastOkAt) * 1000.0) : -1;
         [senders addObject:@{
             @"user": @(it.first),
-            @"ok": @(counters.decrypted),
+            @"ok": @(counters.ok),
             @"unknownEpoch": @(counters.unknownEpoch),
             @"tooOld": @(counters.tooOld),
-            @"replayed": @(counters.replayed),
-            @"other": @(counters.other),
+            @"duplicate": @(counters.duplicate),
+            @"failed": @(counters.failed),
             @"lastOkMs": @(lastOkMs)
         }];
+        counters.ok = 0;
+        counters.unknownEpoch = 0;
+        counters.tooOld = 0;
+        counters.duplicate = 0;
+        counters.failed = 0;
     }
     status[@"senders"] = senders;
-    status[@"unknownEpochs"] = _plumaUnknownEpochs.array;
+    _plumaEncrypted = 0;
+    _plumaEncryptFailed = 0;
+    _plumaDecryptEpochs.clear();
+    _plumaUnknownEpochs.clear();
     return status;
+}
+
+// pluma: the height of sub-chain 0 tde2e has applied, -1 after a failure (task 094).
+- (int)plumaHeight {
+    auto height = tde2e_api::call_get_height(_callId);
+    return height.is_ok() ? height.value() : -1;
+}
+
+// pluma: packets came within the last window seconds that could not be
+// decrypted, and none from anyone was for window seconds of this call's
+// life: a reason to rejoin of the self-healing rule (task 094). Packets too
+// old or already processed are neither.
+- (bool)plumaDecryptionStalled:(double)window {
+    double timestamp = CFAbsoluteTimeGetCurrent();
+    if (timestamp - _plumaMadeAt < window || _plumaLastUndecryptableAt == 0.0 || timestamp - _plumaLastUndecryptableAt >= window) {
+        return false;
+    }
+    return _plumaLastDecryptedAt == 0.0 || timestamp - _plumaLastDecryptedAt >= window;
 """
 _TGCALLS_SEND_STATUS = """
     // pluma: the client's report of its end-to-end encryption for the SFU (task
-    // 094, ADR 0060 of the server), next to ReceiverVideoConstraints. Only a
-    // status report goes, and only while the data channel is open: the next
-    // one comes in 5 s.
-    void sendE2EStatus(std::string const &status) {
+    // 094, ADR 0060 §5 of the server), next to ReceiverVideoConstraints. The
+    // report is taken only while the data channel is open, so one that cannot
+    // go is not made and its counters go with the next; only a status report
+    // goes.
+    void sendE2EStatus(std::function<std::string()> const &takeStatus) {
         if (!_isDataChannelOpen) {
+            return;
+        }
+        std::string status = takeStatus();
+        if (status.empty()) {
             return;
         }
         std::string parsingError;
@@ -6200,6 +6472,99 @@ _STREAM_KEY_OLD = (
     "                        })))\n")
 
 
+_REMOVE_KICK = ("                    self.synchronizeRemovedParticipantsDisposable = (engine.calls.removeGroupCallBlockchainParticipants("
+                "callId: callId, accessHash: accessHash, mode: .kick, participantIds: pendingKickPeers.map { $0.id._internalGetInt64Value() }, "
+                "block: removeBlock)\n")
+_REMOVE_CLEANUP = ("                    return engine.calls.removeGroupCallBlockchainParticipants(callId: callId, accessHash: accessHash, "
+                   "mode: .cleanup, participantIds: removedPeerIds, block: removeBlock)\n")
+_REMOVE_RESULT = """\
+                    |> map { result -> Bool in
+                        switch result {
+                        case .success:
+                            return true
+                        case .pollBlocksAndRetry:
+                            return false
+                        }
+                    }
+"""
+_REMOVE_RESULT_FORBIDDEN = """\
+                    |> map { result -> Bool in
+                        switch result {
+                        case .success:
+                            return true
+                        case .pollBlocksAndRetry:
+                            return false
+                        case .forbidden:
+                            // pluma: a write the server forbids is a reason to rejoin (task 094).
+                            isFailed.set(true)
+                            return false
+                        }
+                    }
+"""
+_SEND_BROADCAST_OLD = """\
+func _internal_sendConferenceCallBroadcast(account: Account, callId: Int64, accessHash: Int64, block: Data) -> Signal<Never, NoError> {
+    return account.network.request(Api.functions.phone.sendConferenceCallBroadcast(call: .inputGroupCall(.init(id: callId, accessHash: accessHash)), block: Buffer(data: block)))
+    |> retry(retryOnError: { _ in
+        return true
+    }, delayIncrement: 0.1, maxDelay: 1.0, maxRetries: 5, onQueue: Queue.concurrentDefaultQueue())
+    |> map(Optional.init)
+    |> `catch` { error -> Signal<Api.Updates?, NoError> in
+        return .single(nil)
+    }
+    |> mapToSignal { result -> Signal<Never, NoError> in
+        guard let result = result else {
+            return .complete()
+        }
+        account.stateManager.addUpdates(result)
+
+        return .complete()
+    }
+}
+"""
+_SEND_BROADCAST = """\
+// pluma: true when the server forbids the write (GROUPCALL_FORBIDDEN), which
+// is not tried again: a reason to rejoin of the self-healing rule (task 094).
+func _internal_sendConferenceCallBroadcast(account: Account, callId: Int64, accessHash: Int64, block: Data) -> Signal<Bool, NoError> {
+    return account.network.request(Api.functions.phone.sendConferenceCallBroadcast(call: .inputGroupCall(.init(id: callId, accessHash: accessHash)), block: Buffer(data: block)))
+    |> retry(retryOnError: { error in
+        return error.errorDescription != "GROUPCALL_FORBIDDEN"
+    }, delayIncrement: 0.1, maxDelay: 1.0, maxRetries: 5, onQueue: Queue.concurrentDefaultQueue())
+    |> map { result -> Bool in
+        account.stateManager.addUpdates(result)
+        return false
+    }
+    |> `catch` { error -> Signal<Bool, NoError> in
+        return .single(error.errorDescription == "GROUPCALL_FORBIDDEN")
+    }
+}
+"""
+
+
+VIDEO_CHAT_MORE_MENU = "submodules/TelegramCallsUI/Sources/VideoChatScreenMoreMenu.swift"
+# The entries that start a recording, as (file, the first lines of the
+# branch, its last, what is left in its place, what the branch must hold).
+_NO_RECORDING = "no entry to start a recording (task 094): the server does not record a call"
+RECORDING_STARTS = (
+    (VIDEO_CHAT_MORE_MENU,
+     "            } else {\n"
+     "                let text: String\n"
+     "                if case let .channel(channel) = peer, case .broadcast = channel.info {\n"
+     "                    text = environment.strings.LiveStream_StartRecording\n",
+     "                    })))\n                }\n            }\n",
+     "            }\n            // pluma: " + _NO_RECORDING + "\n"
+     "            // (phone.toggleGroupCallRecord); end to end it would have nothing to record.\n",
+     ("VoiceChatRecordingSetupController(", "groupCall.setShouldBeRecording(true, ")),
+    (MEDIA_STREAM,
+     "                        } else {\n"
+     "                            let text = presentationData.strings.LiveStream_StartRecording\n",
+     "                                controller.present(editController, in: .window(.root))\n"
+     "                            })))\n                        }\n",
+     "                        }\n                        // pluma: " + _NO_RECORDING + ".\n",
+     ("call.setShouldBeRecording(true, ",)),
+)
+RECORDING_START = re.compile(r"strings\.(?:VoiceChat|LiveStream)_StartRecording\b|setShouldBeRecording\(true\b")
+
+
 def group_call_edits():
     """The edits of the end-to-end group calls, RTMP and live stories, as
     (file, upstream's text, Pluma's)."""
@@ -6253,7 +6618,8 @@ def group_call_edits():
         (GROUP_CALL, "    private var isFailedEventDisposable: Disposable?\n",
          "    private var isFailedEventDisposable: Disposable?\n"
          "    private var plumaE2EStatusDisposable: Disposable? // pluma: task 094\n"
-         "    private var plumaE2ERejoinTimestamps: [Double] = [] // pluma: task 094\n"),
+         "    private var plumaE2ERejoinTimestamps: [Double] = [] // pluma: task 094\n"
+         "    private var plumaE2ERejoinScheduled = false // pluma: task 094\n"),
         (GROUP_CALL,
          "    public var e2eEncryptionKeyHash: Signal<Data?, NoError> {\n"
          "        return self.e2eContext?.e2eEncryptionKeyHash ?? .single(nil)\n    }\n",
@@ -6355,8 +6721,10 @@ def group_call_edits():
          "        return self.call.decrypt(message, userId: userId)\n    }\n",
          "    func decrypt(message: Data, userId: Int64) -> Data? {\n"
          "        return self.call.decrypt(message, userId: userId)\n    }\n\n"
-         "    // pluma: the counters of the state report (task 094).\n"
-         "    func plumaStatus() -> [String: Any] {\n        return self.call.plumaStatus()\n    }\n"),
+         "    // pluma: the state report and the checks of the self-healing rule (task 094).\n"
+         "    func plumaTakeStatus() -> [String: Any] {\n        return self.call.plumaTakeStatus()\n    }\n\n"
+         "    func plumaHeight() -> Int {\n        return Int(self.call.plumaHeight())\n    }\n\n"
+         "    func plumaDecryptionStalled(window: Double) -> Bool {\n        return self.call.plumaDecryptionStalled(window)\n    }\n"),
         # The emoji of the key in every group call.
         (VIDEO_CHAT_SCREEN,
          "            if isConference {\n                if !isLandscape {\n                    navigationHeight -= 2.0\n",
@@ -6374,24 +6742,80 @@ def group_call_edits():
         (E2E_CONTEXT,
          "    func decrypt(message: Data, userId: Int64) -> Data?\n}\n",
          "    func decrypt(message: Data, userId: Int64) -> Data?\n\n"
-         "    // pluma: the counters of the state report of the end-to-end encryption (task 094).\n"
-         "    func plumaStatus() -> [String: Any]\n}\n"),
+         "    // pluma: the state report of the end-to-end encryption and the checks of the\n"
+         "    // self-healing rule (task 094).\n"
+         "    func plumaTakeStatus() -> [String: Any]\n"
+         "    func plumaHeight() -> Int\n"
+         "    func plumaDecryptionStalled(window: Double) -> Bool\n}\n"),
         (E2E_CONTEXT, "        private let keyPair: TelegramKeyPair\n",
          "        private var keyPair: TelegramKeyPair // pluma: a new one by reset(keyPair:) (task 094)\n"
-         "        let statusReportPipe = ValuePipe<String>() // pluma: task 094\n"
-         "        private var plumaStatusTimer: Foundation.Timer? // pluma: task 094\n"),
+         "        let statusReportPipe = ValuePipe<Void>() // pluma: task 094\n"
+         "        private var plumaStatusTimer: Foundation.Timer? // pluma: task 094\n"
+         "        private var plumaChainTimer: Foundation.Timer? // pluma: task 094\n"
+         "        private var plumaServerOffset0: Int? // pluma: task 094\n"
+         "        private var plumaBehindSince: (since: Double, height: Int)? // pluma: task 094\n"),
         (E2E_CONTEXT,
          "            self.synchronizeRemovedParticipantsTimer?.invalidate()\n        }\n\n"
          "        func begin(initialState: JoinGroupCallResult.E2EState?) {\n",
          "            self.synchronizeRemovedParticipantsTimer?.invalidate()\n"
-         "            self.plumaStatusTimer?.invalidate() // pluma: task 094\n        }\n\n"
-         "        func begin(initialState: JoinGroupCallResult.E2EState?) {\n" + src(" " * 12, """
-             // pluma: the state report every 5 s from the join on (task 094).
-             self.plumaStatusTimer?.invalidate()
-             self.plumaStatusTimer = Foundation.Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true, block: { [weak self] _ in
-                 self?.plumaReportStatus()
+         "            self.plumaStatusTimer?.invalidate() // pluma: task 094\n"
+         "            self.plumaChainTimer?.invalidate() // pluma: task 094\n        }\n\n"
+         "        func begin(initialState: JoinGroupCallResult.E2EState?) {\n"
+         "            self.plumaBegin() // pluma: the state report and the checks of the chain (task 094)\n"),
+        # The next_offset of sub-chain 0 the server has: the join's, a push's,
+        # a poll's.
+        (E2E_CONTEXT, "                self.e2ePoll0Offset = initialState.subChain0.offset\n",
+         "                self.e2ePoll0Offset = initialState.subChain0.offset\n"
+         "                self.plumaServerHas(nextOffset: initialState.subChain0.offset) // pluma: task 094\n"),
+        (E2E_CONTEXT, "            let updateBaseOffset = nextOffset - blocks.count\n",
+         "            let updateBaseOffset = nextOffset - blocks.count\n"
+         "            if subChainId == 0 {\n                self.plumaServerHas(nextOffset: nextOffset) // pluma: task 094\n            }\n"),
+        (E2E_CONTEXT,
+         "                    if subChainId == 0 {\n"
+         "                        if let e2ePoll0Offset = self.e2ePoll0Offset, e2ePoll0Offset < result.nextOffset {\n",
+         "                    if subChainId == 0 {\n"
+         "                        self.plumaServerHas(nextOffset: result.nextOffset) // pluma: task 094\n"
+         "                        if let e2ePoll0Offset = self.e2ePoll0Offset, e2ePoll0Offset < result.nextOffset {\n"),
+        # What the report needs of the state, under its lock.
+        (E2E_CONTEXT, "        public var pendingIncomingBroadcastBlocks: [Data] = []\n",
+         "        public var pendingIncomingBroadcastBlocks: [Data] = []\n"
+         "        // pluma: the number of the last state report since the join, and the next\n"
+         "        // blocks the client polls for, for the report (task 094).\n"
+         "        public var plumaSeq: Int = 0\n"
+         "        public var plumaOffset0: Int = -1\n"
+         "        public var plumaOffset1: Int = -1\n"),
+        # A write to the chain the server forbids is a reason to rejoin.
+        (E2E_CONTEXT,
+         "                let _ = self.engine.calls.sendConferenceCallBroadcast(callId: self.callId, accessHash: self.accessHash, block: outBlock).startStandalone()\n",
+         src(" " * 16, """
+             // pluma: a write the server forbids (GROUPCALL_FORBIDDEN) is a reason to rejoin (task 094).
+             let isFailed = self.isFailed
+             let _ = self.engine.calls.sendConferenceCallBroadcast(callId: self.callId, accessHash: self.accessHash, block: outBlock).startStandalone(next: { isForbidden in
+                 if isForbidden {
+                     isFailed.set(true)
+                 }
              })
          """)),
+        (E2E_CONTEXT, "            let accountPeerId = engine.account.peerId\n",
+         "            let accountPeerId = engine.account.peerId\n"
+         "            let isFailed = self.isFailed // pluma: task 094\n"),
+        (E2E_CONTEXT, _REMOVE_KICK + _REMOVE_RESULT, _REMOVE_KICK + _REMOVE_RESULT_FORBIDDEN),
+        (E2E_CONTEXT, _REMOVE_CLEANUP + _REMOVE_RESULT, _REMOVE_CLEANUP + _REMOVE_RESULT_FORBIDDEN),
+        (ENGINE_GROUP_CALLS, "public enum RemoveGroupCallBlockchainParticipantsResult {\n    case success\n    case pollBlocksAndRetry\n",
+         "public enum RemoveGroupCallBlockchainParticipantsResult {\n    case success\n    case pollBlocksAndRetry\n"
+         "    case forbidden // pluma: GROUPCALL_FORBIDDEN, a reason to rejoin (task 094)\n"),
+        (ENGINE_GROUP_CALLS,
+         "    |> `catch` { _ -> Signal<RemoveGroupCallBlockchainParticipantsResult, NoError> in\n"
+         "        return .single(.pollBlocksAndRetry)\n    }\n",
+         "    |> `catch` { error -> Signal<RemoveGroupCallBlockchainParticipantsResult, NoError> in\n"
+         "        // pluma: the server forbids this client to write to the chain (task 094).\n"
+         "        if error.errorDescription == \"GROUPCALL_FORBIDDEN\" {\n            return .single(.forbidden)\n        }\n"
+         "        return .single(.pollBlocksAndRetry)\n    }\n"),
+        (ENGINE_GROUP_CALLS, _SEND_BROADCAST_OLD, _SEND_BROADCAST),
+        (ENGINE_CALLS,
+         "        public func sendConferenceCallBroadcast(callId: Int64, accessHash: Int64, block: Data) -> Signal<Never, NoError> {\n",
+         "        // pluma: true when the server forbids the write (task 094).\n"
+         "        public func sendConferenceCallBroadcast(callId: Int64, accessHash: Int64, block: Data) -> Signal<Bool, NoError> {\n"),
         (E2E_CONTEXT,
          "                        guard let state = initializeState(keyPair, userId, block) else {\n"
          "                            return ([], Data(), [], [:], false)\n                        }\n",
@@ -6402,61 +6826,65 @@ def group_call_edits():
          src(" " * 8, _E2E_CONTEXT_RESET) + "\n        func kickPeer(id: EnginePeer.Id) {\n"),
         (E2E_CONTEXT, "    public func begin(initialState: JoinGroupCallResult.E2EState?) {\n",
          src(" " * 4, """
-             // pluma: the report of the end-to-end state, every 5 s from the join on (task 094).
-             public var plumaStatusReport: Signal<String, NoError> {
+             // pluma: every 5 s from the join on, a state report is due (task 094).
+             public var plumaStatusReportRequests: Signal<Void, NoError> {
                  return self.impl.signalWith { impl, subscriber in
                      return impl.statusReportPipe.signal().start(next: subscriber.putNext)
                  }
              }
 
-             // pluma: a new start with a new key, for a rejoin after a failure of the end-to-end state (task 094).
+             // pluma: a new start with a new key, for a rejoin of the self-healing rule (task 094).
              public func reset(keyPair: TelegramKeyPair) {
                  self.impl.with { impl in
                      impl.reset(keyPair: keyPair)
                  }
              }
 
-         """) + "\n    public func begin(initialState: JoinGroupCallResult.E2EState?) {\n"),
+         """) + "\n" + src(" " * 4, _E2E_CONTEXT_TAKE) + "\n    public func begin(initialState: JoinGroupCallResult.E2EState?) {\n"),
         # The report through the engine to the data channel.
         (GROUP_CALL_CONTEXT,
          "        func addExternalAudioData(data: Data) {\n            self.context.addExternalAudioData(data)\n        }\n",
          "        func addExternalAudioData(data: Data) {\n            self.context.addExternalAudioData(data)\n        }\n\n"
          "        // pluma: task 094\n"
-         "        func sendE2EStatus(_ status: String) {\n            self.context.sendE2EStatus(status)\n        }\n"),
+         "        func sendE2EStatus(_ takeStatus: @escaping () -> String?) {\n            self.context.sendE2EStatus(takeStatus)\n        }\n"),
         (GROUP_CALL_CONTEXT,
          "    public func addExternalAudioData(data: Data) {\n        self.impl.with { impl in\n"
          "            impl.addExternalAudioData(data: data)\n        }\n    }\n",
          "    public func addExternalAudioData(data: Data) {\n        self.impl.with { impl in\n"
          "            impl.addExternalAudioData(data: data)\n        }\n    }\n\n"
          "    // pluma: the state report of the end-to-end encryption, for the SFU over the data channel (task 094).\n"
-         "    public func sendE2EStatus(_ status: String) {\n        self.impl.with { impl in\n"
-         "            impl.sendE2EStatus(status)\n        }\n    }\n"),
+         "    // tgcalls calls takeStatus on its thread, and only while the channel is open.\n"
+         "    public func sendE2EStatus(_ takeStatus: @escaping () -> String?) {\n        self.impl.with { impl in\n"
+         "            impl.sendE2EStatus(takeStatus)\n        }\n    }\n"),
         (CALL_CONTEXT_HEADER,
          "- (void)getStats:(void (^ _Nonnull)(OngoingGroupCallStats * _Nonnull))completion;\n",
-         "- (void)sendE2EStatus:(NSString * _Nonnull)status; // pluma: task 094\n\n"
+         "- (void)sendE2EStatus:(NSString * _Nullable (^ _Nonnull)(void))takeStatus; // pluma: task 094\n\n"
          "- (void)getStats:(void (^ _Nonnull)(OngoingGroupCallStats * _Nonnull))completion;\n"),
         (CALL_CONTEXT,
          "- (void)getStats:(void (^ _Nonnull)(OngoingGroupCallStats * _Nonnull))completion {\n",
          "// pluma: the state report of the end-to-end encryption, for the SFU (task 094).\n"
-         "- (void)sendE2EStatus:(NSString * _Nonnull)status {\n    if (_instance) {\n"
-         "        _instance->sendE2EStatus(status.UTF8String ?: \"\");\n    }\n}\n\n"
+         "- (void)sendE2EStatus:(NSString * _Nullable (^ _Nonnull)(void))takeStatus {\n    if (_instance) {\n"
+         "        _instance->sendE2EStatus([takeStatus]() -> std::string {\n"
+         "            NSString *status = takeStatus();\n"
+         "            return status != nil ? std::string(status.UTF8String ?: \"\") : std::string();\n"
+         "        });\n    }\n}\n\n"
          "- (void)getStats:(void (^ _Nonnull)(OngoingGroupCallStats * _Nonnull))completion {\n"),
         (GROUP_INSTANCE, "    virtual void internal_addCustomNetworkEvent(bool isRemoteConnected) = 0;\n",
          "    virtual void internal_addCustomNetworkEvent(bool isRemoteConnected) = 0;\n"
          "    // pluma: the state report of the end-to-end encryption for the SFU (task 094); an engine\n"
          "    // with no data channel to it has nothing to send it over.\n"
-         "    virtual void sendE2EStatus(std::string const &) {}\n"),
+         "    virtual void sendE2EStatus(std::function<std::string()> const &) {}\n"),
         (GROUP_INSTANCE_CUSTOM_HEADER, "    void internal_addCustomNetworkEvent(bool isRemoteConnected);\n",
          "    void internal_addCustomNetworkEvent(bool isRemoteConnected);\n"
-         "    void sendE2EStatus(std::string const &status); // pluma: task 094\n"),
+         "    void sendE2EStatus(std::function<std::string()> const &takeStatus); // pluma: task 094\n"),
         (GROUP_INSTANCE_CUSTOM, "    void internal_addCustomNetworkEvent(bool isRemoteConnected) {\n",
          src(" " * 4, _TGCALLS_SEND_STATUS) + "\n    void internal_addCustomNetworkEvent(bool isRemoteConnected) {\n"),
         (GROUP_INSTANCE_CUSTOM, src("", _TGCALLS_ADD_EVENT),
          src("", _TGCALLS_ADD_EVENT) + "\n" + src("", """
              // pluma: task 094
-             void GroupInstanceCustomImpl::sendE2EStatus(std::string const &status) {
-                 _internal->perform([status](GroupInstanceCustomInternal *internal) {
-                     internal->sendE2EStatus(status);
+             void GroupInstanceCustomImpl::sendE2EStatus(std::function<std::string()> const &takeStatus) {
+                 _internal->perform([takeStatus](GroupInstanceCustomInternal *internal) {
+                     internal->sendE2EStatus(takeStatus);
                  });
              }
          """)),
@@ -6467,7 +6895,7 @@ def group_call_edits():
          src("", _TD_BINDING_COUNTERS) + "\n@property (nonatomic, strong) TdKeyPair *keyPair;\n"),
         (TD_BINDING, "        _callId = callId;\n        _keyPair = keyPair;\n",
          "        _callId = callId;\n        _keyPair = keyPair;\n"
-         "        _plumaUnknownEpochs = [[NSMutableOrderedSet alloc] init]; // pluma: task 094\n"),
+         "        _plumaMadeAt = CFAbsoluteTimeGetCurrent(); // pluma: task 094\n"),
         (TD_BINDING, "    return [[TdCall alloc] initWithId:call.value() keyPair: keyPair];\n",
          "    TdCall *result = [[TdCall alloc] initWithId:call.value() keyPair: keyPair];\n"
          "    result->_plumaLastBlock = plumaBlockHashPrefix(latestBlock); // pluma: task 094\n"
@@ -6478,7 +6906,7 @@ def group_call_edits():
          "    auto result = tde2e_api::call_apply_block(_callId, mappedBlock);\n"
          "    if (!result.is_ok()) {\n"
          "        // pluma: the error that made the call fail, for the state report (task 094).\n"
-         "        if (_plumaError == 0) {\n            _plumaError = (int)result.error().code;\n        }\n"
+         "        if (_plumaError == 0) {\n            _plumaError = plumaFailureCode(result.error());\n        }\n"
          "        return false;\n    }\n"
          "    _plumaLastBlock = plumaBlockHashPrefix(block); // pluma: task 094\n"
          "    return true;\n"),
@@ -6487,20 +6915,26 @@ def group_call_edits():
          "    if (!result.is_ok()) {\n        return nil;\n    }\n",
          "    auto result = tde2e_api::call_encrypt(_callId, channelId, mappedMessage, (size_t)plaintextPrefixLength);\n"
          "    if (!result.is_ok()) {\n"
-         "        _plumaEncryptFailures += 1; // pluma: task 094\n"
+         "        _plumaEncryptFailed += 1; // pluma: task 094\n"
          "        return nil;\n    }\n" + src(" " * 4, """
-             // pluma: the epochs the packets go out with, for the state report (task 094).
+             // pluma: counted for the state report, with the epochs the packets go out with (task 094).
+             _plumaEncrypted += 1;
              std::string header = plumaEpochHeader((const uint8_t *)result.value().data(), result.value().size(), (size_t)plaintextPrefixLength);
-             if (header != _plumaOutgoingHeader) {
-                 _plumaOutgoingHeader = header;
-                 _plumaEpochs = plumaEpochHashes(header);
+             if (header != _plumaSendHeader) {
+                 _plumaSendHeader = header;
+                 std::vector<std::string> epochs;
+                 plumaAddEpochs(epochs, 15, header);
+                 _plumaSendEpochs = plumaEpochPrefixes(epochs);
              }
          """)),
         (TD_BINDING, src(" " * 4, _TD_BINDING_DECRYPT_OLD), _TD_BINDING_DECRYPT.lstrip("\n")),
         (TD_BINDING_HEADER, "- (nullable NSData *)decrypt:(NSData *)message userId:(int64_t)userId;\n",
          "- (nullable NSData *)decrypt:(NSData *)message userId:(int64_t)userId;\n\n"
-         "// pluma: the counters of the state report of the end-to-end encryption (task 094).\n"
-         "- (NSDictionary<NSString *, id> *)plumaStatus;\n"),
+         "// pluma: the state report of the end-to-end encryption since the last one, and\n"
+         "// what the self-healing rule checks (task 094).\n"
+         "- (NSDictionary<NSString *, id> *)plumaTakeStatus;\n"
+         "- (int)plumaHeight;\n"
+         "- (bool)plumaDecryptionStalled:(double)window;\n"),
         # No RTMP stream and no live story.
         (PEER_INFO_CALLS, _PROFILE_STREAM_OLD,
          "            // pluma: no RTMP stream (task 094): no \"Stream with…\".\n"
@@ -6516,7 +6950,8 @@ def group_call_edits():
 
 # The check job fetches only the paths the patch reads (ci/fetch-upstream.sh
 # sparse); the files of tgcalls come from the submodule.
-UPSTREAM_PATHS += tuple(sorted({rel for rel, _, _ in group_call_edits() if not rel.startswith(TGCALLS + "/")} - set(UPSTREAM_PATHS)))
+UPSTREAM_PATHS += tuple(sorted(({rel for rel, _, _ in group_call_edits() if not rel.startswith(TGCALLS + "/")}
+                                | {rel for rel, _, _, _, _ in RECORDING_STARTS}) - set(UPSTREAM_PATHS)))
 SUBMODULES = tuple((sub, url, paths + tuple(sorted({rel for rel, _, _ in group_call_edits() if rel.startswith(sub + "/")} - set(paths))))
                    for sub, url, paths in SUBMODULES)
 
@@ -6536,6 +6971,8 @@ def patch_group_calls(tree):
                + "".join(entry + "\n" for entry in group_call_entries()))
     for rel, old, new in group_call_edits():
         tree.replace(rel, old, new)
+    for rel, head, tail, block, must_contain in RECORDING_STARTS:
+        tree.replace_block(rel, head, tail, block, must_contain)
 
 
 def verify_group_calls(tree):
@@ -6575,6 +7012,13 @@ def verify_group_calls(tree):
                        ("canLivestream = true", "offers a live story")):
             if s in text:
                 raise PatchError(f"{rel}: {why} ({s})")
+        m = RECORDING_START.search(text)
+        if m:
+            raise PatchError(f"{rel}: offers to record a call, which the server does not ({m.group(0)})")
+    for rel, head, _, block, _ in RECORDING_STARTS:
+        text = tree.read(rel)
+        if text.count(block) != 1 or head in text:
+            raise PatchError(f"{rel}: the entry to start a recording is not where the patch left it")
     if "_internal_cachedGroupCallDisplayAsAvailablePeers(" in tree.read(ENGINE_CALLS):
         raise PatchError(f"{ENGINE_CALLS}: a group call offers peers to join as")
     custom = tree.read(GROUP_INSTANCE_CUSTOM)
@@ -6582,6 +7026,124 @@ def verify_group_calls(tree):
         raise PatchError(f"{GROUP_INSTANCE_CUSTOM}: {custom.count('networkManager->sendDataChannelMessage(')} sends over "
                          "the data channel, expected 2 (video constraints, the state report)")
 
+
+
+# --- call colours -------------------------------------------------------------
+#
+# The call screens take the sage palette (owner's decision of 2026-11-12,
+# variant A "Шалфей"; the palette is that of task 017 of the server). The
+# 1:1 call screen draws three four-point gradients by the state of the call
+# (CallBackgroundLayer.swift 108-124): connecting, connected, weak signal.
+# Each becomes Pluma's set, point for point. The group call screens, the
+# call bar and a chat's panel of its call (GroupCallNavigationAccessoryPanel)
+# take the colours of the same meaning: Telegram's blues and purples
+# (connecting, muted, can speak, scheduled) the connecting set and the dark
+# sage of the palette, its greens (speaking, unmuted, connected) the connected
+# set, its reds, pinks and oranges (end, leave, cannot speak, late, recording)
+# the weak set, and its accents on the dark screens (links, selections) the
+# palette's accents for a dark theme. Greys stay. Every colour literal of the
+# call screens' sources is one of Pluma's or a grey of upstream's
+# (CALL_GREYS); a colour upstream adds stops the patch until it is placed.
+CALL_UI_DIRS = ("submodules/TelegramCallsUI/Sources", "submodules/TelegramUI/Components/Calls",
+                "submodules/TelegramUI/Components/GroupCallHeaderPanelComponent")
+CALL_BACKGROUND = "submodules/TelegramUI/Components/Calls/CallScreen/Sources/Components/CallBackgroundLayer.swift"
+# (Telegram's colour, Pluma's, the literals of it upstream has).
+CALL_COLORS = (
+    # The 1:1 call's background: connecting, connected, weak signal.
+    ("568FD6", "3A4A3C", 1), ("626ED5", "4F6E52", 1), ("A667D5", "2C3A2D", 1), ("7664DA", "5B7A5E", 1),
+    ("ACBD65", "5B7A5E", 1), ("459F8D", "6F8F72", 1), ("53A4D1", "4F6E52", 1), ("3E917A", "7FA082", 1),
+    ("C0508D", "8A5A44", 1), ("F09536", "A86B4C", 1), ("CE5081", "7A4E3B", 1), ("FC7C4C", "B97A55", 1),
+    # Blues and purples: connecting, muted, can speak, raised hand, scheduled.
+    ("007FFF", "4F6E52", 4), ("00AFFE", "5B7A5E", 4), ("3252EF", "4F6E52", 18), ("21477D", "3A4A3C", 1),
+    ("23306B", "2C3A2D", 1), ("24306B", "2C3A2D", 1), ("002E5D", "2C3A2D", 1), ("55B3F8", "5B7A5E", 1),
+    ("55ADFE", "4F6E52", 1), ("397CD8", "4F6E52", 1), ("914BAD", "3A4A3C", 3), ("974AA9", "3A4A3C", 2),
+    ("AA56A6", "3A4A3C", 2), ("3851EB", "4F6E52", 1), ("5064FD", "4F6E52", 1), ("834FFF", "4F6E52", 1),
+    ("2A9EF1", "4F6E52", 1), ("72D5FD", "7FA082", 1), ("5D4ED1", "4F6E52", 1),
+    # Accents on the dark screens: texts, links, selections.
+    ("0088FF", "9DBB9F", 4), ("42A2FF", "9DBB9F", 1), ("B56DF4", "9DBB9F", 2), ("59B6FA", "B2CEB4", 1),
+    ("FFD60A", "9DBB9F", 1),
+    # Greens: speaking, unmuted, connected, answer.
+    ("34C759", "7FA082", 8), ("33C758", "7FA082", 8), ("33C659", "6F8F72", 5), ("34C659", "6F8F72", 3),
+    ("00A0B9", "4F6E52", 4), ("0BA8A5", "4F6E52", 1), ("74DB58", "6F8F72", 6), ("134B22", "2C3A2D", 1),
+    ("A0D875", "7FA082", 1), ("63D5C9", "6F8F72", 1), ("CCFF60", "9DBB9F", 1), ("30B251", "6F8F72", 3),
+    # Reds, pinks and oranges: end, leave, cannot speak, late, recording.
+    ("FF3B30", "A86B4C", 7), ("FF3B2F", "A86B4C", 1), ("D92326", "8A5A44", 6), ("330D0B", "7A4E3B", 1),
+    ("EF436C", "A86B4C", 6), ("F0436C", "B97A55", 2), ("EF476F", "B97A55", 2), ("E4436C", "A86B4C", 1),
+    ("DF44B8", "8A5A44", 1), ("C64688", "8A5A44", 3), ("E76598", "B97A55", 1), ("F5512A", "B97A55", 1),
+    ("EA436F", "A86B4C", 1),
+)
+# The same colours as fractions of 1 in a stream's screen.
+CALL_COLOR_LITERALS = (
+    (MEDIA_STREAM, "UIColor(red: 0.165, green: 0.173, blue: 0.357, alpha: 1)", "UIColor(rgb: 0x2C3A2D)", 2),
+    (MEDIA_STREAM, "UIColor(red: 0.314, green: 0.161, blue: 0.197, alpha: 1)", "UIColor(rgb: 0x7A4E3B)", 1),
+    (MEDIA_STREAM, "UIColor(red: 1, green: 0.176, blue: 0.333, alpha: 1)", "UIColor(rgb: 0xA86B4C)", 1),
+)
+CALL_GREYS = ("000000", "161616", "1C1C1E", "25272E", "26282C", "2B2B2F", "2C2C2E", "303032", "404041", "4F5352",
+              "8E8E93", "979797", "98989E", "A6A9A8", "B6B6BB", "FFFFFF")
+# The 1:1 call's background as Pluma's sets, in upstream's order of points.
+CALL_BACKGROUND_SETS = (("3A4A3C", "4F6E52", "2C3A2D", "5B7A5E"),
+                        ("5B7A5E", "6F8F72", "4F6E52", "7FA082"),
+                        ("8A5A44", "A86B4C", "7A4E3B", "B97A55"))
+CALL_COLOR = re.compile(r"\b0x([0-9A-Fa-f]{6})\b")
+UPSTREAM_PATHS += tuple(d for d in CALL_UI_DIRS if d not in UPSTREAM_PATHS)
+
+
+def call_ui_sources(tree):
+    """The sources of the call screens in the tree."""
+    for d in CALL_UI_DIRS:
+        base = tree.root / d
+        if not base.is_dir():
+            raise PatchError(f"{d}: missing; the call screens are not in the checkout")
+        for p in sorted(base.rglob("*")):
+            if p.is_file() and p.suffix in (".swift", ".m", ".mm", ".h", ".metal"):
+                yield p.relative_to(tree.root).as_posix()
+
+
+def patch_call_colors(tree):
+    """The call screens in the sage palette."""
+    pluma = {old: new for old, new, _ in CALL_COLORS}
+    found = {old: [] for old in pluma}
+    recolored = {}
+    for rel in call_ui_sources(tree):
+        text = tree.read(rel)
+
+        def recolor(m):
+            old = m.group(1).upper()
+            if old not in pluma:
+                return m.group(0)
+            found[old].append(rel)
+            return "0x" + pluma[old]
+
+        new = CALL_COLOR.sub(recolor, text)
+        if new != text:
+            recolored[rel] = new
+    for old, _, count in CALL_COLORS:
+        if len(found[old]) != count:
+            where = ", ".join(sorted(set(found[old]))) or " and ".join(CALL_UI_DIRS)
+            raise PatchError(f"{where}: {len(found[old])} literals of 0x{old}, expected {count}; upstream changed its call colours")
+    for rel, text in recolored.items():
+        tree.write(rel, text)
+    for rel, old, new, count in CALL_COLOR_LITERALS:
+        tree.replace(rel, old, new, count)
+
+
+def verify_call_colors(tree):
+    allowed = {new for _, new, _ in CALL_COLORS} | set(CALL_GREYS)
+    for rel in call_ui_sources(tree):
+        text = tree.read(rel)
+        for m in CALL_COLOR.finditer(text):
+            if m.group(1).upper() not in allowed:
+                raise PatchError(f"{rel}: the call colour 0x{m.group(1)} is not of Pluma's palette")
+        if "UIColor(red:" in text:
+            raise PatchError(f"{rel}: a call colour as fractions, not of Pluma's palette")
+    # The three sets, in upstream's order: connecting, connected, weak signal.
+    sets = ",\n".join("            ColorSet(colors: [\n" + ",\n".join(f"                hexToFloat(0x{c})" for c in colors)
+                      + "\n            ])" for colors in CALL_BACKGROUND_SETS)
+    if tree.read(CALL_BACKGROUND).count("self.colorSets = [\n" + sets + "\n        ]\n") != 1:
+        raise PatchError(f"{CALL_BACKGROUND}: the call's background is not Pluma's three sets in their order")
+    for rel, _, new, count in CALL_COLOR_LITERALS:
+        if tree.read(rel).count(new) < count:
+            raise PatchError(f"{rel}: {new} is not where the patch put it")
 
 def main(argv=None):
     if (argv if argv is not None else sys.argv[1:]) == ["--paths"]:

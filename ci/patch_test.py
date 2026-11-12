@@ -1329,6 +1329,13 @@ APP_DELEGATE, INTRO = patch.APP_DELEGATE, patch.INTRO_ANIMATIONS
 # Damage to each place the patch edits or checks, as (file, text in the
 # pinned upstream, replacement): every one must stop the patch with an error
 # that names the file.
+# The first two sets of the 1:1 call's background after the patch.
+CONNECTING_SET = ("            ColorSet(colors: [\n                hexToFloat(0x3A4A3C),\n                hexToFloat(0x4F6E52),\n"
+                  "                hexToFloat(0x2C3A2D),\n                hexToFloat(0x5B7A5E)\n            ])")
+CONNECTED_SET = ("            ColorSet(colors: [\n                hexToFloat(0x5B7A5E),\n                hexToFloat(0x6F8F72),\n"
+                 "                hexToFloat(0x4F6E52),\n                hexToFloat(0x7FA082)\n            ])")
+
+
 DAMAGE = (
     (patch.CONTEXT_MENUS, "            if premiumConfiguration.isPremiumDisabled {\n                return false",
      "            if premiumConfiguration.isPremiumDisabled || true {\n                return false"),
@@ -1692,6 +1699,29 @@ DAMAGE = (
     (patch.MEDIA_STREAM, "strings.LiveStream_ViewCredentials", "strings.LiveStream_ViewStreamKey"),
     (patch.STORY_CAMERA, "                self.canLivestream = true\n", "                self.canLivestream = !self.isTablet\n"),
     (patch.STRINGS, '"Common.OK" = "OK";\n', '"Common.OK" = "OK";\n"Pluma.GroupCall.EncryptionFailed" = "x";\n'),
+    # The self-healing rule: where the server's next offset comes from, a
+    # write to the chain, the lock the report is made under.
+    (patch.E2E_CONTEXT, "                self.e2ePoll0Offset = initialState.subChain0.offset\n",
+     "                self.e2ePoll0Offset = initialState.subChain0.offset + 0\n"),
+    (patch.E2E_CONTEXT, "            let updateBaseOffset = nextOffset - blocks.count\n", "            let updateBaseOffset = nextOffset - blocks.count + 0\n"),
+    (patch.E2E_CONTEXT, "            let accountPeerId = engine.account.peerId\n", "            let accountPeerId = self.engine.account.peerId\n"),
+    (patch.E2E_CONTEXT, "        public var pendingIncomingBroadcastBlocks: [Data] = []\n",
+     "        public var pendingIncomingBroadcastBlocks = [Data]()\n"),
+    (patch.E2E_CONTEXT, "mode: .cleanup, participantIds: removedPeerIds, block: removeBlock)", "mode: .cleanup, participantIds: removedPeerIds, block: removeBlock!)"),
+    (patch.ENGINE_GROUP_CALLS, "        return .single(.pollBlocksAndRetry)\n", "        return Signal.single(.pollBlocksAndRetry)\n"),
+    (patch.ENGINE_GROUP_CALLS, "    |> retry(retryOnError: { _ in\n        return true\n    }, delayIncrement: 0.1, maxDelay: 1.0, maxRetries: 5,",
+     "    |> retry(retryOnError: { _ in\n        return true\n    }, delayIncrement: 0.1, maxDelay: 1.0, maxRetries: 3,"),
+    (patch.ENGINE_CALLS, "block: Data) -> Signal<Never, NoError> {", "block: Data) -> Signal<Never, NoError>  {"),
+    # Recording: each entry that starts one.
+    (patch.VIDEO_CHAT_MORE_MENU, "                    text = environment.strings.LiveStream_StartRecording\n",
+     "                    text = environment.strings.LiveStream_StartRecording.uppercased()\n"),
+    (patch.VIDEO_CHAT_MORE_MENU, "groupCall.setShouldBeRecording(true, title: title, videoOrientation: videoOrientation)",
+     "groupCall.setShouldBeRecording(!false, title: title, videoOrientation: videoOrientation)"),
+    (patch.MEDIA_STREAM, "                            let text = presentationData.strings.LiveStream_StartRecording\n",
+     "                            let text: String = presentationData.strings.LiveStream_StartRecording\n"),
+    # Call colours: one more of Telegram's, a fraction that moved.
+    (patch.CALL_BACKGROUND, "                hexToFloat(0x7664DA)\n", "                hexToFloat(0x7664DA),\n                hexToFloat(0x7664DA)\n"),
+    (patch.MEDIA_STREAM, "UIColor(red: 0.314, green: 0.161, blue: 0.197, alpha: 1)", "UIColor(red: 0.314, green: 0.161, blue: 0.197, alpha: 1.0)"),
 )
 
 
@@ -2289,7 +2319,7 @@ class UpstreamTest(unittest.TestCase):
         with unittest.mock.patch.object(patch, "patch_group_calls", lambda tree: None):
             tree = RecordingTree(self.root, self.written)
             patch.patch(tree, config())
-        rels = {rel for rel, _, _ in patch.group_call_edits()} | {patch.STRINGS}
+        rels = {rel for rel, _, _ in patch.group_call_edits()} | {rel for rel, *_ in patch.RECORDING_STARTS} | {patch.STRINGS}
         before = {rel: tree.read(rel) for rel in rels}
         self.tearDown()
         tree, _ = self.run_patch()
@@ -2299,9 +2329,26 @@ class UpstreamTest(unittest.TestCase):
             text = expected.get(rel, before[rel])
             self.assertEqual(text.count(old), 1, (rel, old[:60]))
             expected[rel] = text.replace(old, new)
+        # The entries that start a recording go whole, from the branch's
+        # first line to its last.
+        for rel, head, tail, block, must_contain in patch.RECORDING_STARTS:
+            text = expected.get(rel, before[rel])
+            self.assertEqual(text.count(head), 1, rel)
+            start = text.index(head)
+            end = text.index(tail, start) + len(tail)
+            for s in must_contain:
+                self.assertIn(s, text[start:end])
+            self.assertNotIn(tail, text[start + len(head):end - len(tail)], rel)
+            expected[rel] = text[:start] + block + text[end:]
         for rel, text in expected.items():
             self.assertEqual(tree.read(rel), text, rel)
-        self.assertEqual(len(expected), 18)
+        self.assertEqual(len(expected), 20)
+        for rel, *_ in patch.RECORDING_STARTS:
+            self.assertIsNone(patch.RECORDING_START.search(tree.read(rel)), rel)
+            self.assertIsNotNone(patch.RECORDING_START.search(before[rel]), rel)
+        # A recording that is on still shows, and can be stopped.
+        self.assertIn("if let recordingStartTimestamp = callState.recordingStartTimestamp {", tree.read(patch.VIDEO_CHAT_MORE_MENU))
+        self.assertIn("call.setShouldBeRecording(false, title: nil, videoOrientation: nil)", tree.read(patch.MEDIA_STREAM))
         # Every group call the manager makes has its own key and joins as
         # oneself; a call made at init or scheduled gets its context.
         manager = tree.read(patch.CALL_MANAGER)
@@ -2321,26 +2368,58 @@ class UpstreamTest(unittest.TestCase):
         self.assertEqual(call.count("ScreencastInProcessIPCContext(basePath:"), 1)
         self.assertNotIn("ScreencastEmbeddedIPCContext(", call)
         self.assertNotIn("useIPCContext", call)
-        # The failure rejoins; the only way out of it is the notice.
+        # A reason to rejoin rejoins: 3 in 5 minutes, after 0, 2 and 5 s and
+        # up to 1 s more, one at a time, with a new key; the fourth leaves
+        # with the notice.
         self.assertIn("isFailed else {\n                        return\n                    }\n"
                       "                    self.plumaRejoinAfterE2EFailure()", call)
         rejoin = call[call.index("    private func plumaRejoinAfterE2EFailure() {"):call.index("    public func reconnect(with invite: String) {")]
-        self.assertIn("self.plumaE2ERejoinTimestamps.count < 3", rejoin)
+        self.assertIn("let delays: [Double] = [0.0, 2.0, 5.0]", rejoin)
+        self.assertIn("if self.plumaE2ERejoinTimestamps.count >= delays.count {\n            self.plumaLeaveAfterE2EFailure()", rejoin)
         self.assertIn("timestamp - $0 >= 5.0 * 60.0", rejoin)
+        self.assertIn("Queue.mainQueue().after(delays[self.plumaE2ERejoinTimestamps.count] + Double.random(in: 0.0 ..< 1.0), {", rejoin)
+        self.assertIn("!self.plumaE2ERejoinScheduled", rejoin)
+        self.assertLess(rejoin.index("self.plumaE2ERejoinScheduled = true"), rejoin.index("Queue.mainQueue().after("))
+        self.assertLess(rejoin.index("let keyPair = TelegramE2EEncryptionProviderImpl.shared.generateKeyPair()"),
+                        rejoin.index("e2eContext.reset(keyPair: keyPair)"))
         self.assertLess(rejoin.index("e2eContext.reset(keyPair: keyPair)"), rejoin.index("self.requestCall(movingFromBroadcastToRtc: false)"))
         self.assertLess(rejoin.index("Pluma_GroupCall_EncryptionFailed"), rejoin.index("self.leave(terminateIfPossible: false)"))
-        # The report: from the context, through the engine, to the data
-        # channel.
-        self.assertIn("callContext.sendE2EStatus(report)", call)
-        self.assertIn("self.context.sendE2EStatus(status)", tree.read(patch.GROUP_CALL_CONTEXT))
-        self.assertIn("_instance->sendE2EStatus(status.UTF8String", tree.read(patch.CALL_CONTEXT))
+        # The report: requested by the context, taken by tgcalls on its
+        # thread while the data channel is open, through the engine.
+        self.assertIn("callContext.sendE2EStatus({\n                return e2eContext?.plumaTakeStatusReport()\n            })", call)
+        self.assertIn("self.context.sendE2EStatus(takeStatus)", tree.read(patch.GROUP_CALL_CONTEXT))
+        self.assertIn("_instance->sendE2EStatus([takeStatus]() -> std::string {", tree.read(patch.CALL_CONTEXT))
         custom = tree.read(patch.GROUP_INSTANCE_CUSTOM)
-        self.assertIn("internal->sendE2EStatus(status);", custom)
+        self.assertIn("internal->sendE2EStatus(takeStatus);", custom)
         self.assertIn('json["colibriClass"].string_value() != "PlumaE2EStatus"', custom)
-        self.assertIn("    virtual void sendE2EStatus(std::string const &) {}\n", tree.read(patch.GROUP_INSTANCE))
+        send = custom[custom.index("    void sendE2EStatus(std::function<std::string()> const &takeStatus) {"):]
+        self.assertLess(send.index("if (!_isDataChannelOpen) {"), send.index("std::string status = takeStatus();"))
+        self.assertIn("    virtual void sendE2EStatus(std::function<std::string()> const &) {}\n", tree.read(patch.GROUP_INSTANCE))
         context = tree.read(patch.E2E_CONTEXT)
         self.assertIn("return ([], Data(), [], [:], true)", context)
         self.assertEqual(context.count("withTimeInterval: 5.0, repeats: true"), 1)
+        self.assertEqual(context.count("withTimeInterval: 1.0, repeats: true"), 1)
+        # The checks of the chain: behind the server for over 12 s, nothing
+        # decrypted for 15 s while current; both fail the state as a block
+        # that does not apply does, and so does a write the server forbids.
+        check = context[context.index("        private func plumaCheckChain() {"):context.index("        func kickPeer(id: EnginePeer.Id) {")]
+        self.assertIn("serverOffset0 > height + 1", check)
+        self.assertIn("timestamp - behindSince.since > 12.0", check)
+        self.assertIn("state.plumaDecryptionStalled(window: 15.0)", check)
+        self.assertIn("self.plumaBehindSince = nil\n            if isStalled {", check)
+        self.assertEqual(check.count("self.isFailed.set(true)"), 2)
+        self.assertEqual(context.count("self.plumaServerHas(nextOffset: "), 3)
+        self.assertEqual(context.count("                            isFailed.set(true)\n                            return false\n"), 2)
+        self.assertIn("if isForbidden {\n                        isFailed.set(true)", context)
+        engine = tree.read(patch.ENGINE_GROUP_CALLS)
+        self.assertEqual(engine.count('error.errorDescription == "GROUPCALL_FORBIDDEN"'), 2)
+        self.assertIn('return error.errorDescription != "GROUPCALL_FORBIDDEN"', engine)
+        self.assertIn("-> Signal<Bool, NoError> {\n", tree.read(patch.ENGINE_CALLS))
+        # A rejoin starts the report and the checks over.
+        reset = context[context.index("        func reset(keyPair: TelegramKeyPair) {"):context.index("        private func plumaBegin() {")]
+        for s in ("self.plumaStatusTimer = nil", "self.plumaChainTimer = nil", "self.plumaServerOffset0 = nil", "callState.plumaSeq = 0",
+                  "callState.state = nil", "self.isFailed.set(false)"):
+            self.assertIn(s, reset)
         # No join as a channel, no RTMP, no live story.
         self.assertIn("            return .single([])\n", tree.read(patch.ENGINE_CALLS))
         self.assertNotIn("CreateExternalMediaStreamScreen(", tree.read(patch.MEDIA_STREAM))
@@ -2368,6 +2447,88 @@ class UpstreamTest(unittest.TestCase):
              "            return _internal_cachedGroupCallDisplayAsAvailablePeers(account: self.account, peerId: peerId)\n"),
             (patch.GROUP_INSTANCE_CUSTOM, "            networkManager->sendDataChannelMessage(status);\n",
              "            networkManager->sendDataChannelMessage(status);\n            networkManager->sendDataChannelMessage(status);\n"),
+            (patch.VIDEO_CHAT_MORE_MENU, "        if canManageCall && !isConference {\n            if let recordingStartTimestamp",
+             "        let _ = environment.strings.VoiceChat_StartRecording\n"
+             "        if canManageCall && !isConference {\n            if let recordingStartTimestamp"),
+            (patch.MEDIA_STREAM, "                        if let recordingStartTimestamp = state.recordingStartTimestamp {\n",
+             "                        call.setShouldBeRecording(true, title: nil, videoOrientation: false)\n"
+             "                        if let recordingStartTimestamp = state.recordingStartTimestamp {\n"),
+        ):
+            with self.subTest(rel=rel, old=old[:60]):
+                self.tearDown()
+                tree, c = self.run_patch()
+                text = tree.read(rel)
+                self.assertEqual(text.count(old), 1)
+                tree.write(rel, text.replace(old, new))
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify(tree, c)
+                self.assertIn(pathlib.PurePath(rel).name, str(e.exception))
+
+    def test_call_colors(self):
+        # Every colour of Telegram's call screens becomes Pluma's: the 1:1
+        # call's three sets point for point, the rest by meaning; greys stay,
+        # and nothing else in the files changes. The rest of the patch alone,
+        # then the whole of it.
+        with unittest.mock.patch.object(patch, "patch_call_colors", lambda tree: None):
+            tree = RecordingTree(self.root, self.written)
+            patch.patch(tree, config())
+        rels = list(patch.call_ui_sources(tree))
+        before = {rel: tree.read(rel) for rel in rels}
+        self.tearDown()
+        tree, _ = self.run_patch()
+        self.assertIn(patch.CALL_BACKGROUND, rels)
+        self.assertEqual(rels, list(patch.call_ui_sources(tree)))
+        pluma = {old: new for old, new, _ in patch.CALL_COLORS}
+        changed = 0
+        for rel in rels:
+            expected = patch.CALL_COLOR.sub(lambda m: "0x" + pluma.get(m.group(1).upper(), m.group(1)), before[rel])
+            for r, old, new, count in patch.CALL_COLOR_LITERALS:
+                if r == rel:
+                    self.assertEqual(expected.count(old), count, rel)
+                    expected = expected.replace(old, new)
+            self.assertEqual(tree.read(rel), expected, rel)
+            changed += expected != before[rel]
+        recolored = {rel for rel in rels if any(m.group(1).upper() in pluma for m in patch.CALL_COLOR.finditer(before[rel]))}
+        self.assertEqual(changed, len(recolored | {rel for rel, *_ in patch.CALL_COLOR_LITERALS}))
+        self.assertGreaterEqual(changed, 30)
+        # Telegram's three sets of the 1:1 call are gone, Pluma's are there in
+        # their order.
+        background = tree.read(patch.CALL_BACKGROUND)
+        for telegram in (("568FD6", "626ED5", "A667D5", "7664DA"), ("ACBD65", "459F8D", "53A4D1", "3E917A"),
+                         ("C0508D", "F09536", "CE5081", "FC7C4C")):
+            for color in telegram:
+                self.assertNotIn(color, background.upper())
+        sets = re.findall(r"ColorSet\(colors: \[\s*hexToFloat\(0x(\w+)\),\s*hexToFloat\(0x(\w+)\),\s*hexToFloat\(0x(\w+)\),\s*hexToFloat\(0x(\w+)\)\s*\]\)",
+                          background)
+        self.assertEqual(tuple(sets), patch.CALL_BACKGROUND_SETS)
+        self.assertEqual(patch.CALL_BACKGROUND_SETS, (("3A4A3C", "4F6E52", "2C3A2D", "5B7A5E"),
+                                                      ("5B7A5E", "6F8F72", "4F6E52", "7FA082"),
+                                                      ("8A5A44", "A86B4C", "7A4E3B", "B97A55")))
+        # No colour of the call screens is left that is neither Pluma's nor
+        # a grey.
+        allowed = {new for _, new, _ in patch.CALL_COLORS} | set(patch.CALL_GREYS)
+        for rel in rels:
+            for m in patch.CALL_COLOR.finditer(tree.read(rel)):
+                self.assertIn(m.group(1).upper(), allowed, rel)
+            self.assertNotIn("UIColor(red:", tree.read(rel), rel)
+
+    def test_call_colors_check(self):
+        # The check after the edits finds a colour of Telegram's anywhere in
+        # the call screens, as a literal or as fractions, and a background set
+        # that is not Pluma's.
+        for rel, old, new in (
+            (patch.CALL_BACKGROUND, "hexToFloat(0x5B7A5E)\n            ]),\n            ColorSet(colors: [\n                hexToFloat(0x5B7A5E)",
+             "hexToFloat(0x7664DA)\n            ]),\n            ColorSet(colors: [\n                hexToFloat(0x5B7A5E)"),
+            (patch.CALL_BACKGROUND, "hexToFloat(0x8A5A44),", "hexToFloat(0xA86B4C),"),
+            # Pluma's sets, each whole, but connecting and connected swapped.
+            (patch.CALL_BACKGROUND, CONNECTING_SET + ",\n" + CONNECTED_SET, CONNECTED_SET + ",\n" + CONNECTING_SET),
+            ("submodules/TelegramCallsUI/Sources/CallStatusBarNode.swift", "private let blue = UIColor(rgb: 0x4F6E52)",
+             "private let blue = UIColor(rgb: 0x007fff)"),
+            ("submodules/TelegramUI/Components/Calls/VideoChatMicButtonComponent/Sources/VideoChatMicButtonComponent.swift",
+             "private let blueColor = UIColor(rgb: 0x5B7A5E)", "private let blueColor = UIColor(rgb: 0x55B3F9)"),
+            (patch.MEDIA_STREAM, "UIColor(rgb: 0xA86B4C)", "UIColor(red: 1, green: 0.176, blue: 0.333, alpha: 1)"),
+            ("submodules/TelegramCallsUI/Sources/CallStatusBarNode.swift", "private let blue = UIColor(rgb: 0x4F6E52)",
+             "private let blue = UIColor(red: 0.0, green: 0.5, blue: 1.0, alpha: 1.0)"),
         ):
             with self.subTest(rel=rel, old=old[:60]):
                 self.tearDown()
@@ -3052,6 +3213,8 @@ class GroupCallsTest(unittest.TestCase):
                  patch.GROUP_INSTANCE_CUSTOM: "            networkManager->sendDataChannelMessage(result);\n"}
         for rel, old, _ in patch.group_call_edits():
             files[rel] = files.get(rel, "") + old + "x\n"
+        for rel, head, tail, _, must_contain in patch.RECORDING_STARTS:
+            files[rel] = files.get(rel, "") + head + "".join(must_contain) + tail + "x\n"
         # The manager's calls whole: the scheduled one, the joined one, the
         # conference.
         (_, scheduled, _), (_, scheduled_key, _), (_, joined, _), (_, joined_key, _) = patch.group_call_edits()[:4]
@@ -3087,6 +3250,10 @@ class GroupCallsTest(unittest.TestCase):
             else:
                 self.assertIn(rel, patch.UPSTREAM_PATHS)
         self.assertFalse(any(rel.startswith("third-party/td/td/") for rel, _, _ in patch.group_call_edits()))
+        for rel, *_ in patch.RECORDING_STARTS:
+            self.assertIn(rel, patch.UPSTREAM_PATHS)
+        for d in patch.CALL_UI_DIRS:
+            self.assertIn(d, patch.UPSTREAM_PATHS)
 
     def test_one_edit_each(self):
         # No two edits of a file touch the same text, and each adds what
@@ -3100,30 +3267,73 @@ class GroupCallsTest(unittest.TestCase):
                     self.assertNotIn(other_old, old)
                     self.assertNotIn(old, other_old)
 
+    # PlumaE2EStatus v1 (ADR 0060 §5 of the server): every field, no other.
+    V1_FIELDS = {"colibriClass", "v", "seq", "height", "lastBlock", "offset0", "offset1", "error", "sendEpochs", "decryptEpochs",
+                 "unknownEpochs", "encrypted", "encryptFailed", "senders"}
+    V1_SENDER = {"user", "ok", "unknownEpoch", "tooOld", "duplicate", "failed", "lastOkMs"}
+
     def test_report_contract(self):
-        # The report the SFU reads (ADR 0060 of the server, colibriClass
-        # PlumaE2EStatus): what each field is called, and that none is a key,
-        # a nonce, emoji or bytes of a frame.
-        context = patch._E2E_CONTEXT_RESET
+        # The report the SFU reads: the fields TdCall gives and those the
+        # context adds are the contract's, and so are those of a report with
+        # no state; none is a key, a nonce, emoji or bytes of a frame.
+        take = patch._E2E_CONTEXT_TAKE
         counters = patch._TD_BINDING_DECRYPT
-        top = set(re.findall(r'report\["([A-Za-z0-9]+)"\]', context)) | set(re.findall(r'status\[@"([A-Za-z0-9]+)"\]', counters))
-        self.assertEqual(top, {"colibriClass", "v", "offset0", "offset1", "height0", "lastBlock", "epochs", "error",
-                               "encryptFailures", "senders", "unknownEpochs"})
+        from_call = set(re.findall(r'status\[@"([A-Za-z0-9]+)"\]', counters))
+        added = set(re.findall(r'report\["([A-Za-z0-9]+)"\] = ', take))
+        self.assertEqual(from_call | added, self.V1_FIELDS)
+        self.assertEqual(from_call & added, {"senders"})
+        no_state = take[take.index("?? [") + 4:take.index("            ]\n")]
+        self.assertEqual(set(re.findall(r'"([A-Za-z0-9]+)": ', no_state)) | added, self.V1_FIELDS)
+        self.assertIn('"height": -1,', no_state)
+        self.assertIn('"lastBlock": "",', no_state)
         sender = set(re.findall(r'@"([A-Za-z0-9]+)": @\(', counters))
-        self.assertEqual(sender, {"user", "ok", "unknownEpoch", "tooOld", "replayed", "other", "lastOkMs"})
-        for name in top | sender:
+        self.assertEqual(sender, self.V1_SENDER)
+        for name in self.V1_FIELDS | self.V1_SENDER:
             for word in ("key", "nonce", "emoji", "secret", "frame"):
                 self.assertNotIn(word, name.lower())
-        self.assertIn('report["colibriClass"] = "PlumaE2EStatus"', context)
-        self.assertIn('report["v"] = 1', context)
-        # Hashes go as their first 8 bytes in hex; at most 8 unknown epochs
-        # and 128 senders.
+        self.assertIn('report["colibriClass"] = "PlumaE2EStatus"', take)
+        self.assertIn('report["v"] = 1', take)
+        # seq counts the reports since the join: begin() and reset() start
+        # it over.
+        self.assertIn("callState.plumaSeq += 1\n", take)
+        self.assertIn('report["seq"] = callState.plumaSeq', take)
+        self.assertIn("callState.plumaSeq = 0", patch._E2E_CONTEXT_RESET)
+        # Counters of frames and the epochs of received frames are since the
+        # last report: the report takes them; the time of a sender's last
+        # decrypted frame stays.
+        take_status = counters[counters.index("- (NSDictionary<NSString *, id> *)plumaTakeStatus {"):counters.index("- (int)plumaHeight {")]
+        for s in ("counters.ok = 0;", "counters.unknownEpoch = 0;", "counters.tooOld = 0;", "counters.duplicate = 0;",
+                  "counters.failed = 0;", "_plumaEncrypted = 0;", "_plumaEncryptFailed = 0;", "_plumaDecryptEpochs.clear();",
+                  "_plumaUnknownEpochs.clear();"):
+            self.assertIn(s, take_status)
+        self.assertNotIn("lastOkAt = ", take_status)
+        self.assertNotIn("_plumaSendEpochs = ", take_status)
+        # Only senders with frames since the last report, by user id (a
+        # std::map), -1 for one never decrypted.
+        self.assertIn("if (plumaSenderFrames(counters) == 0) {\n            continue;", take_status)
+        self.assertIn("std::map<int64_t, PlumaSenderCounters> _plumaSenders;", patch._TD_BINDING_COUNTERS)
+        self.assertIn("counters.lastOkAt > 0.0 ? (int64_t)((timestamp - counters.lastOkAt) * 1000.0) : -1", take_status)
+        # Limits: 15 epochs sent and decrypted, 8 unknown, 100 senders and
+        # 16 KiB, the senders decrypted longest ago dropped first.
+        self.assertIn("plumaAddEpochs(_plumaDecryptEpochs, 15, ", counters)
+        self.assertIn("plumaAddEpochs(_plumaUnknownEpochs, 8, ", counters)
+        self.assertIn("plumaAddEpochs(epochs, 15, header);", "".join(new for _, _, new in patch.group_call_edits()))
+        self.assertIn("if data.count <= 16 * 1024 && senders.count <= 100 {", take)
+        self.assertIn('senders.indices.max(by: { (senders[$0]["lastOkMs"] as? Int ?? 0) < (senders[$1]["lastOkMs"] as? Int ?? 0) })', take)
+        # Hashes go as their first 8 bytes in hex.
         self.assertIn('@"%02x%02x%02x%02x%02x%02x%02x%02x"', patch._TD_BINDING_COUNTERS)
-        self.assertIn("_plumaUnknownEpochs.count >= 8", counters)
-        self.assertIn("_plumaSenders.size() < 128", counters)
         # tgcalls sends nothing but a status report.
         self.assertIn('json["colibriClass"].string_value() != "PlumaE2EStatus"', patch._TGCALLS_SEND_STATUS)
         self.assertIn("if (!_isDataChannelOpen) {", patch._TGCALLS_SEND_STATUS)
+
+    def test_report_example(self):
+        # The example of the ADR has the fields the patch writes.
+        example = json.loads('{"colibriClass":"PlumaE2EStatus","v":1,"seq":12,"height":41,"lastBlock":"9f3c0a1b2c3d4e5f",'
+                             '"offset0":42,"offset1":17,"error":0,"sendEpochs":["9f3c0a1b2c3d4e5f"],"decryptEpochs":["9f3c0a1b2c3d4e5f"],'
+                             '"unknownEpochs":[],"encrypted":250,"encryptFailed":0,"senders":[{"user":1000002,"ok":248,"unknownEpoch":0,'
+                             '"tooOld":0,"duplicate":1,"failed":0,"lastOkMs":40}]}')
+        self.assertEqual(set(example), self.V1_FIELDS)
+        self.assertEqual(set(example["senders"][0]), self.V1_SENDER)
 
     def test_epoch_header(self):
         # The open header the counters read is tde2e's: an int32 whose low
@@ -3134,16 +3344,113 @@ class GroupCallsTest(unittest.TestCase):
         self.assertIn("size_t count = head & 0xff;", counters)
         self.assertIn("if (count > 15 || size - offset - 4 < count * 32) {", counters)
         self.assertIn("return std::string((const char *)data + offset, 4 + count * 32);", counters)
-        self.assertIn("memcpy(&prefixLength, bytes + message.length - 4, 4);", patch._TD_BINDING_DECRYPT)
-        self.assertIn("plumaEpochHeader(bytes, message.length >= 4 ? message.length - 4 : 0, prefixLength)", patch._TD_BINDING_DECRYPT)
-        # A block's hash is over the form the client built, magic less 1.
-        self.assertIn("magic -= 1;", counters)
+        self.assertIn("memcpy(&prefixLength, bytes + message.length - 4, 4);", counters)
+        self.assertIn("return plumaEpochHeader(bytes, message.length - 4, prefixLength);", counters)
+        # A block's hash is over the form the server keeps (ADR 0060 §2: the
+        # bytes its author sent, the magic one less than in the form the
+        # server sends, Blockchain::from_server_to_local), which is tde2e's
+        # Block::calc_hash.
+        block_hash = counters.split("static NSString * _Nullable plumaBlockHashPrefix")[1].split("\n}\n")[0]
+        self.assertIn("memcpy(&magic, block.bytes, 4);\n    magic -= 1;\n    memcpy(block.mutableBytes, &magic, 4);", block_hash)
+        self.assertIn("CC_SHA256(block.bytes, (CC_LONG)block.length, hash);", block_hash)
+        self.assertNotIn("serverBlock.bytes, (CC_LONG)", block_hash)
+
+    def test_failure_code(self):
+        # The error of a failed call is the first failure, read from the
+        # CallFailed tde2e answers after it as tde2e reads any code.
+        # tde2e's message is "CALL_FAILED: [Error : <code> : ...]" (Call.h
+        # get_status, the Error of e2e/utils.h, Status::print): the code is
+        # read where the failure starts, not at the start of the message.
+        counters = patch._TD_BINDING_COUNTERS
+        self.assertIn('error.message.find("[Error : ")', counters)
+        self.assertIn('sscanf(error.message.c_str() + failure, "[Error : %d :", &code)', counters)
+        self.assertNotIn('sscanf(error.message.c_str(), ', counters)
+        self.assertIn('error_string(tde2e_api::ErrorCode(code)) == "UNKNOWN_ERROR"', counters)
+        edits = "".join(new for rel, _, new in patch.group_call_edits() if rel == patch.TD_BINDING)
+        self.assertIn("if (_plumaError == 0) {\n            _plumaError = plumaFailureCode(result.error());", edits)
+
+    def test_stalled_decryption(self):
+        # Nothing decrypted for 15 s: packets that could not be decrypted came
+        # within the window, none from anyone was, and the call is that old.
+        # Too old and duplicate packets are neither.
+        counters = patch._TD_BINDING_DECRYPT
+        stalled = counters[counters.index("- (bool)plumaDecryptionStalled:(double)window {"):]
+        self.assertIn("timestamp - _plumaMadeAt < window", stalled)
+        self.assertIn("timestamp - _plumaLastUndecryptableAt >= window", stalled)
+        self.assertIn("return _plumaLastDecryptedAt == 0.0 || timestamp - _plumaLastDecryptedAt >= window;", stalled)
+        decrypt = counters[:counters.index("- (NSDictionary<NSString *, id> *)plumaTakeStatus {")]
+        self.assertEqual(decrypt.count("isUndecryptable = false;"), 2)
+        self.assertLess(decrypt.index('"Message is too old"'), decrypt.index("isUndecryptable = false;"))
 
     def test_strings(self):
         # The patch's texts are used, each once, by the code it adds.
         edited = "".join(new for _, _, new in patch.group_call_edits())
         for key, _ in patch.GROUP_CALL_STRINGS:
             self.assertEqual(edited.count("strings." + key.replace(".", "_")), 1, key)
+
+
+class CallColorsTest(unittest.TestCase):
+    def tree(self, root, extra=""):
+        (root / "Telegram").mkdir(exist_ok=True)
+        (root / "Telegram/BUILD").write_text("")
+        (root / "versions.json").write_text("{}")
+        # Each of Telegram's colours as many times as upstream has it, a grey,
+        # the fractions of a stream's screen.
+        lines = [f"let c{i}_{n} = UIColor(rgb: 0x{old.lower() if n % 2 else old})"
+                 for i, (old, _, count) in enumerate(patch.CALL_COLORS) for n in range(count)]
+        files = {patch.CALL_BACKGROUND: "\n".join(lines) + "\nlet grey = UIColor(rgb: 0x1C1C1E)\n" + extra,
+                 patch.MEDIA_STREAM: "".join(old + "\n" for _, old, _, count in patch.CALL_COLOR_LITERALS for _ in range(count))}
+        for d in patch.CALL_UI_DIRS:
+            (root / d).mkdir(parents=True, exist_ok=True)
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.patch_call_colors(tree)
+            text = tree.read(patch.CALL_BACKGROUND)
+            for old, new, count in patch.CALL_COLORS:
+                self.assertNotIn(old, text.upper())
+            self.assertIn("UIColor(rgb: 0x1C1C1E)", text)
+            self.assertEqual(tree.read(patch.MEDIA_STREAM).count("UIColor(red:"), 0)
+            # A second run finds none of Telegram's colours.
+            with self.assertRaises(patch.PatchError):
+                patch.patch_call_colors(tree)
+
+    def test_upstream_changed(self):
+        # A colour upstream adds or drops stops the patch, which writes
+        # nothing then.
+        for extra in ("let more = UIColor(rgb: 0x3252EF)\n",):
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), extra)
+                before = tree.read(patch.CALL_BACKGROUND)
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.patch_call_colors(tree)
+                self.assertIn("0x3252EF", str(e.exception))
+                self.assertEqual(tree.read(patch.CALL_BACKGROUND), before)
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            text = tree.read(patch.CALL_BACKGROUND)
+            tree.write(patch.CALL_BACKGROUND, text.replace("0x568FD6", "0x568FD7"))
+            with self.assertRaises(patch.PatchError) as e:
+                patch.patch_call_colors(tree)
+            self.assertIn("0x568FD6", str(e.exception))
+
+    def test_table(self):
+        # Each of Telegram's colours once, each of Pluma's in the palette:
+        # the call sets of the owner's decision and the sage of task 017.
+        olds = [old for old, _, _ in patch.CALL_COLORS]
+        self.assertEqual(len(olds), len(set(olds)))
+        palette = {c for s in patch.CALL_BACKGROUND_SETS for c in s} | {"9DBB9F", "B2CEB4"}
+        for old, new, count in patch.CALL_COLORS:
+            self.assertIn(new, palette, old)
+            self.assertGreater(count, 0)
+            self.assertNotIn(old, patch.CALL_GREYS)
+            self.assertRegex(old, r"^[0-9A-F]{6}$")
+        self.assertFalse(palette & set(olds))
 
 
 if __name__ == "__main__":
