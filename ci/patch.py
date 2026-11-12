@@ -4949,6 +4949,7 @@ def verify(tree, c):
     verify_saved_tags(tree)
     verify_premium_stickers(tree)
     verify_premium_for_everyone(tree)
+    verify_transcribe_view_once(tree)
     verify_no_ai_editor(tree)
     verify_app_update(tree)
     verify_video_quality(tree)
@@ -4989,12 +4990,6 @@ PREMIUM_FOR_EVERYONE_EDITS = (
     ("submodules/TelegramUI/Components/EntityKeyboard/Sources/EmojiPagerContentSignals.swift",
      "        let isPremiumDisabled = premiumConfiguration.isPremiumDisabled\n",
      "        // pluma: custom emoji and premium stickers stay in the keyboard: everybody has Premium.\n        _ = premiumConfiguration\n        let isPremiumDisabled = false\n", 3),
-    ("submodules/TelegramUI/Components/Chat/ChatMessageInteractiveFileNode/Sources/ChatMessageInteractiveFileNode.swift",
-     "                if Namespaces.Message.allNonRegular.contains(arguments.message.id.namespace) {\n                    displayTranscribe = false\n",
-     "                // pluma: the server has no transcription to offer.\n                if true || Namespaces.Message.allNonRegular.contains(arguments.message.id.namespace) {\n                    displayTranscribe = false\n", 1),
-    ("submodules/TelegramUI/Components/Chat/ChatMessageInteractiveInstantVideoNode/Sources/ChatMessageInteractiveInstantVideoNode.swift",
-     "                    if item.message.id.peerId.namespace != Namespaces.Peer.SecretChat && statusDisplayType == .free && !isViewOnceMessage && !item.presentationData.isPreview {\n                        let premiumConfiguration",
-     "                    // pluma: the server has no transcription to offer.\n                    if false && item.message.id.peerId.namespace != Namespaces.Peer.SecretChat && statusDisplayType == .free && !isViewOnceMessage && !item.presentationData.isPreview {\n                        let premiumConfiguration", 1),
     # Boosts do not exist here: nothing waits for a level of a channel, no
     # screen, prompt or link offers one.
     ("submodules/TelegramUI/Components/PeerAllowedReactionsScreen/Sources/PeerAllowedReactionsScreen.swift",
@@ -5043,6 +5038,43 @@ def verify_premium_for_everyone(tree):
         text = tree.read(rel)
         if text.count(new) != count or old in text.replace(new, ""):
             raise PatchError(f"{rel}: the edit of task 071 is not there")
+
+
+# --- Transcription of voice and round messages ---------------------------------
+# The server transcribes for everybody (messages.transcribeAudio; everybody has
+# Premium, ADR 0041), so the button shows as for a Premium user of Telegram.
+# The server refuses a view-once message, and upstream never offers the button
+# on one: these are its gates, in the layout of a voice message and of a round
+# one. Each gate is the first condition on displayTranscribe, and every place
+# that sets it is inside the gate. An update that drops, moves or bypasses them
+# stops the patch until it is read.
+TRANSCRIBE_FILE_NODE = "submodules/TelegramUI/Components/Chat/ChatMessageInteractiveFileNode/Sources/ChatMessageInteractiveFileNode.swift"
+TRANSCRIBE_VIDEO_NODE = "submodules/TelegramUI/Components/Chat/ChatMessageInteractiveInstantVideoNode/Sources/ChatMessageInteractiveInstantVideoNode.swift"
+TRANSCRIBE_VIEW_ONCE_GATES = (
+    (TRANSCRIBE_FILE_NODE,
+     "                let isViewOnceMessage = isVoice && arguments.message.minAutoremoveOrClearTimeout == viewOnceTimeout\n", 1),
+    (TRANSCRIBE_FILE_NODE,
+     "                var displayTranscribe = false\n"
+     "                if Namespaces.Message.allNonRegular.contains(arguments.message.id.namespace) {\n"
+     "                    displayTranscribe = false\n"
+     "                } else if arguments.message.id.peerId.namespace != Namespaces.Peer.SecretChat && !isViewOnceMessage && !arguments.presentationData.isPreview {\n", 1),
+    (TRANSCRIBE_VIDEO_NODE,
+     "            let isViewOnceMessage = item.message.minAutoremoveOrClearTimeout == viewOnceTimeout\n", 1),
+    (TRANSCRIBE_VIDEO_NODE,
+     "                    var displayTranscribe = false\n"
+     "                    if item.message.id.peerId.namespace != Namespaces.Peer.SecretChat && statusDisplayType == .free && !isViewOnceMessage && !item.presentationData.isPreview {\n", 1),
+)
+# The places that show the button, all inside the gates above.
+TRANSCRIBE_BUTTON_SETTERS = (
+    (TRANSCRIBE_FILE_NODE, "displayTranscribe = true\n", 4),
+    (TRANSCRIBE_VIDEO_NODE, "displayTranscribe = true\n", 3),
+)
+UPSTREAM_PATHS += tuple(sorted({TRANSCRIBE_FILE_NODE, TRANSCRIBE_VIDEO_NODE} - set(UPSTREAM_PATHS)))
+
+
+def verify_transcribe_view_once(tree):
+    for rel, s, count in TRANSCRIBE_VIEW_ONCE_GATES + TRANSCRIBE_BUTTON_SETTERS:
+        tree.expect(rel, s, count=count)
 
 
 # --- No AI message editor (task 079) ------------------------------------------

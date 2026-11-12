@@ -1625,6 +1625,17 @@ DAMAGE = (
     (patch.CALL_CAPTURE, "_videoCapturerResolution.second, 25);\n", "_videoCapturerResolution.second, 30);\n"),
     # No AI message editor: each edit.
     *((rel, old, old.replace(", ", ",  ", 1)) for rel, old, _, _ in patch.NO_AI_EDITOR_EDITS),
+    # Transcription: a gate that no longer keeps a view-once message out, a
+    # view-once message no longer recognised, the button set before the gate
+    # or after it.
+    *((rel, s, s.replace(" && !isViewOnceMessage", "")) for rel, s, _ in patch.TRANSCRIBE_VIEW_ONCE_GATES if "var displayTranscribe" in s),
+    *((rel, s, s.replace("viewOnceTimeout", "0")) for rel, s, _ in patch.TRANSCRIBE_VIEW_ONCE_GATES if "let isViewOnceMessage" in s),
+    (patch.TRANSCRIBE_FILE_NODE, "                var displayTranscribe = false\n                if Namespaces",
+     "                var displayTranscribe = isVoice\n                if Namespaces"),
+    (patch.TRANSCRIBE_FILE_NODE, "                let transcribedText = forcedAudioTranscriptionText",
+     "                displayTranscribe = true\n                let transcribedText = forcedAudioTranscriptionText"),
+    (patch.TRANSCRIBE_VIDEO_NODE, "                        if !scaleProgress.isZero {\n                            displayTranscribe = false\n",
+     "                        if !scaleProgress.isZero {\n                            displayTranscribe = true\n"),
     # The service account: a place that shows a support account's line gone,
     # one more of them, a row of a contact or of a list changed, Telegram's
     # text changed.
@@ -2401,6 +2412,59 @@ class PremiumForEveryoneTest(unittest.TestCase):
                     patch.verify_premium_for_everyone(tree)
                 tree.write(rel, patched)
             patch.verify_premium_for_everyone(tree)
+
+    def test_transcription_offered(self):
+        # The server transcribes for everybody: no edit hides the button of
+        # a voice or round message any more.
+        for edit in patch.PREMIUM_FOR_EVERYONE_EDITS:
+            with self.subTest(file=edit[0]):
+                self.assertNotIn("displayTranscribe", edit[1] + edit[2])
+                self.assertNotIn("transcription", edit[2])
+                self.assertNotIn(edit[0], {gate[0] for gate in patch.TRANSCRIBE_VIEW_ONCE_GATES})
+
+
+class TranscribeViewOnceTest(unittest.TestCase):
+    # The upstream files, made of what the check expects.
+    CHECKS = patch.TRANSCRIBE_VIEW_ONCE_GATES + patch.TRANSCRIBE_BUTTON_SETTERS
+
+    def tree(self, root):
+        (root / "Telegram").mkdir(exist_ok=True)
+        (root / "Telegram/BUILD").write_text("")
+        (root / "versions.json").write_text("{}")
+        files = {}
+        for rel, s, count in self.CHECKS:
+            files[rel] = files.get(rel, "") + ("x\n" + s) * count
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_upstream_paths_cover_the_gates(self):
+        for rel, _, _ in self.CHECKS:
+            self.assertIn(rel, patch.UPSTREAM_PATHS)
+
+    def test_gates(self):
+        # Each gate keeps a view-once message out of the button, and is the
+        # first condition on it.
+        for rel, s, _ in patch.TRANSCRIBE_VIEW_ONCE_GATES:
+            self.assertIn("isViewOnceMessage", s)
+            if "var displayTranscribe = false\n" in s:
+                self.assertIn("!isViewOnceMessage", s)
+        self.assertEqual({rel for rel, _, _ in patch.TRANSCRIBE_BUTTON_SETTERS},
+                         {rel for rel, _, _ in patch.TRANSCRIBE_VIEW_ONCE_GATES})
+        with tempfile.TemporaryDirectory() as d:
+            patch.verify_transcribe_view_once(self.tree(pathlib.Path(d)))
+
+    def test_upstream_changed(self):
+        # A gate that upstream dropped, changed or repeated, or one more or
+        # one less place that shows the button, stops the patch.
+        for rel, s, count in self.CHECKS:
+            for changed in {s.replace("isViewOnceMessage", "isViewOnce"), s + s, ""} - {s}:
+                with self.subTest(check=s.strip()[:40], changed=changed.strip()[:40]), tempfile.TemporaryDirectory() as d:
+                    tree = self.tree(pathlib.Path(d))
+                    tree.write(rel, tree.read(rel).replace(s, changed, 1))
+                    with self.assertRaisesRegex(patch.PatchError, "upstream changed it"):
+                        patch.verify_transcribe_view_once(tree)
 
 
 class VerifiedBadgeTest(unittest.TestCase):
