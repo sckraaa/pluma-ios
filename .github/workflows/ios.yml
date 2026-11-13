@@ -14,7 +14,8 @@
 #                   profile of every target first, so bad signing material
 #                   fails within a minute, not after an hour of compilation;
 #                   then it hands the IPA to the install service and offers
-#                   it to the apps installed from the site;
+#                   it to the apps installed from the site, as a mandatory
+#                   update when a manual run has "mandatory" ticked;
 #   preflight-testflight, build-testflight
 #                   on every push to main, and on a manual run of main with
 #                   "testflight" ticked: the
@@ -52,6 +53,10 @@ on:
         description: "Also build the App Store IPA and upload it to TestFlight (main only)"
         type: boolean
         default: false
+      mandatory:
+        description: "Make the ad hoc IPA's release mandatory: its update screen has no Skip (with ipa)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -68,6 +73,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: A mandatory release needs the ad hoc IPA
+        if: github.event_name == 'workflow_dispatch' && inputs.mandatory && (!inputs.ipa || vars.PLUMA_TEAM_ID == '')
+        run: |
+          echo "::error::mandatory marks the release of the ad hoc IPA: tick ipa too; it is built only once PLUMA_TEAM_ID is set (README, Signing)."
+          exit 1
       - name: Fetch upstream (the files the patch reads)
         run: ci/fetch-upstream.sh sparse
       - name: Tests
@@ -251,10 +261,13 @@ jobs:
           ipas=(out/pluma-ios-*.ipa)
           [ ${#ipas[@]} = 1 ] || { echo "::error::expected one IPA in out/, found ${#ipas[@]}"; exit 1; }
           ci/install-upload.sh "${ipas[0]}"
+      # Mandatory only from a manual run with "mandatory" ticked; a push
+      # records an optional release.
       - name: Offer the build to the apps installed from the site
         env:
           PLUMA_RELEASES_URL: ${{ vars.PLUMA_RELEASES_URL || 'https://pluma.chat' }}
           RELEASES_UPLOAD_TOKEN: ${{ secrets.RELEASES_UPLOAD_TOKEN }}
+          PLUMA_RELEASE_MANDATORY: ${{ github.event_name == 'workflow_dispatch' && inputs.mandatory }}
         run: ci/release-upload.sh
       - name: Encrypt the IPA
         env:

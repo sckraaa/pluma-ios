@@ -819,6 +819,8 @@ class AppUpdateTest(unittest.TestCase):
         files = {}
         for rel, old, _ in patch.APP_UPDATE_EDITS:
             files[rel] = files.get(rel, "") + old + "\n"
+        files[patch.APP_UPDATE] += patch.APP_UPDATE_BLOCKING
+        files[patch.UPDATE_INFO] += patch.APP_UPDATE_NO_SKIP + ", style: .regular, enabled: true, action: {\n"
         for rel, text in files.items():
             self.tree.write(rel, text)
 
@@ -837,6 +839,19 @@ class AppUpdateTest(unittest.TestCase):
         self.assertNotIn("itms-apps:", self.tree.read(patch.APP_DELEGATE))
         self.assertIn('URL(string: "https://pluma.chat/")', self.tree.read(patch.APP_DELEGATE))
         self.assertIn('            suffix = @"adhoc";\n', self.tree.read(patch.MT_API_ENVIRONMENT))
+        # Every hour instead of every 12, and again on coming to the foreground.
+        self.assertNotIn("12.0 * 60.0 * 60.0", info)
+        self.assertIn("suspendAwareDelay(1.0 * 60.0 * 60.0,", info)
+        self.assertIn("then(stateManager.shouldKeepOnlinePresence)\n", info)
+        state = self.tree.read(patch.APP_UPDATE_STATE)
+        self.assertIn("    let shouldKeepOnlinePresence: Signal<Bool, NoError>\n", state)
+        self.assertIn("        self.shouldKeepOnlinePresence = shouldKeepOnlinePresence\n", state)
+        # The screen of an old answer goes before the new one shows.
+        presenter = self.tree.read(patch.APP_UPDATE_PRESENTER)
+        dismissed = presenter.index("strongSelf.currentAppUpdateController?.dismiss()\n")
+        presented = presenter.index("strongSelf.mainWindow.present(controller, on: .update)\n")
+        self.assertLess(dismissed, presented)
+        self.assertLess(presenter.index("strongSelf.currentAppUpdateController = controller\n"), presented)
         # A second run finds none of the upstream texts.
         with self.assertRaises(patch.PatchError):
             patch.patch_app_update(self.tree)
@@ -850,6 +865,25 @@ class AppUpdateTest(unittest.TestCase):
                 with self.assertRaisesRegex(patch.PatchError, "is not there"):
                     patch.verify_app_update(self.tree)
             self.tree.write(rel, patched)
+        patch.verify_app_update(self.tree)
+
+    def test_a_mandatory_release_cannot_be_skipped(self):
+        patch.patch_app_update(self.tree)
+        screen = self.tree.read(patch.UPDATE_INFO)
+        info = self.tree.read(patch.APP_UPDATE)
+        for rel, text in (
+                # Skip shows whatever the server says.
+                (patch.UPDATE_INFO, screen.replace("appUpdateInfo.blocking ? nil : ", "")),
+                # The screen can be swiped away.
+                (patch.UPDATE_INFO, screen + "    controller.enableInteractiveDismiss = true\n"),
+                # can_not_skip is read from another flag, or not at all.
+                (patch.APP_UPDATE, info.replace(patch.APP_UPDATE_BLOCKING, "                self.blocking = false\n"))):
+            with self.subTest(text=text[-120:]):
+                self.tree.write(rel, text)
+                with self.assertRaisesRegex(patch.PatchError, "can be skipped"):
+                    patch.verify_app_update(self.tree)
+                self.tree.write(patch.UPDATE_INFO, screen)
+                self.tree.write(patch.APP_UPDATE, info)
         patch.verify_app_update(self.tree)
 
 
