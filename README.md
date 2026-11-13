@@ -299,6 +299,8 @@ After `build-ipa` hands the IPA to the install service, `ci/release-upload.sh` r
 - `RELEASES_UPLOAD_TOKEN`, a secret of the `release` environment: `teamgramd/deploy/releases/put-token.sh` of the server repository sets it. Without it `build-ipa` fails at its start.
 - `PLUMA_RELEASES_URL`, a repository variable, defaults to `https://pluma.chat`.
 
+A push to `main` records an optional release: the update screen has Skip. A manual run with *ipa* and *mandatory* ticked records a mandatory one (`can_not_skip`): the screen has no Skip. The flag goes with the upload, not after it, because Android does not look again at a version it was offered (`LaunchActivity.java:6153-6155` of DrKLO/Telegram `7be672ea`; task 095 of the server repository); iOS takes the flag the same way. *mandatory* without *ipa*, or before signed builds are on (`PLUMA_TEAM_ID`), fails the run at once: there is no release to mark. A build recorded optional is not made mandatory by running its job again (the server answers 422 and the job fails); `pluma-admin release mandatory ios <build>` on the server does that, and `pluma-admin release optional ios <build>` undoes either.
+
 A bad release: `pluma-admin release withdraw ios <build>` on the server stops the update screens (`docs/ops/releases.md` of the server repository), but the install page keeps serving the IPA it was given. To take it back, run the workflow with `ipa` on the last good commit, or release the fix as the next build. The workflow needs both tokens, `RELEASES_UPLOAD_TOKEN` and `IOSINSTALL_UPLOAD_TOKEN`: a build is offered to the apps only together with the IPA the install page serves.
 
 ## When it builds
