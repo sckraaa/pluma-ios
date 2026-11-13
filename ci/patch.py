@@ -5773,6 +5773,12 @@ def verify_service_account(tree):
 #     (Pluma.GroupCall.EncryptionFailed). A rejoin of the transport keeps its
 #     key (PresentationGroupCall.swift 1909-1916, 2050-2077) and is none of
 #     these;
+#   - a join CONF_WRITE_CHAIN_INVALID refuses goes again on the last block,
+#     as upstream does (GroupCalls.swift 746-747, 963-966), but within the
+#     caps of ADR 0060 §5: 10 refusals in a row after which the last block
+#     is the same (the chain stands), 100 joins while it moves. Then it is
+#     the error of a join, on which the call ends (2173-2193 of
+#     PresentationGroupCall.swift). Upstream has no cap;
 #   - every 5 s the client reports the state of its encryption to the SFU
 #     over the call's data channel: PlumaE2EStatus v1 of ADR 0060 §5, its
 #     fields, no others. The height of sub-chain 0 and the hash of its last
@@ -6538,6 +6544,67 @@ func _internal_sendConferenceCallBroadcast(account: Account, callId: Int64, acce
     }
 }
 """
+# The join of a group call (GroupCalls.swift 655-968): it reads the last block
+# of sub-chain 0, builds its own on it and joins; CONF_WRITE_CHAIN_INVALID
+# (another block took that height) makes the whole of it start over with a
+# new read (.restart, 746-747, 963-966), with no cap upstream.
+_JOIN_ERROR_OLD = "    enum InternalJoinError {\n        case error(JoinGroupCallError)\n        case restart\n    }\n"
+_JOIN_LAST_BLOCK_OLD = "            guard let block = result.blocks.last else {\n                return generateE2E(nil)\n            }\n"
+_JOIN_START_OLD = "    |> mapToSignal { e2eData -> Signal<JoinGroupCallResult, InternalJoinError> in\n"
+_JOIN_RESTART_OLD = "    return signal |> restartOrMapError { error in\n        switch error {\n        case .restart:\n            return .restart\n"
+_CHAIN_RETRIES = """
+    // pluma: the caps on the joins CONF_WRITE_CHAIN_INVALID repeats (ADR 0060 §5, task 094).
+    // A refusal counts toward 10 in a row only when the last block is the same after it:
+    // the chain stands, so the refusal is no race. While the chain moves, as when every
+    // member joins again at once after a restart of the SFU and one join a round goes
+    // through, the join goes on, but for 100 joins at most (conference_call_size_limit).
+    // Then it is the error of a join. The counts are of this join: the call makes the
+    // signal anew for each (PresentationGroupCall.swift 2093).
+    struct PlumaChainRetries {
+        var joins = 0
+        var stalled = 0
+        var block: Data?
+        var refused = false
+    }
+    let plumaChainStalledLimit = 10
+    let plumaChainJoinsLimit = 100
+    let plumaChainRetries = Atomic<PlumaChainRetries>(value: PlumaChainRetries())
+"""
+_CHAIN_RETRIES_POLLED = """
+// pluma: the last block after a refused join, the same or another (task 094).
+let lastBlock = result.blocks.last
+let _ = plumaChainRetries.modify { value in
+    var value = value
+    if value.refused {
+        value.stalled = value.block == lastBlock ? value.stalled + 1 : 0
+        value.refused = false
+    }
+    value.block = lastBlock
+    return value
+}
+"""
+_CHAIN_RETRIES_STOOD = """
+// pluma: the chain stood through 10 refused joins in a row: the error of a join (task 094).
+if plumaChainRetries.with({ $0.stalled >= plumaChainStalledLimit }) {
+    return .fail(.error(.generic))
+}
+"""
+_JOIN_RESTART = src(" " * 4, """
+    return signal |> restartOrMapError { error -> RestartOrMapErrorCondition<JoinGroupCallError> in
+        switch error {
+        case .restart:
+            // pluma: the join goes again on the last block, 100 joins at most (task 094).
+            let joins = plumaChainRetries.modify { value in
+                var value = value
+                value.joins += 1
+                value.refused = true
+                return value
+            }.joins
+            if joins >= plumaChainJoinsLimit {
+                return .error(.generic)
+            }
+            return .restart
+""")
 
 
 VIDEO_CHAT_MORE_MENU = "submodules/TelegramCallsUI/Sources/VideoChatScreenMoreMenu.swift"
@@ -6812,6 +6879,11 @@ def group_call_edits():
          "        if error.errorDescription == \"GROUPCALL_FORBIDDEN\" {\n            return .single(.forbidden)\n        }\n"
          "        return .single(.pollBlocksAndRetry)\n    }\n"),
         (ENGINE_GROUP_CALLS, _SEND_BROADCAST_OLD, _SEND_BROADCAST),
+        # A join CONF_WRITE_CHAIN_INVALID refuses goes again, within the caps.
+        (ENGINE_GROUP_CALLS, _JOIN_ERROR_OLD, _JOIN_ERROR_OLD + "    \n" + src(" " * 4, _CHAIN_RETRIES)),
+        (ENGINE_GROUP_CALLS, _JOIN_LAST_BLOCK_OLD, src(" " * 12, _CHAIN_RETRIES_POLLED) + _JOIN_LAST_BLOCK_OLD),
+        (ENGINE_GROUP_CALLS, _JOIN_START_OLD, _JOIN_START_OLD + src(" " * 8, _CHAIN_RETRIES_STOOD)),
+        (ENGINE_GROUP_CALLS, _JOIN_RESTART_OLD, _JOIN_RESTART),
         (ENGINE_CALLS,
          "        public func sendConferenceCallBroadcast(callId: Int64, accessHash: Int64, block: Data) -> Signal<Never, NoError> {\n",
          "        // pluma: true when the server forbids the write (task 094).\n"

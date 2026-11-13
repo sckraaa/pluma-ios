@@ -1712,6 +1712,15 @@ DAMAGE = (
     (patch.ENGINE_GROUP_CALLS, "    |> retry(retryOnError: { _ in\n        return true\n    }, delayIncrement: 0.1, maxDelay: 1.0, maxRetries: 5,",
      "    |> retry(retryOnError: { _ in\n        return true\n    }, delayIncrement: 0.1, maxDelay: 1.0, maxRetries: 3,"),
     (patch.ENGINE_CALLS, "block: Data) -> Signal<Never, NoError> {", "block: Data) -> Signal<Never, NoError>  {"),
+    # The join and its repeat on CONF_WRITE_CHAIN_INVALID.
+    (patch.ENGINE_GROUP_CALLS, "    enum InternalJoinError {\n        case error(JoinGroupCallError)\n",
+     "    enum InternalJoinError: Error {\n        case error(JoinGroupCallError)\n"),
+    (patch.ENGINE_GROUP_CALLS, "            guard let block = result.blocks.last else {\n                return generateE2E(nil)\n",
+     "            guard let block = result.blocks.first else {\n                return generateE2E(nil)\n"),
+    (patch.ENGINE_GROUP_CALLS, "    |> mapToSignal { e2eData -> Signal<JoinGroupCallResult, InternalJoinError> in\n",
+     "    |> mapToSignal { (e2eData) -> Signal<JoinGroupCallResult, InternalJoinError> in\n"),
+    (patch.ENGINE_GROUP_CALLS, "        case .restart:\n            return .restart\n        case let .error(e):\n",
+     "        case .restart:\n            return RestartOrMapErrorCondition.restart\n        case let .error(e):\n"),
     # Recording: each entry that starts one.
     (patch.VIDEO_CHAT_MORE_MENU, "                    text = environment.strings.LiveStream_StartRecording\n",
      "                    text = environment.strings.LiveStream_StartRecording.uppercased()\n"),
@@ -2415,6 +2424,20 @@ class UpstreamTest(unittest.TestCase):
         self.assertEqual(engine.count('error.errorDescription == "GROUPCALL_FORBIDDEN"'), 2)
         self.assertIn('return error.errorDescription != "GROUPCALL_FORBIDDEN"', engine)
         self.assertIn("-> Signal<Bool, NoError> {\n", tree.read(patch.ENGINE_CALLS))
+        # A join CONF_WRITE_CHAIN_INVALID refuses goes again: the refusal
+        # counts toward 10 in a row only when the next read of the chain finds
+        # the same last block; 100 joins at most; past either, the error of a
+        # join, before the next join is sent.
+        join = engine[engine.index("func _internal_joinGroupCall("):engine.index("public enum InviteConferenceCallParticipantError {")]
+        self.assertIn("let plumaChainStalledLimit = 10\n", join)
+        self.assertIn("let plumaChainJoinsLimit = 100\n", join)
+        self.assertEqual(join.count("Atomic<PlumaChainRetries>(value: PlumaChainRetries())"), 1)
+        self.assertIn("value.stalled = value.block == lastBlock ? value.stalled + 1 : 0", join)
+        self.assertLess(join.index("let lastBlock = result.blocks.last"), join.index("return generateE2E(nil)"))
+        self.assertLess(join.index("$0.stalled >= plumaChainStalledLimit"), join.index("Api.functions.phone.joinGroupCall("))
+        restart = join[join.index("    return signal |> restartOrMapError {"):]
+        self.assertLess(restart.index("value.refused = true"), restart.index("if joins >= plumaChainJoinsLimit {\n                return .error(.generic)"))
+        self.assertLess(restart.index("return .error(.generic)"), restart.index("return .restart"))
         # A rejoin starts the report and the checks over.
         reset = context[context.index("        func reset(keyPair: TelegramKeyPair) {"):context.index("        private func plumaBegin() {")]
         for s in ("self.plumaStatusTimer = nil", "self.plumaChainTimer = nil", "self.plumaServerOffset0 = nil", "callState.plumaSeq = 0",
@@ -2445,6 +2468,9 @@ class UpstreamTest(unittest.TestCase):
             (patch.MEDIA_STREAM, "                        let _ = peerId\n", "                        let _ = presentationData.strings.LiveStream_ViewCredentials\n"),
             (patch.ENGINE_CALLS, "            return .single([])\n",
              "            return _internal_cachedGroupCallDisplayAsAvailablePeers(account: self.account, peerId: peerId)\n"),
+            (patch.ENGINE_GROUP_CALLS, "            if joins >= plumaChainJoinsLimit {\n", "            if joins >= plumaChainJoinsLimit * 10 {\n"),
+            (patch.ENGINE_GROUP_CALLS, "value.stalled = value.block == lastBlock ? value.stalled + 1 : 0",
+             "value.stalled = value.stalled + 1"),
             (patch.GROUP_INSTANCE_CUSTOM, "            networkManager->sendDataChannelMessage(status);\n",
              "            networkManager->sendDataChannelMessage(status);\n            networkManager->sendDataChannelMessage(status);\n"),
             (patch.VIDEO_CHAT_MORE_MENU, "        if canManageCall && !isConference {\n            if let recordingStartTimestamp",
