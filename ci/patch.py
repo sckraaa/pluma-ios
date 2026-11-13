@@ -7111,9 +7111,12 @@ def verify_group_calls(tree):
 # take the colours of the same meaning: Telegram's blues and purples
 # (connecting, muted, can speak, scheduled) the connecting set and the dark
 # sage of the palette, its greens (speaking, unmuted, connected) the connected
-# set, its reds, pinks and oranges (end, leave, cannot speak, late, recording)
-# the weak set, and its accents on the dark screens (links, selections) the
-# palette's accents for a dark theme. Greys stay. Every colour literal of the
+# set, its reds, pinks and oranges (cannot speak, late, recording) the weak
+# set, and its accents on the dark screens (links, selections) the palette's
+# accents for a dark theme. Greys stay. The buttons that end, decline or leave
+# a call keep Telegram's red and the button that answers one its green
+# (owner's decision of 2026-11-13, as in Telegram's other clients):
+# CALL_BUTTON_COLORS, each only in its file. Every other colour literal of the
 # call screens' sources is one of Pluma's or a grey of upstream's
 # (CALL_GREYS); a colour upstream adds stops the patch until it is placed.
 CALL_UI_DIRS = ("submodules/TelegramCallsUI/Sources", "submodules/TelegramUI/Components/Calls",
@@ -7134,15 +7137,29 @@ CALL_COLORS = (
     # Accents on the dark screens: texts, links, selections.
     ("0088FF", "9DBB9F", 4), ("42A2FF", "9DBB9F", 1), ("B56DF4", "9DBB9F", 2), ("59B6FA", "B2CEB4", 1),
     ("FFD60A", "9DBB9F", 1),
-    # Greens: speaking, unmuted, connected, answer.
+    # Greens: speaking, unmuted, connected.
     ("34C759", "7FA082", 8), ("33C758", "7FA082", 8), ("33C659", "6F8F72", 5), ("34C659", "6F8F72", 3),
-    ("00A0B9", "4F6E52", 4), ("0BA8A5", "4F6E52", 1), ("74DB58", "6F8F72", 6), ("134B22", "2C3A2D", 1),
+    ("00A0B9", "4F6E52", 4), ("0BA8A5", "4F6E52", 1), ("134B22", "2C3A2D", 1),
     ("A0D875", "7FA082", 1), ("63D5C9", "6F8F72", 1), ("CCFF60", "9DBB9F", 1), ("30B251", "6F8F72", 3),
-    # Reds, pinks and oranges: end, leave, cannot speak, late, recording.
-    ("FF3B30", "A86B4C", 7), ("FF3B2F", "A86B4C", 1), ("D92326", "8A5A44", 6), ("330D0B", "7A4E3B", 1),
+    # Reds, pinks and oranges: cannot speak, late, recording.
+    ("FF3B30", "A86B4C", 6), ("FF3B2F", "A86B4C", 1),
     ("EF436C", "A86B4C", 6), ("F0436C", "B97A55", 2), ("EF476F", "B97A55", 2), ("E4436C", "A86B4C", 1),
     ("DF44B8", "8A5A44", 1), ("C64688", "8A5A44", 3), ("E76598", "B97A55", 1), ("F5512A", "B97A55", 1),
     ("EA436F", "A86B4C", 1),
+)
+# (the file, Telegram's colour it keeps, the literals of it there): the red of
+# the 1:1 call's End (ButtonGroupView.swift 323-327 marks it destructive), of
+# End and Decline of the call screen with an incoming call and its legacy one
+# (CallControllerButtonsNode.swift 443-452, LegacyCallControllerButton.swift
+# 113-118), the green of their Accept, the dark red of a group call's Leave
+# (VideoChatActionButtonComponent.swift 216-218).
+CALL_BUTTON_COLORS = (
+    ("submodules/TelegramUI/Components/Calls/CallScreen/Sources/Components/ContentOverlayButton.swift", "FF3B30", 1),
+    ("submodules/TelegramCallsUI/Sources/CallControllerButton.swift", "D92326", 2),
+    ("submodules/TelegramCallsUI/Sources/CallControllerButton.swift", "74DB58", 2),
+    ("submodules/TelegramCallsUI/Sources/LegacyCallControllerButton.swift", "D92326", 4),
+    ("submodules/TelegramCallsUI/Sources/LegacyCallControllerButton.swift", "74DB58", 4),
+    ("submodules/TelegramCallsUI/Sources/VideoChatActionButtonComponent.swift", "330D0B", 1),
 )
 # The same colours as fractions of 1 in a stream's screen.
 CALL_COLOR_LITERALS = (
@@ -7175,12 +7192,16 @@ def patch_call_colors(tree):
     """The call screens in the sage palette."""
     pluma = {old: new for old, new, _ in CALL_COLORS}
     found = {old: [] for old in pluma}
+    buttons = {(rel, color): 0 for rel, color, _ in CALL_BUTTON_COLORS}
     recolored = {}
     for rel in call_ui_sources(tree):
         text = tree.read(rel)
 
         def recolor(m):
             old = m.group(1).upper()
+            if (rel, old) in buttons:
+                buttons[(rel, old)] += 1
+                return m.group(0)
             if old not in pluma:
                 return m.group(0)
             found[old].append(rel)
@@ -7193,6 +7214,10 @@ def patch_call_colors(tree):
         if len(found[old]) != count:
             where = ", ".join(sorted(set(found[old]))) or " and ".join(CALL_UI_DIRS)
             raise PatchError(f"{where}: {len(found[old])} literals of 0x{old}, expected {count}; upstream changed its call colours")
+    for rel, color, count in CALL_BUTTON_COLORS:
+        if buttons[(rel, color)] != count:
+            raise PatchError(f"{rel}: {buttons[(rel, color)]} literals of 0x{color}, expected {count}; "
+                             "upstream changed the colours of its call buttons")
     for rel, text in recolored.items():
         tree.write(rel, text)
     for rel, old, new, count in CALL_COLOR_LITERALS:
@@ -7203,9 +7228,17 @@ def verify_call_colors(tree):
     allowed = {new for _, new, _ in CALL_COLORS} | set(CALL_GREYS)
     for rel in call_ui_sources(tree):
         text = tree.read(rel)
+        buttons = {color: count for r, color, count in CALL_BUTTON_COLORS if r == rel}
+        kept = {color: 0 for color in buttons}
         for m in CALL_COLOR.finditer(text):
-            if m.group(1).upper() not in allowed:
+            color = m.group(1).upper()
+            if color in kept:
+                kept[color] += 1
+            elif color not in allowed:
                 raise PatchError(f"{rel}: the call colour 0x{m.group(1)} is not of Pluma's palette")
+        for color, count in buttons.items():
+            if kept[color] != count:
+                raise PatchError(f"{rel}: {kept[color]} literals of 0x{color}, the colour of its call buttons, expected {count}")
         if "UIColor(red:" in text:
             raise PatchError(f"{rel}: a call colour as fractions, not of Pluma's palette")
     # The three sets, in upstream's order: connecting, connected, weak signal.

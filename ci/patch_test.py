@@ -2492,9 +2492,10 @@ class UpstreamTest(unittest.TestCase):
 
     def test_call_colors(self):
         # Every colour of Telegram's call screens becomes Pluma's: the 1:1
-        # call's three sets point for point, the rest by meaning; greys stay,
-        # and nothing else in the files changes. The rest of the patch alone,
-        # then the whole of it.
+        # call's three sets point for point, the rest by meaning; greys and
+        # the reds and greens of the buttons that end, decline, leave and
+        # answer a call stay, and nothing else in the files changes. The rest
+        # of the patch alone, then the whole of it.
         with unittest.mock.patch.object(patch, "patch_call_colors", lambda tree: None):
             tree = RecordingTree(self.root, self.written)
             patch.patch(tree, config())
@@ -2505,18 +2506,23 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn(patch.CALL_BACKGROUND, rels)
         self.assertEqual(rels, list(patch.call_ui_sources(tree)))
         pluma = {old: new for old, new, _ in patch.CALL_COLORS}
+        buttons = {(rel, color) for rel, color, _ in patch.CALL_BUTTON_COLORS}
+        self.assertTrue({rel for rel, _ in buttons} <= set(rels))
         changed = 0
         for rel in rels:
-            expected = patch.CALL_COLOR.sub(lambda m: "0x" + pluma.get(m.group(1).upper(), m.group(1)), before[rel])
+            expected = patch.CALL_COLOR.sub(
+                lambda m: m.group(0) if (rel, m.group(1).upper()) in buttons
+                else "0x" + pluma.get(m.group(1).upper(), m.group(1)), before[rel])
             for r, old, new, count in patch.CALL_COLOR_LITERALS:
                 if r == rel:
                     self.assertEqual(expected.count(old), count, rel)
                     expected = expected.replace(old, new)
             self.assertEqual(tree.read(rel), expected, rel)
             changed += expected != before[rel]
-        recolored = {rel for rel in rels if any(m.group(1).upper() in pluma for m in patch.CALL_COLOR.finditer(before[rel]))}
+        recolored = {rel for rel in rels if any(m.group(1).upper() in pluma and (rel, m.group(1).upper()) not in buttons
+                                                for m in patch.CALL_COLOR.finditer(before[rel]))}
         self.assertEqual(changed, len(recolored | {rel for rel, *_ in patch.CALL_COLOR_LITERALS}))
-        self.assertGreaterEqual(changed, 30)
+        self.assertGreaterEqual(changed, 25)
         # Telegram's three sets of the 1:1 call are gone, Pluma's are there in
         # their order.
         background = tree.read(patch.CALL_BACKGROUND)
@@ -2530,17 +2536,25 @@ class UpstreamTest(unittest.TestCase):
         self.assertEqual(patch.CALL_BACKGROUND_SETS, (("3A4A3C", "4F6E52", "2C3A2D", "5B7A5E"),
                                                       ("5B7A5E", "6F8F72", "4F6E52", "7FA082"),
                                                       ("8A5A44", "A86B4C", "7A4E3B", "B97A55")))
-        # No colour of the call screens is left that is neither Pluma's nor
-        # a grey.
+        # The buttons keep Telegram's colours, each as many times as
+        # upstream has it in the file: the 1:1 call's End is red.
+        for rel, color, count in patch.CALL_BUTTON_COLORS:
+            self.assertEqual([m.group(1).upper() for m in patch.CALL_COLOR.finditer(tree.read(rel))].count(color), count, rel)
+        self.assertIn("if contentParams.isDestructive {\n                context.setFillColor(UIColor(rgb: 0xFF3B30).cgColor)",
+                      tree.read("submodules/TelegramUI/Components/Calls/CallScreen/Sources/Components/ContentOverlayButton.swift"))
+        # No colour of the call screens is left that is neither Pluma's, nor
+        # a grey, nor that of a button in its file.
         allowed = {new for _, new, _ in patch.CALL_COLORS} | set(patch.CALL_GREYS)
         for rel in rels:
             for m in patch.CALL_COLOR.finditer(tree.read(rel)):
-                self.assertIn(m.group(1).upper(), allowed, rel)
+                if (rel, m.group(1).upper()) not in buttons:
+                    self.assertIn(m.group(1).upper(), allowed, rel)
             self.assertNotIn("UIColor(red:", tree.read(rel), rel)
 
     def test_call_colors_check(self):
         # The check after the edits finds a colour of Telegram's anywhere in
-        # the call screens, as a literal or as fractions, and a background set
+        # the call screens, as a literal or as fractions, a button's colour
+        # outside its button, a button that lost it, and a background set
         # that is not Pluma's.
         for rel, old, new in (
             (patch.CALL_BACKGROUND, "hexToFloat(0x5B7A5E)\n            ]),\n            ColorSet(colors: [\n                hexToFloat(0x5B7A5E)",
@@ -2555,6 +2569,15 @@ class UpstreamTest(unittest.TestCase):
             (patch.MEDIA_STREAM, "UIColor(rgb: 0xA86B4C)", "UIColor(red: 1, green: 0.176, blue: 0.333, alpha: 1)"),
             ("submodules/TelegramCallsUI/Sources/CallStatusBarNode.swift", "private let blue = UIColor(rgb: 0x4F6E52)",
              "private let blue = UIColor(red: 0.0, green: 0.5, blue: 1.0, alpha: 1.0)"),
+            # Telegram's red of End on the background, in the status bar, a
+            # second time in the button's file; the button in sage.
+            (patch.CALL_BACKGROUND, "hexToFloat(0x8A5A44),", "hexToFloat(0xFF3B30),"),
+            ("submodules/TelegramCallsUI/Sources/CallStatusBarNode.swift", "private let pink = UIColor(rgb: 0xA86B4C)",
+             "private let pink = UIColor(rgb: 0xd92326)"),
+            ("submodules/TelegramCallsUI/Sources/VideoChatActionButtonComponent.swift", "UIColor(rgb: 0x2C3A2D)",
+             "UIColor(rgb: 0x330d0b)"),
+            ("submodules/TelegramUI/Components/Calls/CallScreen/Sources/Components/ContentOverlayButton.swift",
+             "UIColor(rgb: 0xFF3B30)", "UIColor(rgb: 0xA86B4C)"),
         ):
             with self.subTest(rel=rel, old=old[:60]):
                 self.tearDown()
@@ -3426,6 +3449,9 @@ class CallColorsTest(unittest.TestCase):
                  for i, (old, _, count) in enumerate(patch.CALL_COLORS) for n in range(count)]
         files = {patch.CALL_BACKGROUND: "\n".join(lines) + "\nlet grey = UIColor(rgb: 0x1C1C1E)\n" + extra,
                  patch.MEDIA_STREAM: "".join(old + "\n" for _, old, _, count in patch.CALL_COLOR_LITERALS for _ in range(count))}
+        # The buttons' colours, each in its file.
+        for rel, color, count in patch.CALL_BUTTON_COLORS:
+            files[rel] = files.get(rel, "") + "".join(f"let b = UIColor(rgb: 0x{color.lower()})\n" for _ in range(count))
         for d in patch.CALL_UI_DIRS:
             (root / d).mkdir(parents=True, exist_ok=True)
         for rel, text in files.items():
@@ -3442,6 +3468,9 @@ class CallColorsTest(unittest.TestCase):
                 self.assertNotIn(old, text.upper())
             self.assertIn("UIColor(rgb: 0x1C1C1E)", text)
             self.assertEqual(tree.read(patch.MEDIA_STREAM).count("UIColor(red:"), 0)
+            # The buttons keep theirs, Telegram's red in a button's file too.
+            for rel, color, count in patch.CALL_BUTTON_COLORS:
+                self.assertEqual(tree.read(rel).count(f"UIColor(rgb: 0x{color.lower()})"), count, rel)
             # A second run finds none of Telegram's colours.
             with self.assertRaises(patch.PatchError):
                 patch.patch_call_colors(tree)
@@ -3464,6 +3493,17 @@ class CallColorsTest(unittest.TestCase):
             with self.assertRaises(patch.PatchError) as e:
                 patch.patch_call_colors(tree)
             self.assertIn("0x568FD6", str(e.exception))
+        # A button that lost its colour, or has one more, stops the patch.
+        rel, color, count = patch.CALL_BUTTON_COLORS[0]
+        for text in ("", f"let b = UIColor(rgb: 0x{color})\n" * (count + 1)):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d))
+                tree.write(rel, text)
+                before = tree.read(patch.CALL_BACKGROUND)
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.patch_call_colors(tree)
+                self.assertIn(f"0x{color}", str(e.exception))
+                self.assertEqual(tree.read(patch.CALL_BACKGROUND), before)
 
     def test_table(self):
         # Each of Telegram's colours once, each of Pluma's in the palette:
@@ -3477,6 +3517,16 @@ class CallColorsTest(unittest.TestCase):
             self.assertNotIn(old, patch.CALL_GREYS)
             self.assertRegex(old, r"^[0-9A-F]{6}$")
         self.assertFalse(palette & set(olds))
+        # The buttons' colours: Telegram's, once each per file, in a call
+        # screen's source; none is Pluma's or a grey.
+        keys = [(rel, color) for rel, color, _ in patch.CALL_BUTTON_COLORS]
+        self.assertEqual(len(keys), len(set(keys)))
+        for rel, color, count in patch.CALL_BUTTON_COLORS:
+            self.assertRegex(color, r"^[0-9A-F]{6}$")
+            self.assertGreater(count, 0)
+            self.assertNotIn(color, palette | set(patch.CALL_GREYS))
+            self.assertTrue(rel.startswith(patch.CALL_UI_DIRS), rel)
+        self.assertEqual({color for _, color, _ in patch.CALL_BUTTON_COLORS}, {"FF3B30", "D92326", "74DB58", "330D0B"})
 
 
 if __name__ == "__main__":
