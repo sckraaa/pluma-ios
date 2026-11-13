@@ -2658,7 +2658,7 @@ def verify_read_date(tree):
 # Task 054 of the server repository (ADR 0035). The app asks help.getAppUpdate
 # at start and every 12 hours and shows the update screen for whatever the
 # server answers (TelegramCore AppUpdate.swift 37-49, ApplicationContext.swift
-# 586-596); its button opens the App Store page (UpdateInfoController.swift
+# 589-600); its button opens the App Store page (UpdateInfoController.swift
 # 117-119), which Pluma does not have. TestFlight updates its own builds, so
 # the server offers updates only to builds installed from the site (ad hoc),
 # with the site's install page as help.appUpdate.url; the button opens it.
@@ -2668,8 +2668,35 @@ def verify_read_date(tree):
 # profile does, gives "adhoc". The App Store build shares the compiled code
 # with the ad hoc one (ci/build.sh), so this is decided when the app runs, not
 # when it is built.
+#
+# Task 095 (owner's decision of 2026-11-13): an app learns of a new release
+# within about an hour, and the operator can make a release mandatory.
+# - The app asks every hour instead of every 12 (AppUpdate.swift 48), and
+#   once more each time the account comes to the foreground: the signal that
+#   says so is the one upstream keeps the online presence by (primary account
+#   and app in the foreground, SharedWakeupManager.swift 1150), which
+#   AccountStateManager already takes (AccountStateManager.swift 1157, 1187)
+#   and now keeps for this. The hourly delay counts wall-clock time
+#   (suspendAwareDelay, Signal_Timing.swift 35-80), so it also catches up
+#   within seconds of a long suspension.
+# - A mandatory release is help.appUpdate with can_not_skip (flag 0,
+#   AppUpdateInfo.blocking, AppUpdate.swift 27). Upstream already makes its
+#   screen one that cannot be skipped: no Skip button when blocking
+#   (UpdateInfoController.swift 134), no interactive dismissal
+#   (ItemListController.swift 176, false by default), on the topmost surface
+#   level, above the passcode (PresentationSurfaceLevels.swift 9,
+#   ApplicationContext.swift 598). The patch leaves that as it is.
+# - Upstream presents a new screen for each new answer and never takes one
+#   away (ApplicationContext.swift 589-600), so a release withdrawn or
+#   superseded while its screen was up stayed until the app restarted; with
+#   a mandatory one that is a locked app. The screen shown now goes away when
+#   the server's answer changes. An unchanged answer changes nothing
+#   (AccountStateEventHub.swift 458-465), so the hourly poll does not offer a
+#   skipped update again.
 APP_UPDATE = "submodules/TelegramCore/Sources/State/AppUpdate.swift"
 MT_API_ENVIRONMENT = "submodules/MtProtoKit/Sources/MTApiEnvironment.m"
+APP_UPDATE_STATE = "submodules/TelegramCore/Sources/State/AccountStateManager.swift"
+APP_UPDATE_PRESENTER = "submodules/TelegramUI/Sources/ApplicationContext.swift"
 APP_UPDATE_EDITS = (
     (APP_UPDATE,
      "    public let entities: [MessageTextEntity]\n"
@@ -2729,12 +2756,68 @@ APP_UPDATE_EDITS = (
      "            suffix = @\"adhoc\";\n"
      "        }\n"
      "#endif\n"),
+    (APP_UPDATE,
+     "    return (poll |> then(.complete() |> suspendAwareDelay(12.0 * 60.0 * 60.0, queue: Queue.concurrentDefaultQueue()))) |> restart\n",
+     "    // pluma: every hour, and once more each time the account comes to the\n"
+     "    // foreground, which starts the hour again; a release on the site reaches\n"
+     "    // the app within about an hour.\n"
+     "    let periodic = (poll |> then(.complete() |> suspendAwareDelay(1.0 * 60.0 * 60.0, queue: Queue.concurrentDefaultQueue()))) |> restart\n"
+     "    let polls: Signal<Bool, NoError> = Signal<Bool, NoError>.single(true) |> then(stateManager.shouldKeepOnlinePresence)\n"
+     "    return polls\n"
+     "    |> distinctUntilChanged\n"
+     "    |> filter { $0 }\n"
+     "    |> mapToSignal { _ -> Signal<Never, NoError> in\n"
+     "        return periodic\n"
+     "    }\n"),
+    (APP_UPDATE_STATE,
+     "    public let network: Network\n"
+     "    let auxiliaryMethods: AccountAuxiliaryMethods\n",
+     "    public let network: Network\n"
+     "    let auxiliaryMethods: AccountAuxiliaryMethods\n"
+     "    // pluma: whether the account is the primary one and the app is in the\n"
+     "    // foreground; the update check asks again when it becomes so.\n"
+     "    let shouldKeepOnlinePresence: Signal<Bool, NoError>\n"),
+    (APP_UPDATE_STATE,
+     "        let queue = Queue(name: \"AccountStateManager\")\n"
+     "        \n"
+     "        self.accountPeerId = accountPeerId\n",
+     "        let queue = Queue(name: \"AccountStateManager\")\n"
+     "        \n"
+     "        self.accountPeerId = accountPeerId\n"
+     "        self.shouldKeepOnlinePresence = shouldKeepOnlinePresence\n"),
+    (APP_UPDATE_PRESENTER,
+     "    private var currentAppUpdateInfo: AppUpdateInfo?\n",
+     "    private var currentAppUpdateInfo: AppUpdateInfo?\n"
+     "    // pluma: the update screen shown, taken away when the server's answer changes.\n"
+     "    private weak var currentAppUpdateController: ViewController?\n"),
+    (APP_UPDATE_PRESENTER,
+     "            strongSelf.currentAppUpdateInfo = appUpdateInfo\n"
+     "            if let appUpdateInfo = appUpdateInfo {\n"
+     "                let controller = updateInfoController(context: strongSelf.context, appUpdateInfo: appUpdateInfo)\n"
+     "                strongSelf.mainWindow.present(controller, on: .update)\n",
+     "            strongSelf.currentAppUpdateInfo = appUpdateInfo\n"
+     "            // pluma: a release withdrawn, made mandatory or superseded replaces\n"
+     "            // the screen of the old answer, which would otherwise stay (a\n"
+     "            // mandatory one, until the app restarts).\n"
+     "            strongSelf.currentAppUpdateController?.dismiss()\n"
+     "            strongSelf.currentAppUpdateController = nil\n"
+     "            if let appUpdateInfo = appUpdateInfo {\n"
+     "                let controller = updateInfoController(context: strongSelf.context, appUpdateInfo: appUpdateInfo)\n"
+     "                strongSelf.currentAppUpdateController = controller\n"
+     "                strongSelf.mainWindow.present(controller, on: .update)\n"),
 )
+# Read from the pinned commit by the upstream tests.
+UPSTREAM_PATHS += tuple(sorted({rel for rel, _, _ in APP_UPDATE_EDITS} - set(UPSTREAM_PATHS)))
+# What keeps the screen of a mandatory release up: no Skip button when the
+# server says it cannot be skipped, and no swipe that dismisses it.
+APP_UPDATE_NO_SKIP = "        let leftNavigationButton = appUpdateInfo.blocking ? nil : ItemListNavigationButton(content: .text(presentationData.strings.Update_Skip)"
+APP_UPDATE_BLOCKING = "                self.blocking = (flags & (1 << 0)) != 0\n"
 
 
 def patch_app_update(tree):
-    """The update screen opens the server's install page, and a build from
-    the site says so in app_version."""
+    """The update screen opens the server's install page, a build from the
+    site says so in app_version, and the app asks every hour and on coming to
+    the foreground."""
     for rel, old, new in APP_UPDATE_EDITS:
         tree.replace(rel, old, new)
 
@@ -2744,6 +2827,10 @@ def verify_app_update(tree):
         text = tree.read(rel)
         if text.count(new) != 1 or old in text.replace(new, ""):
             raise PatchError(f"{rel}: the app update edit {new.strip().splitlines()[-1]!r} is not there")
+    screen = tree.read(UPDATE_INFO)
+    if (tree.read(APP_UPDATE).count(APP_UPDATE_BLOCKING) != 1 or screen.count(APP_UPDATE_NO_SKIP) != 1
+            or "enableInteractiveDismiss" in screen):
+        raise PatchError(f"{UPDATE_INFO}: the screen of a mandatory release (can_not_skip) can be skipped")
 
 
 # --- tags of Saved Messages ----------------------------------------------------
