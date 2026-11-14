@@ -2011,7 +2011,11 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn("public let defaultDayAccentColor = UIColor(rgb: 0x5b7a5e)", day)
         self.assertEqual(day.count("fill: [UIColor(rgb: 0xe3eae2), UIColor(rgb: 0xd5e1d4)],"), 2)
         self.assertIn("let defaultPatternWallpaper: TelegramWallpaper = .color(0xffffff)\n", day)
-        self.assertEqual(dark.count("fill: [UIColor(rgb: 0x2c3a2d), UIColor(rgb: 0x36473a)],"), 2)
+        # One colour: no gradient image, so no unmasked gradient rectangle
+        # on Night's plain background (NIGHT_ONE_FILL).
+        self.assertEqual(dark.count("fill: [UIColor(rgb: 0x2c3a2d)],"), 2)
+        self.assertNotIn("UIColor(rgb: 0x2c3a2d), UIColor(rgb: 0x36473a)]", dark)
+        self.assertIn("            bubbleColors = [0x2c3a2d]\n", dark)
         self.assertIn("secondaryTextColor: UIColor(rgb: 0xb2ceb4), linkTextColor: UIColor(rgb: 0xb2ceb4),", dark)
         self.assertIn("let defaultPatternWallpaper: TelegramWallpaper = .color(0x131513)\n", dark)
         self.assertNotIn("baseColor: .blue", tree.read(patch.PRESENTATION_DATA))

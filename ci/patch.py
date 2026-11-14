@@ -3451,12 +3451,23 @@ PALETTE_EDITS = (
 
     # Night: sage where it is white (its accent), the palette's bubbles and
     # background, dark text on the accent.
+    # NIGHT_ONE_FILL: the outgoing bubble is one colour, the palette's
+    # 0x2c3a2d (0x36473a stays its highlight). Two colours make a gradient image, and
+    # with the plain .color background below (hasWallpaper false) such a
+    # bubble is a clipped gradient rectangle that only a knockout image in
+    # the background's colour rounds off and gives its tail
+    # (PresentationThemeEssentialGraphics.swift:239-243,
+    # WallpaperBackgroundNode.swift:1965-1969, ChatMessageBubbleItemNode
+    # backgroundMaskMode, ChatMessageBackground.swift:609,668,692-730);
+    # whenever the two layers disagree the bubbles showed as square blocks.
+    # Upstream's Night has a pattern background, so its gradient is masked.
     (DARK_THEME, "accentColor: UIColor(rgb: 0x3e88f7), backgroundColors: [], bubbleColors: [], animateBubbleColors: false,",
      "accentColor: UIColor(rgb: 0x9dbb9f), backgroundColors: [], bubbleColors: [], animateBubbleColors: false,", 1),
     (DARK_THEME, "        } else if accentColor.rgb == 0x3e88f7 {\n            bubbleColors = [\n                0x0771ff,\n"
                  "                0x9047ff,\n                0xa256bf,\n            ].reversed()\n",
-     "        } else if accentColor.rgb == 0x9dbb9f {\n            // pluma: the palette's outgoing bubbles with its accent.\n"
-     "            bubbleColors = [0x2c3a2d, 0x36473a]\n", 1),
+     "        } else if accentColor.rgb == 0x9dbb9f {\n            // pluma: the palette's outgoing bubbles with its accent, one colour\n"
+     "            // (NIGHT_ONE_FILL).\n"
+     "            bubbleColors = [0x2c3a2d]\n", 1),
     (DARK_THEME, "            if initialAccentColor.lightness > 0.735 {\n                secondaryBadgeTextColor = UIColor(rgb: 0x000000)\n",
      NIGHT_SAGE_TEXT + "            } else if initialAccentColor.lightness > 0.735 {\n"
      "                secondaryBadgeTextColor = UIColor(rgb: 0x000000)\n", 1),
@@ -3500,7 +3511,7 @@ PALETTE_EDITS = (
      "storyUnseenColors: PresentationThemeGradientColors(topColor: UIColor(rgb: 0xb2ceb4), bottomColor: UIColor(rgb: 0x7fa082))", 1),
     (DARK_THEME, "fill: [UIColor(rgb: 0x1D1D1D, alpha: incomingBubbleAlpha)],", "fill: [UIColor(rgb: 0x232623, alpha: incomingBubbleAlpha)],", 2),
     (DARK_THEME, "fill: [UIColor(rgb: 0x61BCF9), UIColor(rgb: 0x0088ff)],\n                    highlightedFill: UIColor(rgb: 0x61BCF9),",
-     "fill: [UIColor(rgb: 0x2c3a2d), UIColor(rgb: 0x36473a)],\n                    highlightedFill: UIColor(rgb: 0x36473a),", 2),
+     "fill: [UIColor(rgb: 0x2c3a2d)],\n                    highlightedFill: UIColor(rgb: 0x36473a),", 2),
     (DARK_THEME, "        infoLinkTextColor: UIColor(rgb: 0xffffff),\n        outgoingCheckColor: UIColor(rgb: 0xffffff),\n",
      "        infoLinkTextColor: UIColor(rgb: 0xb2ceb4),\n        outgoingCheckColor: UIColor(rgb: 0xb2ceb4),\n", 1),
     (DARK_THEME, "selectionControlColors: PresentationThemeFillStrokeForeground(fillColor: UIColor(rgb: 0xffffff), "
