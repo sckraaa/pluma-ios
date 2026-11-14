@@ -181,6 +181,8 @@ ROUND_VIDEO_RECORDER_NEO = "submodules/Camera/CameraNeo/Sources/VideoRecorder.sw
 GIF_CONVERTER = "submodules/LegacyComponents/Sources/TGGifConverter.m"
 # The quality an edited video is sent at when none was chosen.
 VIDEO_FETCH = "submodules/TelegramUI/Components/Resources/FetchVideoMediaResource/Sources/FetchVideoMediaResource.swift"
+# The gallery of the chat media editor: a trim reaches what is sent.
+CHAT_EDITOR_VIDEO = "submodules/TelegramUI/Components/ChatMediaEditorScreen/Sources/ChatMediaEditorScreenVideo.swift"
 # Night without bubbles: its accent, and the colour of the send button.
 MAKE_THEME = "submodules/TelegramPresentationData/Sources/MakePresentationTheme.swift"
 SEND_BUTTON = "submodules/TelegramUI/Components/Chat/ChatTextInputActionButtonsNode/Sources/ChatTextInputActionButtonsNode.swift"
@@ -1092,6 +1094,7 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + (MESSAGE_REACTIONS, UPDATE_INFO)
                   + (MEDIA_FILE, SEARCH_STICKERS, ENTITY_KEYBOARD_INPUT, ENTITY_KEYBOARD_SIGNALS, STICKER_PACK_SCREEN)
                   + (VIDEO_PRESETS_LEGACY, VIDEO_PRESETS, ROUND_VIDEO_RECORDER, ROUND_VIDEO_RECORDER_NEO, GIF_CONVERTER, VIDEO_FETCH)
+                  + (CHAT_EDITOR_VIDEO,)
                   + tuple(rel for rel, _ in MEDIA_EDITOR_ACCENTS) + (MAKE_THEME, SEND_BUTTON)
                   + (ACCOUNT_MANAGER,)
                   + (FONT, CAMERA_ASSETS) + tuple(CAMERA_FONTS) + tuple(SIRI_VOCABULARY.format(lang) for lang in SIRI_PHRASES))
@@ -3252,6 +3255,24 @@ VIDEO_DEFAULT_PRESET = src(" " * 8, """
     }
 """)
 
+# A trim made in the gallery is saved when the handle is let go, as the legacy
+# gallery does (TGMediaPickerGalleryVideoItemView.m 1654-1660). Upstream keeps
+# it only in the live editor: the per-item store that sending reads is
+# written on a send from the gallery, a swipe or a tool's commit
+# (ChatMediaEditorScreenGallery.swift saveCurrentItemEdits), so a video
+# trimmed, ticked and sent from the picker's grid went out whole.
+TRIM_SAVE_OLD = src(" " * 20, """
+    mediaEditor.setVideoTrimRange(start ..< end, apply: apply)
+    if apply {
+""")
+TRIM_SAVE = src(" " * 20, """
+    mediaEditor.setVideoTrimRange(start ..< end, apply: apply)
+    if apply {
+        // pluma: into the item's edits now, so that a send from the grid
+        // keeps the trim (upstream keeps it in the live editor only).
+        self?.saveCurrentItemEdits()
+""")
+
 
 def video_quality_edits():
     """The edits of the presets, as (file, upstream's text, Pluma's)."""
@@ -3320,6 +3341,7 @@ def video_quality_edits():
     edits.append((GIF_CONVERTER, "              AVVideoAverageBitRateKey: @(500000),\n",
                    "              AVVideoAverageBitRateKey: @(1000000), // pluma: 500000 in Telegram (task 052)\n"))
     edits.append((VIDEO_FETCH, VIDEO_DEFAULT_PRESET_OLD, VIDEO_DEFAULT_PRESET))
+    edits.append((CHAT_EDITOR_VIDEO, TRIM_SAVE_OLD, TRIM_SAVE))
     return tuple(edits)
 
 
