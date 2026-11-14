@@ -1417,6 +1417,7 @@ DAMAGE = (
      "audioSettings[AVSampleRateKey] = 48000.0\n"),
     (patch.GIF_CONVERTER, "AVVideoAverageBitRateKey: @(500000),", "AVVideoAverageBitRateKey: @(750000),"),
     (patch.VIDEO_FETCH, "            qualityPreset = defaultPreset\n", "            qualityPreset = .compressedMedium\n"),
+    (patch.CHAT_EDITOR_VIDEO, "mediaEditor.setVideoTrimRange(start ..< end, apply: apply)\n", "mediaEditor.setVideoTrimRange(start ..< end, apply: true)\n"),
     (patch.SERIALIZATION, "        return 233\n", "        return 234\n"),
     (patch.VERSIONS, '"app": "13.2"', '"app": "13.2.1"'),
     (patch.VERSIONS, '"xcode": "27.1"', '"xcode": "27.2"'),
@@ -2011,7 +2012,11 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn("public let defaultDayAccentColor = UIColor(rgb: 0x5b7a5e)", day)
         self.assertEqual(day.count("fill: [UIColor(rgb: 0xe3eae2), UIColor(rgb: 0xd5e1d4)],"), 2)
         self.assertIn("let defaultPatternWallpaper: TelegramWallpaper = .color(0xffffff)\n", day)
-        self.assertEqual(dark.count("fill: [UIColor(rgb: 0x2c3a2d), UIColor(rgb: 0x36473a)],"), 2)
+        # One colour: no gradient image, so no unmasked gradient rectangle
+        # on Night's plain background (NIGHT_ONE_FILL).
+        self.assertEqual(dark.count("fill: [UIColor(rgb: 0x2c3a2d)],"), 2)
+        self.assertNotIn("UIColor(rgb: 0x2c3a2d), UIColor(rgb: 0x36473a)]", dark)
+        self.assertIn("            bubbleColors = [0x2c3a2d]\n", dark)
         self.assertIn("secondaryTextColor: UIColor(rgb: 0xb2ceb4), linkTextColor: UIColor(rgb: 0xb2ceb4),", dark)
         self.assertIn("let defaultPatternWallpaper: TelegramWallpaper = .color(0x131513)\n", dark)
         self.assertNotIn("baseColor: .blue", tree.read(patch.PRESENTATION_DATA))
@@ -2130,6 +2135,9 @@ class UpstreamTest(unittest.TestCase):
         self.assertIn("audioSettings[AVEncoderBitRateKey] = 96_000", tree.read(patch.ROUND_VIDEO_RECORDER_NEO))
         self.assertIn("AVVideoAverageBitRateKey: @(1000000),", tree.read(patch.GIF_CONVERTER))
         self.assertIn(patch.VIDEO_DEFAULT_PRESET, tree.read(patch.VIDEO_FETCH))
+        # A trim in the gallery is saved when the handle is let go.
+        self.assertIn(patch.TRIM_SAVE, tree.read(patch.CHAT_EDITOR_VIDEO))
+        self.assertEqual(tree.read(patch.CHAT_EDITOR_VIDEO).count("self?.saveCurrentItemEdits()"), 1)
         # What App Store Connect asks: the purpose of background location,
         # no SF Camera, Siri phrases for every intent.
         self.assertIn("    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>\n"
