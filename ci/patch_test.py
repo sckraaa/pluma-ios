@@ -8,6 +8,7 @@ import os
 import pathlib
 import plistlib
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -2814,6 +2815,132 @@ class PremiumForEveryoneTest(unittest.TestCase):
                 self.assertNotIn("displayTranscribe", edit[1] + edit[2])
                 self.assertNotIn("transcription", edit[2])
                 self.assertNotIn(edit[0], {gate[0] for gate in patch.TRANSCRIBE_VIEW_ONCE_GATES})
+
+
+class BusinessTest(unittest.TestCase):
+    """The Business row is upstream's again; the ads switch of its screen is gone."""
+
+    # The places as upstream writes them, shortened around the anchors.
+    PLACES = {
+        patch.PREMIUM_INTRO: ("private let doNotHideAdsTag = GenericComponentViewTag()\n"
+                              "            let layoutAdsSettings = { [state] in\n                    tag: doNotHideAdsTag\n            }\n"
+                              "                    if context.component.isPremium == true {\n"
+                              + patch.BUSINESS_EDITS[0][1] + "                    }\n"
+                              "                    if let view = self.node.hostView.findTaggedView(tag: doNotHideAdsTag) {\n"),
+        patch.SETTINGS_SEARCH: ("    items.append(\n        SettingsSearchableItem(\n" + patch.BUSINESS_KEPT[1][1] + "        )\n    )\n"
+                                + patch.BUSINESS_EDITS[1][1]),
+        patch.SETTINGS_ITEMS: patch.BUSINESS_KEPT[0][1] + "    }\n",
+    }
+
+    def tree(self, root, files=None):
+        (root / "Telegram").mkdir(exist_ok=True)
+        (root / "Telegram/BUILD").write_text("")
+        (root / "versions.json").write_text("{}")
+        for rel, text in (files or self.PLACES).items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return patch.Tree(root)
+
+    def test_upstream_paths_cover_the_edits(self):
+        for rel, _, _ in patch.BUSINESS_EDITS:
+            self.assertIn(rel, patch.UPSTREAM_PATHS)
+        for rel, _ in patch.BUSINESS_KEPT:
+            self.assertIn(rel, patch.UPSTREAM_PATHS)
+
+    def test_row_not_hidden_by_task_071(self):
+        for edit in patch.PREMIUM_FOR_EVERYONE_EDITS:
+            with self.subTest(file=edit[0]):
+                self.assertNotIn("Settings_Business", edit[1] + edit[2])
+                self.assertNotIn("id: 104,", edit[1] + edit[2])
+
+    def test_patch_and_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "the Business edit of task 105 is not there"):
+                patch.verify_business(tree)
+            patch.patch_business(tree)
+            patch.verify_business(tree)
+            self.assertNotIn("layoutAdsSettings()", tree.read(patch.PREMIUM_INTRO))
+            self.assertNotIn("do-not-hide-ads", tree.read(patch.SETTINGS_SEARCH))
+            self.assertIn('id: "business",', tree.read(patch.SETTINGS_SEARCH))
+            # A second run finds no upstream text.
+            with self.assertRaises(patch.PatchError):
+                patch.patch_business(tree)
+
+    def test_upstream_changed(self):
+        for i, (rel, old, _) in enumerate(patch.BUSINESS_EDITS):
+            files = dict(self.PLACES)
+            files[rel] = files[rel].replace(old, old.replace("(", "( ", 1))
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), files)
+                with self.assertRaisesRegex(patch.PatchError, "0 occurrences"):
+                    patch.patch_business(tree)
+
+    def test_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.patch_business(tree)
+            # Each edit taken back.
+            for rel, old, new in patch.BUSINESS_EDITS:
+                patched = tree.read(rel)
+                tree.write(rel, patched.replace(new, old))
+                with self.subTest(edit=rel), self.assertRaisesRegex(patch.PatchError, "is not there"):
+                    patch.verify_business(tree)
+                tree.write(rel, patched)
+            # The row hidden again, as task 071 did, and the search entry gone.
+            for rel, kept in patch.BUSINESS_KEPT:
+                patched = tree.read(rel)
+                tree.write(rel, patched.replace(kept, kept.replace(" || context.isPremium", "")
+                                                .replace('"business"', '"business-x"')))
+                with self.subTest(kept=rel), self.assertRaisesRegex(patch.PatchError, "the Business row is not upstream's"):
+                    patch.verify_business(tree)
+                tree.write(rel, patched)
+            # The switch laid out, or led to, from somewhere else.
+            for rel, extra, message in ((patch.PREMIUM_INTRO, "layoutAdsSettings()\n", "shown elsewhere"),
+                                        (patch.PREMIUM_INTRO, "tag: doNotHideAdsTag\n", "shown elsewhere"),
+                                        (patch.SETTINGS_SEARCH, "focusOnItemTag: .doNotHideAds\n", "leads to the ads switch")):
+                patched = tree.read(rel)
+                tree.write(rel, patched + extra)
+                with self.subTest(extra=extra), self.assertRaisesRegex(patch.PatchError, message):
+                    patch.verify_business(tree)
+                tree.write(rel, patched)
+            patch.verify_business(tree)
+
+    @unittest.skipUnless((ROOT / "upstream/submodules").is_dir(), "no ./upstream (ci/fetch-upstream.sh sparse)")
+    def test_real_upstream(self):
+        upstream = ROOT / "upstream"
+        rels = sorted({rel for rel, _, _ in patch.BUSINESS_EDITS} | {rel for rel, _ in patch.BUSINESS_KEPT})
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            (root / "Telegram").mkdir()
+            (root / "Telegram/BUILD").write_text("")
+            (root / "versions.json").write_text("{}")
+            for rel in rels:
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(upstream / rel, root / rel)
+            tree = patch.Tree(root)
+            original = {rel: tree.read(rel) for rel in rels}
+            with self.assertRaisesRegex(patch.PatchError, "is not there"):
+                patch.verify_business(tree)
+            patch.patch_business(tree)
+            patch.verify_business(tree)
+            patched = {rel: tree.read(rel) for rel in rels}
+            # Nothing else changed.
+            for rel in rels:
+                text = patched[rel]
+                for r, old, new in patch.BUSINESS_EDITS:
+                    if r == rel:
+                        text = text.replace(new, old)
+                with self.subTest(file=rel):
+                    self.assertEqual(text, original[rel])
+            # DAMAGE on the real tree: each edit taken back fails the check.
+            for rel, old, new in patch.BUSINESS_EDITS:
+                with self.subTest(damage=new.strip()[:60]):
+                    tree.write(rel, patched[rel].replace(new, old))
+                    with self.assertRaises(patch.PatchError):
+                        patch.verify_business(tree)
+                    tree.write(rel, patched[rel])
+            patch.verify_business(tree)
 
 
 class TranscribeViewOnceTest(unittest.TestCase):

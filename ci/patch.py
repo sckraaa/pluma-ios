@@ -1679,6 +1679,7 @@ def patch(tree, c):
     patch_saved_tags(tree)
     patch_premium_stickers(tree)
     premium_for_everyone(tree)
+    patch_business(tree)
     patch_no_ai_editor(tree)
     patch_app_update(tree)
     patch_video_quality(tree)
@@ -5076,6 +5077,7 @@ def verify(tree, c):
     verify_saved_tags(tree)
     verify_premium_stickers(tree)
     verify_premium_for_everyone(tree)
+    verify_business(tree)
     verify_transcribe_view_once(tree)
     verify_no_ai_editor(tree)
     verify_app_update(tree)
@@ -5113,9 +5115,6 @@ PREMIUM_FOR_EVERYONE_EDITS = (
     ("submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoSettingsItems.swift",
      "    if !isPremiumDisabled || context.isPremium {\n        items[.payment]!.append(PeerInfoScreenDisclosureItem(id: 100,",
      "    if !isPremiumDisabled { // pluma: the row is the purchase; everybody has Premium\n        items[.payment]!.append(PeerInfoScreenDisclosureItem(id: 100,", 1),
-    ("submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoSettingsItems.swift",
-     "    if !isPremiumDisabled || context.isPremium {\n        items[.payment]!.append(PeerInfoScreenDisclosureItem(id: 104,",
-     "    if !isPremiumDisabled { // pluma: the row is the purchase; everybody has Premium\n        items[.payment]!.append(PeerInfoScreenDisclosureItem(id: 104,", 1),
     ("submodules/TelegramUI/Components/EntityKeyboard/Sources/EmojiPagerContentSignals.swift",
      "        let isPremiumDisabled = premiumConfiguration.isPremiumDisabled\n",
      "        // pluma: custom emoji and premium stickers stay in the keyboard: everybody has Premium.\n        _ = premiumConfiguration\n        let isPremiumDisabled = false\n", 3),
@@ -5167,6 +5166,70 @@ def verify_premium_for_everyone(tree):
         text = tree.read(rel)
         if text.count(new) != count or old in text.replace(new, ""):
             raise PatchError(f"{rel}: the edit of task 071 is not there")
+
+
+# --- Telegram Business --------------------------------------------------------
+# Task 105 (ADR 0067): the server serves Telegram Business to everybody with
+# Premium (everybody, ADR 0041), so the Business row of the settings is
+# upstream's again (it shows with Premium; task 071 had hidden it). With
+# Premium, PremiumIntroScreen in its business mode opens the editors. Its
+# "Do Not Hide Ads" section is never added: Pluma has no ads and does not
+# serve account.toggleSponsoredMessages. The settings search loses the entry
+# that led to that switch; its "business" entry stays.
+PREMIUM_INTRO = "submodules/PremiumUI/Sources/PremiumIntroScreen.swift"
+BUSINESS_EDITS = (
+    (PREMIUM_INTRO,
+     "                        layoutMoreBusinessPerks()\n                        layoutAdsSettings()\n",
+     "                        layoutMoreBusinessPerks()\n"
+     "                        // pluma: no ads to hide (ADR 0067), the section is never added.\n"
+     "                        let _ = layoutAdsSettings\n"),
+    (SETTINGS_SEARCH,
+     "    items.append(\n"
+     "        SettingsSearchableItem(\n"
+     "            id: \"business/do-not-hide-ads\",\n"
+     "            title: strings.Business_DontHideAds,\n"
+     "            alternate: [],\n"
+     "            icon: .business,\n"
+     "            breadcrumbs: [strings.Settings_Business],\n"
+     "            present: { context, _, present in\n"
+     "                present(.push, PremiumIntroScreen(context: context, mode: .business, source: .settings, modal: false, focusOnItemTag: .doNotHideAds))\n"
+     "            }\n"
+     "        )\n"
+     "    )\n",
+     "    // pluma: no ads to hide (ADR 0067), no entry for the switch.\n"),
+)
+# Upstream's Business row and search entry, which must stay; a build that
+# hides them again, or an upstream that moved them, stops here.
+BUSINESS_KEPT = (
+    (SETTINGS_ITEMS,
+     "    if !isPremiumDisabled || context.isPremium {\n"
+     "        items[.payment]!.append(PeerInfoScreenDisclosureItem(id: 104, label: .text(\"\"), additionalBadgeLabel: nil, "
+     "text: presentationData.strings.Settings_Business, icon: PresentationResourcesSettings.business, action: {\n"),
+    (SETTINGS_SEARCH,
+     "            id: \"business\",\n            title: strings.Settings_Business,\n"),
+)
+UPSTREAM_PATHS += tuple(sorted({rel for rel, _, _ in BUSINESS_EDITS} - set(UPSTREAM_PATHS)))
+
+
+def patch_business(tree):
+    for rel, old, new in BUSINESS_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_business(tree):
+    for rel, old, new in BUSINESS_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or old in text:
+            raise PatchError(f"{rel}: the Business edit of task 105 is not there")
+    for rel, kept in BUSINESS_KEPT:
+        if tree.read(rel).count(kept) != 1:
+            raise PatchError(f"{rel}: the Business row is not upstream's; read it")
+    # Nothing else lays out or leads to the switch.
+    text = tree.read(PREMIUM_INTRO)
+    if text.count("layoutAdsSettings()") != 0 or text.count("doNotHideAdsTag") != 3:
+        raise PatchError(f"{PREMIUM_INTRO}: the ads switch is shown elsewhere; read it")
+    if ".doNotHideAds" in tree.read(SETTINGS_SEARCH):
+        raise PatchError(f"{SETTINGS_SEARCH}: the search still leads to the ads switch")
 
 
 # --- Transcription of voice and round messages ---------------------------------
