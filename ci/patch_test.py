@@ -1766,6 +1766,18 @@ DAMAGE = (
     # Call colours: one more of Telegram's, a fraction that moved.
     (patch.CALL_BACKGROUND, "                hexToFloat(0x7664DA)\n", "                hexToFloat(0x7664DA),\n                hexToFloat(0x7664DA)\n"),
     (patch.MEDIA_STREAM, "UIColor(red: 0.314, green: 0.161, blue: 0.197, alpha: 1)", "UIColor(red: 0.314, green: 0.161, blue: 0.197, alpha: 1.0)"),
+    # CDN downloads: the redirect flag on another condition, a reupload that
+    # moved, and a new engine check in the CDN code past the edits.
+    (patch.FETCH_V2, "                                flags: self.fastDownloads && !self.cdnDisabled ? (1 << 1) : 0,\n",
+     "                                flags: self.fastDownloads ? (1 << 1) : 0,\n"),
+    (patch.FETCH_V2, "                    case let .cdnRefresh(cdnData, refreshToken):\n                        if self.fastDownloads {\n",
+     "                    case let .cdnRefresh(cdnData, refreshToken):\n                        if self.fastDownloads, !cdnData.fileToken.isEmpty {\n"),
+    (patch.FETCH_V2, "            Logger.shared.log(\"FetchV2\", \"\\(self.loggingIdentifier): reuploading CDN block \\(block)\")\n",
+     "            if !self.fastDownloads {\n                return\n            }\n"
+     "            Logger.shared.log(\"FetchV2\", \"\\(self.loggingIdentifier): reuploading CDN block \\(block)\")\n"),
+    (patch.FETCH_V2, "                                flags: self.fastDownloads && !self.cdnDisabled ? (1 << 1) : 0,\n",
+     "                                flags: self.fastDownloads && !self.cdnDisabled ? (1 << 1) : 0,\n"
+     "                                // cdn_supported is (1 << 1)\n"),
 )
 
 
@@ -2173,6 +2185,15 @@ class UpstreamTest(unittest.TestCase):
         self.assertEqual(engine.count("_plumaParameters.audioJitterMinDelayMs\n"), 1)
         self.assertIn("    int _adaptationFramerate = 25;", tree.read(patch.CALL_CAPTURE_HEADER))
         self.assertEqual(tree.read(patch.CALL_CAPTURE).count(", _adaptationFramerate);\n"), 2)
+        # CDN downloads on MtProtoKit: the redirect flag and the fallbacks
+        # without the engine check; the engine's flow control keeps it.
+        fetch = tree.read(patch.FETCH_V2)
+        self.assertIn("                                flags: self.cdnFallbacks && !self.cdnDisabled ? (1 << 1) : 0,\n", fetch)
+        self.assertIn("        private let cdnFallbacks = true\n", fetch)
+        self.assertNotIn("if self.fastDownloads, ", fetch)
+        self.assertNotIn("[fastDownloads = self.fastDownloads]", fetch)
+        self.assertEqual(fetch.count("if self.fastDownloads {\n"), 2)
+        self.assertEqual(fetch.count("self.fastDownloads ? fastDownload"), 2)
 
     def test_dev_server(self):
         dev = patch.load_env(ROOT / "config/dev/server.env")
@@ -3569,6 +3590,79 @@ class CallColorsTest(unittest.TestCase):
             self.assertNotIn(color, palette | set(patch.CALL_GREYS))
             self.assertTrue(rel.startswith(patch.CALL_UI_DIRS), rel)
         self.assertEqual({color for _, color, _ in patch.CALL_BUTTON_COLORS}, {"FF3B30", "D92326", "74DB58", "330D0B"})
+
+
+class CdnDownloadsTest(unittest.TestCase):
+    # The upstream file, made of the text the edits expect and of the lines
+    # the guards count, as the pinned commit has them.
+    UPSTREAM = ("".join(old + "x\n" for old, _ in patch.CDN_DOWNLOAD_EDITS)
+                + "            self.fastDownloads = network.engineKind == .rust\n"
+                + "            self.masterPendingParts = self.fastDownloads ? fastDownloadMasterPendingParts : 6\n"
+                + "            self.cdnPendingParts = self.fastDownloads ? fastDownloadCdnPendingParts : 6\n"
+                + "                if self.fastDownloads {\n                    maxPendingParts = min(maxPendingParts, state.window)\n"
+                + "                        if self.fastDownloads {\n                            self.adaptWindow(state: state)\n")
+
+    def tree(self, root, text=UPSTREAM):
+        (root / "Telegram").mkdir(exist_ok=True)
+        (root / "Telegram/BUILD").write_text("")
+        (root / "versions.json").write_text("{}")
+        tree = patch.Tree(root)
+        tree.write(patch.FETCH_V2, text)
+        return tree
+
+    def test_upstream_paths_cover_the_file(self):
+        self.assertTrue(any(patch.FETCH_V2 == p or patch.FETCH_V2.startswith(p + "/") for p in patch.UPSTREAM_PATHS))
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "tied to the Rust engine again"):
+                patch.verify_cdn_downloads(tree)
+            patch.patch_cdn_downloads(tree)
+            patch.verify_cdn_downloads(tree)
+            text = tree.read(patch.FETCH_V2)
+            self.assertIn("flags: self.cdnFallbacks && !self.cdnDisabled ? (1 << 1) : 0,\n", text)
+            self.assertIn("|> `catch` { [cdnFallbacks = self.cdnFallbacks] error -> Signal<FilePartResult, NoError> in\n"
+                          "                    if cdnFallbacks {\n", text)
+            self.assertEqual(text.count("fastDownloads"), 6)
+            # A second run finds no upstream text.
+            with self.assertRaises(patch.PatchError):
+                patch.patch_cdn_downloads(tree)
+
+    def test_upstream_changed(self):
+        # The flag on another condition: the patch stops with the file's name.
+        changed = self.UPSTREAM.replace("flags: self.fastDownloads && !self.cdnDisabled ?",
+                                        "flags: self.fastDownloads && !self.cdnDisabled && isLarge ?")
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d), changed)
+            with self.assertRaises(patch.PatchError) as e:
+                patch.patch_cdn_downloads(tree)
+            self.assertIn(patch.FETCH_V2, str(e.exception))
+
+    def test_check(self):
+        # Each edit undone on its own.
+        for i, (old, new) in enumerate(patch.CDN_DOWNLOAD_EDITS):
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d))
+                patch.patch_cdn_downloads(tree)
+                patched = tree.read(patch.FETCH_V2)
+                tree.write(patch.FETCH_V2, patched.replace(new, old))
+                with self.assertRaises(patch.PatchError):
+                    patch.verify_cdn_downloads(tree)
+
+    def test_another_engine_check(self):
+        # Each guard on its own: an engine check or a redirect flag added or
+        # gone past the edits.
+        for i, (s, count) in enumerate(patch.CDN_DOWNLOAD_GUARDS):
+            for damage in ("added", "removed"):
+                with self.subTest(guard=i, damage=damage), tempfile.TemporaryDirectory() as d:
+                    tree = self.tree(pathlib.Path(d))
+                    patch.patch_cdn_downloads(tree)
+                    text = tree.read(patch.FETCH_V2)
+                    self.assertEqual(text.count(s), count)
+                    tree.write(patch.FETCH_V2, text + s if damage == "added" else text.replace(s, ""))
+                    with self.assertRaisesRegex(patch.PatchError, "tied to the Rust engine again|another CDN branch"):
+                        patch.verify_cdn_downloads(tree)
 
 
 if __name__ == "__main__":

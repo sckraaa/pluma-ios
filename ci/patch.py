@@ -1688,6 +1688,7 @@ def patch(tree, c):
     patch_service_account(tree)
     patch_group_calls(tree)
     patch_call_colors(tree)
+    patch_cdn_downloads(tree)
 
     # The build configuration of Make.py, with exactly the keys it reads.
     conf = c.build_configuration()
@@ -5086,6 +5087,7 @@ def verify(tree, c):
     verify_service_account(tree)
     verify_group_calls(tree)
     verify_call_colors(tree)
+    verify_cdn_downloads(tree)
 
     build = tree.read(APP_BUILD)
     if "<string>Telegram</string>" in build or "<string>telegram</string>" in build:
@@ -7369,6 +7371,89 @@ def verify_call_colors(tree):
     for rel, _, new, count in CALL_COLOR_LITERALS:
         if tree.read(rel).count(new) < count:
             raise PatchError(f"{rel}: {new} is not where the patch put it")
+
+
+# --- CDN downloads on MtProtoKit (task 102) ------------------------------------
+#
+# Task 102 of the server repository (ADR 0065): large files come from Pluma's
+# CDN datacenter, as Telegram's do. FetchV2 asks upload.getFile for a CDN
+# redirect (flags.1, cdn_supported, line 974) only on the Rust engine
+# (fastDownloads, 505), and the same property guards every fallback of the
+# CDN branches: an upload.getCdnFile error (952-956), hash checks that keep
+# failing (635, 647, 1158) and a reupload of a single block (1092). Without
+# them a CDN error or a reupload request fails the whole download (952-956,
+# 1114-1115 and the reuploadingToCdn state, 761-800), so turning on the flag
+# alone would break downloads. On iOS the engine is MtProtoKit
+# (NETWORK_ENGINE_DEFAULT), so the flag and these branches no longer depend on
+# it: cdnFallbacks is always on, and the flag is sent until the download has
+# fallen back to its datacenter for good (cdnDisabled, fallBackToMaster). A
+# redirect keeps the ranges already fetched from the datacenter (1087), as
+# upstream does on the Rust engine. What stays on fastDownloads is the
+# engine's own flow control: the parts in flight (512-513), the adaptive
+# window (693) and part sizes (1045), which MtProtoKit's request manager does
+# not need. Android and tdesktop ask for redirects on every download
+# (FileLoadOperation.java 2465-2470, download_manager_mtproto.cpp 580-582).
+FETCH_V2 = "submodules/TelegramCore/Sources/Network/FetchV2.swift"
+CDN_DOWNLOAD_EDITS = (
+    ("        private let fastDownloads: Bool\n",
+     "        private let fastDownloads: Bool\n"
+     "        // pluma: CDN redirects and their fallbacks on any network engine, not only the Rust one (task 102).\n"
+     "        private let cdnFallbacks = true\n"),
+    ("                                    if self.fastDownloads {\n"
+     "                                        self.cdnVerificationFailures += 1\n",
+     "                                    if self.cdnFallbacks {\n"
+     "                                        self.cdnVerificationFailures += 1\n"),
+    ("                if self.fastDownloads, self.cdnVerificationFailures >= maxCdnFailuresBeforeFallback, ",
+     "                if self.cdnFallbacks, self.cdnVerificationFailures >= maxCdnFailuresBeforeFallback, "),
+    ("                |> `catch` { [fastDownloads = self.fastDownloads] error -> Signal<FilePartResult, NoError> in\n"
+     "                    if fastDownloads {\n",
+     "                |> `catch` { [cdnFallbacks = self.cdnFallbacks] error -> Signal<FilePartResult, NoError> in\n"
+     "                    if cdnFallbacks {\n"),
+    ("                                flags: self.fastDownloads && !self.cdnDisabled ? (1 << 1) : 0,\n",
+     "                                flags: self.cdnFallbacks && !self.cdnDisabled ? (1 << 1) : 0,\n"),
+    ("                        if self.fastDownloads {\n"
+     "                            cdnState.completedRanges = state.completedRanges\n",
+     "                        if self.cdnFallbacks {\n"
+     "                            cdnState.completedRanges = state.completedRanges\n"),
+    ("                    case let .cdnRefresh(cdnData, refreshToken):\n"
+     "                        if self.fastDownloads {\n",
+     "                    case let .cdnRefresh(cdnData, refreshToken):\n"
+     "                        if self.cdnFallbacks {\n"),
+    ("                    if self.fastDownloads, case let .cdn(cdnData) = state.fetchLocation {\n",
+     "                    if self.cdnFallbacks, case let .cdn(cdnData) = state.fetchLocation {\n"),
+)
+# What would tie a CDN branch to the engine again past the edits, or ask for a
+# redirect elsewhere: fastDownloads only in its declaration, its value and the
+# four places of the engine's flow control, one cdn_supported flag, and
+# cdnFallbacks only where the edits put it.
+CDN_DOWNLOAD_GUARDS = (
+    ("fastDownloads", 6),
+    ("self.fastDownloads ? fastDownload", 2),
+    ("                if self.fastDownloads {\n                    maxPendingParts = min(maxPendingParts, state.window)\n", 1),
+    ("                        if self.fastDownloads {\n                            self.adaptWindow(", 1),
+    ("(1 << 1)", 1),
+    ("cdnFallbacks", 10),
+)
+
+
+def patch_cdn_downloads(tree):
+    """upload.getFile with cdn_supported and the CDN fallbacks on MtProtoKit."""
+    for old, new in CDN_DOWNLOAD_EDITS:
+        tree.replace(FETCH_V2, old, new)
+
+
+def verify_cdn_downloads(tree):
+    text = tree.read(FETCH_V2)
+    for old, new in CDN_DOWNLOAD_EDITS:
+        if text.count(new) != 1 or (old not in new and old in text):
+            raise PatchError(f"{FETCH_V2}: CDN downloads are tied to the Rust engine again "
+                             f"({new.strip().splitlines()[-1]!r} is not there once)")
+    for s, count in CDN_DOWNLOAD_GUARDS:
+        found = text.count(s)
+        if found != count:
+            raise PatchError(f"{FETCH_V2}: {found} occurrences of {s!r}, expected {count}; "
+                             "another CDN branch or engine check in FetchV2")
+
 
 def main(argv=None):
     if (argv if argv is not None else sys.argv[1:]) == ["--paths"]:
