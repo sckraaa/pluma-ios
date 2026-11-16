@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Patches $UPSTREAM_DIR (default ./upstream) with ci/patch.py:
 #   configure.sh dev     for the development server of config/dev, without a
-#                        team (the simulator build);
+#                        team (the simulator build); its HTTPS CDN takes plain
+#                        HTTP to that server as well (the stand's fake CDN);
 #   configure.sh server  for the server the repository variables name, signed
 #                        by the team of PLUMA_TEAM_ID (the ad hoc IPA).
 #
@@ -22,6 +23,7 @@ dev)
 	SERVER_PORT=$PLUMA_SERVER_PORT
 	SERVER_IPV6=
 	TEAM_ID=$PLUMA_TEAM_ID
+	DEV_CDN_HTTP=$PLUMA_SERVER_IPV4
 	cp config/dev/server_public.pem "$tmp/key.pem"
 	;;
 server)
@@ -42,5 +44,5 @@ esac
 
 python3 -I ci/patch.py --source "$dir" --upstream upstream.env --app config/app.env \
 	--server-ipv4 "$SERVER_IPV4" --server-port "$SERVER_PORT" --server-ipv6 "${SERVER_IPV6:-}" \
-	--rsa-public-key "$tmp/key.pem" --team-id "$TEAM_ID"
+	--rsa-public-key "$tmp/key.pem" --team-id "$TEAM_ID" --dev-cdn-http "${DEV_CDN_HTTP:-}"
 echo "configure: $target build"

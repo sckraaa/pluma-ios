@@ -143,9 +143,15 @@ class ConfigTest(unittest.TestCase):
             {"app": {"PLUMA_URL_SCHEME": "tg"}},
             {"app": {"PLUMA_BUNDLE_ID": "Pluma"}},
             {"app": {"PLUMA_APP_NAME": "Pluma Messenger Beta"}},
+            {"dev_cdn_http": "localhost"},
+            {"dev_cdn_http": "127.0.0.1:8080"},
         ):
             with self.subTest(over=over), self.assertRaises(patch.PatchError):
                 config(**over)
+
+    def test_dev_cdn_http(self):
+        self.assertIsNone(config().dev_cdn_http)
+        self.assertEqual(config(dev_cdn_http="127.0.0.1").dev_cdn_http, "127.0.0.1")
 
 
 class ScanTest(unittest.TestCase):
@@ -1778,6 +1784,36 @@ DAMAGE = (
     (patch.FETCH_V2, "                                flags: self.fastDownloads && !self.cdnDisabled ? (1 << 1) : 0,\n",
      "                                flags: self.fastDownloads && !self.cdnDisabled ? (1 << 1) : 0,\n"
      "                                // cdn_supported is (1 << 1)\n"),
+    # The HTTPS CDN: the redirect, the request of a part, its decryption, the
+    # hashes a part needs, the parts of a redirect, the proxy, the params; a
+    # second decryption past the edits.
+    (patch.FETCH_V2, "                                    encryptionIv: encryptionIv\n                                ))\n",
+     "                                    encryptionIv: encryptionIv.prefix(16)\n                                ))\n"),
+    (patch.FETCH_V2, "                let throughputMeter = self.network.downloadThroughputMeter\n"
+     "                filePartRequest = self.network.multiplexedRequestManager.requestWithAdditionalInfo(\n"
+     "                    to: .cdn(cdnData.id),\n",
+     "                let throughputMeter = self.network.downloadThroughputMeter\n"
+     "                filePartRequest = self.network.multiplexedRequestManager.requestWithAdditionalInfo(\n"
+     "                    to: .cdn(cdnData.id, isMedia: true),\n"),
+    (patch.FETCH_V2, "                                var ivOffset: Int32 = Int32(clamping: (requestedOffset / 16)).bigEndian\n",
+     "                                var ivOffset: Int32 = Int32(truncatingIfNeeded: (requestedOffset / 16)).bigEndian\n"),
+    (patch.FETCH_V2, "                            if state.completedHashRanges.isSuperset(of: RangeSet<Int64>(pendingReadyPart.fetchRange)) {\n",
+     "                            if state.completedHashRanges.contains(pendingReadyPart.fetchRange.lowerBound) {\n"),
+    (patch.FETCH_V2, "                        requiredHashRanges.formUnion(RangeSet<Int64>(pendingReadyPart.fetchRange))\n",
+     "                        requiredHashRanges.insert(contentsOf: pendingReadyPart.fetchRange)\n"),
+    (patch.FETCH_V2, "                            maxPendingParts: self.cdnPendingParts,\n                            decryptionState: nil\n                        )\n"
+     "                        if self.fastDownloads {\n",
+     "                            maxPendingParts: self.cdnPendingParts + 2,\n                            decryptionState: nil\n                        )\n"
+     "                        if self.fastDownloads {\n"),
+    (patch.FETCH_V2, "    private final class VerifyPartHashData {\n",
+     "    private func decryptAgain(_ data: Data, key: Data, iv: Data) -> Data? {\n"
+     "        return MTAesCtrDecrypt(data, key, iv)\n    }\n\n    private final class VerifyPartHashData {\n"),
+    (patch.NETWORK, "        self.webProxyActive.set(activeServer?.isWebProxy == true)\n",
+     "        self.webProxyActive.set(activeServer?.isWebProxy == true && !self.isAppExtension)\n"),
+    (patch.NETWORK, "        self.webProxyActive = ValuePromise<Bool>(initialWebProxyActive, ignoreRepeated: true)\n",
+     "        self.webProxyActive = ValuePromise<Bool>(initialWebProxyActive)\n"),
+    (patch.BUILD_CONFIG, "    dataDict[@\"tz_offset\"] = @((int)tzOffset);\n", "    dataDict[@\"tz_offset\"] = @(tzOffset);\n"),
+    (patch.BUILD_CONFIG, "    if (signatureDict != nil) {\n", "    dataDict[@\"pluma_cdn\"] = @0;\n    if (signatureDict != nil) {\n"),
 )
 
 
@@ -2188,20 +2224,42 @@ class UpstreamTest(unittest.TestCase):
         # CDN downloads on MtProtoKit: the redirect flag and the fallbacks
         # without the engine check; the engine's flow control keeps it.
         fetch = tree.read(patch.FETCH_V2)
-        self.assertIn("                                flags: self.cdnFallbacks && !self.cdnDisabled ? (1 << 1) : 0,\n", fetch)
+        self.assertIn("                                flags: self.cdnFallbacks && !self.cdnDisabled && self.knownSize != nil "
+                      "&& cdnHttpsIsAvailable(network: self.network) ? (1 << 1) : 0,\n", fetch)
         self.assertIn("        private let cdnFallbacks = true\n", fetch)
         self.assertNotIn("if self.fastDownloads, ", fetch)
         self.assertNotIn("[fastDownloads = self.fastDownloads]", fetch)
         self.assertEqual(fetch.count("if self.fastDownloads {\n"), 2)
         self.assertEqual(fetch.count("self.fastDownloads ? fastDownload"), 2)
+        # The HTTPS CDN: the part over HTTPS before getCdnFile, one
+        # decryption for both, the params, the proxy; no plain HTTP.
+        self.assertLess(fetch.index("cdnHttpsFetchPart("), fetch.index("Api.functions.upload.getCdnFile("))
+        self.assertNotIn("MTAesCtrDecrypt(", fetch)
+        self.assertIn("            httpsHashes: [Api.FileHash] = []\n", fetch)
+        self.assertIn('    dataDict[@"pluma_cdn"] = @1;\n', tree.read(patch.BUILD_CONFIG))
+        self.assertIn("        let _ = self.proxyActive.swap(activeServer != nil)\n", tree.read(NETWORK))
+        https = tree.read(patch.CDN_HTTPS)
+        self.assertEqual(https, patch.cdn_https_source(None))
+        self.assertNotIn('"http://"', https)
+        self.assertNotIn("@DEV_HTTP@", https)
 
     def test_dev_server(self):
         dev = patch.load_env(ROOT / "config/dev/server.env")
-        tree, _ = self.run_patch(server_ipv4=dev["PLUMA_SERVER_IPV4"], server_port=dev["PLUMA_SERVER_PORT"],
-                                 rsa_pem=DEV_KEY, team_id=dev["PLUMA_TEAM_ID"])
+        tree, c = self.run_patch(server_ipv4=dev["PLUMA_SERVER_IPV4"], server_port=dev["PLUMA_SERVER_PORT"],
+                                 rsa_pem=DEV_KEY, team_id=dev["PLUMA_TEAM_ID"], dev_cdn_http=dev["PLUMA_SERVER_IPV4"])
         net = tree.read(NETWORK)
         self.assertIn('                1: ["127.0.0.1"]\n', net)
         self.assertIn("MTDatacenterAddress(ip: $0, port: 10443, ", net)
+        # The HTTPS CDN takes plain HTTP to this address alone; a build for a
+        # real server with this file is refused.
+        https = tree.read(patch.CDN_HTTPS)
+        self.assertIn('    if string.hasPrefix("http://"), host == "127.0.0.1" {\n', https)
+        self.assertEqual(https.count('"http://"'), 1)
+        server = config(server_ipv4=dev["PLUMA_SERVER_IPV4"], server_port=dev["PLUMA_SERVER_PORT"],
+                        rsa_pem=DEV_KEY, team_id=dev["PLUMA_TEAM_ID"])
+        with self.assertRaisesRegex(patch.PatchError, "a build for the real server takes plain HTTP"):
+            patch.verify_cdn_downloads(tree, server)
+        patch.verify_cdn_downloads(tree, c)
 
     def test_patched_tree_is_refused(self):
         self.run_patch()
@@ -3592,77 +3650,153 @@ class CallColorsTest(unittest.TestCase):
         self.assertEqual({color for _, color, _ in patch.CALL_BUTTON_COLORS}, {"FF3B30", "D92326", "74DB58", "330D0B"})
 
 
+@unittest.skipIf(not os.environ.get("CI") and upstream_files() is None,
+                 "no checkout of the pinned upstream (ci/fetch-upstream.sh sparse)")
 class CdnDownloadsTest(unittest.TestCase):
-    # The upstream file, made of the text the edits expect and of the lines
-    # the guards count, as the pinned commit has them.
-    UPSTREAM = ("".join(old + "x\n" for old, _ in patch.CDN_DOWNLOAD_EDITS)
-                + "            self.fastDownloads = network.engineKind == .rust\n"
-                + "            self.masterPendingParts = self.fastDownloads ? fastDownloadMasterPendingParts : 6\n"
-                + "            self.cdnPendingParts = self.fastDownloads ? fastDownloadCdnPendingParts : 6\n"
-                + "                if self.fastDownloads {\n                    maxPendingParts = min(maxPendingParts, state.window)\n"
-                + "                        if self.fastDownloads {\n                            self.adaptWindow(state: state)\n")
+    """The CDN patch (tasks 102 and 107) on the files of the pinned upstream.
+    CI fetches it first, and there these tests never skip."""
 
-    def tree(self, root, text=UPSTREAM):
+    FILES = (patch.FETCH_V2, patch.NETWORK, patch.BUILD_CONFIG)
+
+    @classmethod
+    def setUpClass(cls):
+        files = upstream_files()
+        if files is None:
+            raise AssertionError("no checkout of the pinned upstream in ./upstream (ci/fetch-upstream.sh sparse)")
+        cls.upstream = {rel: files[rel].decode("utf-8") for rel in cls.FILES}
+
+    def tree(self, root, texts=None):
         (root / "Telegram").mkdir(exist_ok=True)
         (root / "Telegram/BUILD").write_text("")
         (root / "versions.json").write_text("{}")
         tree = patch.Tree(root)
-        tree.write(patch.FETCH_V2, text)
+        for rel, text in (texts or self.upstream).items():
+            tree.write(rel, text)
         return tree
 
-    def test_upstream_paths_cover_the_file(self):
-        self.assertTrue(any(patch.FETCH_V2 == p or patch.FETCH_V2.startswith(p + "/") for p in patch.UPSTREAM_PATHS))
+    def test_upstream_paths_cover_the_files(self):
+        for rel in self.FILES:
+            self.assertTrue(any(rel == p or rel.startswith(p + "/") for p in patch.UPSTREAM_PATHS), rel)
 
     def test_applies(self):
+        for dev in (None, "127.0.0.1"):
+            c = config(dev_cdn_http=dev or "")
+            with self.subTest(dev=dev), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d))
+                with self.assertRaisesRegex(patch.PatchError, "CdnHttpsFetch.swift: missing"):
+                    patch.verify_cdn_downloads(tree, c)
+                patch.patch_cdn_downloads(tree, c)
+                patch.verify_cdn_downloads(tree, c)
+                self.assertEqual(tree.read(patch.CDN_HTTPS), patch.cdn_https_source(dev))
+                # Only the edits: each file is upstream's with them applied.
+                for rel in self.FILES:
+                    expected = self.upstream[rel]
+                    for r, old, new in patch.CDN_DOWNLOAD_EDITS:
+                        if r == rel:
+                            expected = expected.replace(old, new)
+                    self.assertEqual(tree.read(rel), expected)
+                # A second run finds no upstream text.
+                with self.assertRaises(patch.PatchError):
+                    patch.patch_cdn_downloads(tree, c)
+
+    def test_file_already_there(self):
         with tempfile.TemporaryDirectory() as d:
             tree = self.tree(pathlib.Path(d))
-            with self.assertRaisesRegex(patch.PatchError, "tied to the Rust engine again"):
-                patch.verify_cdn_downloads(tree)
-            patch.patch_cdn_downloads(tree)
-            patch.verify_cdn_downloads(tree)
-            text = tree.read(patch.FETCH_V2)
-            self.assertIn("flags: self.cdnFallbacks && !self.cdnDisabled ? (1 << 1) : 0,\n", text)
-            self.assertIn("|> `catch` { [cdnFallbacks = self.cdnFallbacks] error -> Signal<FilePartResult, NoError> in\n"
-                          "                    if cdnFallbacks {\n", text)
-            self.assertEqual(text.count("fastDownloads"), 6)
-            # A second run finds no upstream text.
-            with self.assertRaises(patch.PatchError):
-                patch.patch_cdn_downloads(tree)
+            tree.write(patch.CDN_HTTPS, "")
+            with self.assertRaisesRegex(patch.PatchError, "CdnHttpsFetch.swift: already exists"):
+                patch.patch_cdn_downloads(tree, config())
 
     def test_upstream_changed(self):
-        # The flag on another condition: the patch stops with the file's name.
-        changed = self.UPSTREAM.replace("flags: self.fastDownloads && !self.cdnDisabled ?",
-                                        "flags: self.fastDownloads && !self.cdnDisabled && isLarge ?")
-        with tempfile.TemporaryDirectory() as d:
-            tree = self.tree(pathlib.Path(d), changed)
-            with self.assertRaises(patch.PatchError) as e:
-                patch.patch_cdn_downloads(tree)
-            self.assertIn(patch.FETCH_V2, str(e.exception))
+        # The text of each edit changed upstream: the patch stops with the
+        # file's name.
+        for i, (rel, old, _) in enumerate(patch.CDN_DOWNLOAD_EDITS):
+            texts = dict(self.upstream)
+            end = len(old.rstrip()) - 1
+            texts[rel] = texts[rel].replace(old, old[:end] + "#" + old[end:])
+            with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d), texts)
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.patch_cdn_downloads(tree, config())
+                self.assertIn(rel, str(e.exception))
 
     def test_check(self):
         # Each edit undone on its own.
-        for i, (old, new) in enumerate(patch.CDN_DOWNLOAD_EDITS):
+        for i, (rel, old, new) in enumerate(patch.CDN_DOWNLOAD_EDITS):
             with self.subTest(edit=i), tempfile.TemporaryDirectory() as d:
                 tree = self.tree(pathlib.Path(d))
-                patch.patch_cdn_downloads(tree)
-                patched = tree.read(patch.FETCH_V2)
-                tree.write(patch.FETCH_V2, patched.replace(new, old))
-                with self.assertRaises(patch.PatchError):
-                    patch.verify_cdn_downloads(tree)
+                patch.patch_cdn_downloads(tree, config())
+                tree.write(rel, tree.read(rel).replace(new, old))
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify_cdn_downloads(tree, config())
+                self.assertIn(rel, str(e.exception))
 
-    def test_another_engine_check(self):
-        # Each guard on its own: an engine check or a redirect flag added or
-        # gone past the edits.
-        for i, (s, count) in enumerate(patch.CDN_DOWNLOAD_GUARDS):
+    def test_guards(self):
+        # Each guard on its own: an engine check, a redirect flag, a request
+        # or a decryption of the CDN added or gone past the edits.
+        for i, (rel, s, count) in enumerate(patch.CDN_DOWNLOAD_GUARDS):
             for damage in ("added", "removed"):
+                if damage == "removed" and count == 0:
+                    continue
                 with self.subTest(guard=i, damage=damage), tempfile.TemporaryDirectory() as d:
                     tree = self.tree(pathlib.Path(d))
-                    patch.patch_cdn_downloads(tree)
-                    text = tree.read(patch.FETCH_V2)
+                    patch.patch_cdn_downloads(tree, config())
+                    text = tree.read(rel)
                     self.assertEqual(text.count(s), count)
-                    tree.write(patch.FETCH_V2, text + s if damage == "added" else text.replace(s, ""))
+                    tree.write(rel, text + s if damage == "added" else text.replace(s, ""))
                     with self.assertRaisesRegex(patch.PatchError, "tied to the Rust engine again|another CDN branch"):
-                        patch.verify_cdn_downloads(tree)
+                        patch.verify_cdn_downloads(tree, config())
+
+    def test_server_build_takes_no_plain_http(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.patch_cdn_downloads(tree, config(dev_cdn_http="127.0.0.1"))
+            with self.assertRaisesRegex(patch.PatchError, "a build for the real server takes plain HTTP"):
+                patch.verify_cdn_downloads(tree, config())
+        # The development build differs by its one block.
+        server, dev = patch.cdn_https_source(None), patch.cdn_https_source("127.0.0.1")
+        self.assertNotIn('"http://"', server)
+        self.assertEqual(dev.replace('    if string.hasPrefix("http://"), host == "127.0.0.1" {\n', "", 1)
+                         .replace("    // A development build: plain HTTP to the development server only (ci/configure.sh dev).\n", "", 1)
+                         .replace("        return .url(url)\n    }\n    return .invalid\n}\n", "    return .invalid\n}\n", 1), server)
+
+    def test_log_lines(self):
+        # The log names the host, the status and the offset; the address,
+        # token, key or bytes in a log line stop the patch.
+        source = patch.cdn_https_source(None)
+        lines = patch.CDN_HTTPS_LOG.findall(source)
+        self.assertEqual(len(lines), 6)
+        for leak in ("\\(self.url)", "\\(url.absoluteString)", "\\(data.count)", "\\(String(describing: token))"):
+            bad = source.replace('"\\(self.host): \\(reason) at \\(offset)")',
+                                 f'"\\(self.host): \\(reason) at \\(offset) {leak}")', 1)
+            self.assertNotEqual(bad, source)
+            with self.subTest(leak=leak), tempfile.TemporaryDirectory() as d:
+                tree = self.tree(pathlib.Path(d))
+                patch.patch_cdn_downloads(tree, config())
+                tree.write(patch.CDN_HTTPS, bad)
+                with self.assertRaisesRegex(patch.PatchError, "a log line with more than"):
+                    patch.verify_cdn_downloads(tree, config())
+
+    def test_token_layout(self):
+        # The file_token of the server's redirect (pkg/cdn/token.go of the
+        # server repository): "PLH1" | id[32] | exp uint32be | URL.
+        source = patch.cdn_https_source(None)
+        self.assertIn("private let cdnHttpsTokenTag: [UInt8] = [0x50, 0x4c, 0x48, 0x31]\n", source)
+        self.assertEqual(bytes([0x50, 0x4C, 0x48, 0x31]), b"PLH1")
+        self.assertIn("private let cdnHttpsTokenHeaderLength = 4 + 32 + 4\n", source)
+        self.assertIn('    if string.hasPrefix("https://") {\n', source)
+        # The contract's limits: parts, timeouts, retry, pause, headers.
+        for line in ("let cdnHttpsPartSize: Int64 = 512 * 1024\n", "let cdnHttpsMaxPartSize: Int64 = 1024 * 1024\n",
+                     "private let cdnHttpsSilenceTimeout: Double = 10.0\n",
+                     "private let cdnHttpsRequestTimeout: Double = 30.0\n",
+                     "private let cdnHttpsRetryDelay: ClosedRange<Double> = 0.3 ... 0.8\n",
+                     "private let cdnHttpsPauseAfterFailures = 3\n",
+                     "private let cdnHttpsPauseDuration: Double = 10.0 * 60.0\n",
+                     '        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")\n',
+                     '        request.setValue("Pluma", forHTTPHeaderField: "User-Agent")\n',
+                     "        configuration.urlCache = nil\n",
+                     "        completionHandler(nil)\n",
+                     "    case 403, 410:\n"):
+            self.assertIn(line, source)
 
 
 if __name__ == "__main__":
