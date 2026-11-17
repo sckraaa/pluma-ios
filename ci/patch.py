@@ -49,6 +49,9 @@ is joined as oneself; the client reports the state of its encryption to the
 SFU. No RTMP stream, no live story and no recording of a call is offered.
 The call screens are in the sage palette.
 
+Large files come over HTTPS from the server's CDN when the server redirects
+there; the key, the IV and the hashes come from the server over MTProto.
+
 Standard library only, so the CI and a developer machine run it as is.
 """
 
@@ -153,6 +156,8 @@ PROFILE_ITEMS = "submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Source
 CONTEXT_MENUS = "submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift"
 # The cleanup of account directories at launch (task 080).
 ACCOUNT_MANAGER = "submodules/TelegramCore/Sources/Account/AccountManager.swift"
+# The params of initConnection (task 107: pluma_cdn).
+BUILD_CONFIG = "submodules/BuildConfig/Sources/BuildConfig.m"
 # The tags of Saved Messages: the flag of the chat's state, the gates that
 # check Premium (a tap on a tag, its context menu, the tag bar of a message's
 # context menu, the panel of tags over the chat and when it shows), and the
@@ -1096,7 +1101,7 @@ UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_
                   + (VIDEO_PRESETS_LEGACY, VIDEO_PRESETS, ROUND_VIDEO_RECORDER, ROUND_VIDEO_RECORDER_NEO, GIF_CONVERTER, VIDEO_FETCH)
                   + (CHAT_EDITOR_VIDEO,)
                   + tuple(rel for rel, _ in MEDIA_EDITOR_ACCENTS) + (MAKE_THEME, SEND_BUTTON)
-                  + (ACCOUNT_MANAGER,)
+                  + (ACCOUNT_MANAGER, BUILD_CONFIG)
                   + (FONT, CAMERA_ASSETS) + tuple(CAMERA_FONTS) + tuple(SIRI_VOCABULARY.format(lang) for lang in SIRI_PHRASES))
 # The same inside upstream's submodules: (submodule, its repository, the
 # files), each fetched at the commit the checkout pins for it.
@@ -1347,7 +1352,7 @@ def load_env(path):
 
 
 class Config:
-    def __init__(self, upstream, app, server_ipv4, server_port, server_ipv6, rsa_pem, team_id):
+    def __init__(self, upstream, app, server_ipv4, server_port, server_ipv6, rsa_pem, team_id, dev_cdn_http=""):
         def need(env, key):
             if not env.get(key):
                 raise PatchError(f"{key} is not set")
@@ -1397,6 +1402,16 @@ class Config:
             self.port = 0
         if not 0 < self.port < 65536:
             raise PatchError(f"server port {server_port!r} is not a port")
+
+        # A development build (configure.sh dev): the address of the
+        # development server, to which the HTTPS CDN takes plain HTTP as well
+        # (the stand's fake CDN). None for a build for a real server.
+        self.dev_cdn_http = None
+        if dev_cdn_http:
+            try:
+                self.dev_cdn_http = str(ipaddress.ip_address(dev_cdn_http))
+            except ValueError:
+                raise PatchError(f"development HTTP host {dev_cdn_http!r} is not an IP address")
 
         self.n, self.e = parse_pkcs1_public_key(rsa_pem)
         # MtProtoKit turns the PKCS#1 key into a SubjectPublicKeyInfo by
@@ -1690,6 +1705,7 @@ def patch(tree, c):
     patch_service_account(tree)
     patch_group_calls(tree)
     patch_call_colors(tree)
+    patch_cdn_downloads(tree, c)
 
     # The build configuration of Make.py, with exactly the keys it reads.
     conf = c.build_configuration()
@@ -5090,6 +5106,7 @@ def verify(tree, c):
     verify_service_account(tree)
     verify_group_calls(tree)
     verify_call_colors(tree)
+    verify_cdn_downloads(tree, c)
 
     build = tree.read(APP_BUILD)
     if "<string>Telegram</string>" in build or "<string>telegram</string>" in build:
@@ -7491,6 +7508,789 @@ def verify_call_colors(tree):
         if tree.read(rel).count(new) < count:
             raise PatchError(f"{rel}: {new} is not where the patch put it")
 
+
+# --- CDN downloads: MtProtoKit and the HTTPS CDN (tasks 102, 107) -------------
+#
+# Task 102 of the server repository (ADR 0065): large files come from Pluma's
+# CDN, as Telegram's do. FetchV2 asks upload.getFile for a CDN redirect
+# (flags.1, cdn_supported, line 974) only on the Rust engine (fastDownloads,
+# 505), and the same property guards every fallback of the CDN branches: an
+# upload.getCdnFile error (952-956), hash checks that keep failing (635, 647,
+# 1158) and a reupload of a single block (1092). Without them a CDN error or a
+# reupload request fails the whole download (952-956, 1114-1115 and the
+# reuploadingToCdn state, 761-800), so turning on the flag alone would break
+# downloads. On iOS the engine is MtProtoKit (NETWORK_ENGINE_DEFAULT), so the
+# flag and these branches no longer depend on it: cdnFallbacks is always on,
+# and the flag is sent until the download has fallen back to its datacenter
+# for good (cdnDisabled, fallBackToMaster). A redirect keeps the ranges
+# already fetched from the datacenter (1087), as upstream does on the Rust
+# engine. What stays on fastDownloads is the engine's own flow control: the
+# parts in flight (512-513), the adaptive window (693) and part sizes (1045),
+# which MtProtoKit's request manager does not need. Android and tdesktop ask
+# for redirects on every download (FileLoadOperation.java 2465-2470,
+# download_manager_mtproto.cpp 580-582).
+#
+# Task 107 (ADR 0071): the CDN is HTTPS. The session says it takes it with
+# pluma_cdn = 1 in the params of initConnection (BuildConfig.m, next to
+# tz_offset, 157-158), and the server redirects only such sessions. A
+# redirect whose file_token starts with PLH1 carries the address of the file's
+# cipher (CdnHttpsFetch.swift, new): FetchV2 fetches each part there with a
+# Range request instead of upload.getCdnFile (903-956), decrypts it with the
+# same code, now shared (925-939), and checks it against the hashes before a
+# byte reaches the file (595-640), the redirect's own first (1001). Parts are
+# 512 KB up to 1 MB (1077-1086). 403 or 410 is an expired address: a new one
+# from the master, as FILE_TOKEN_INVALID (1107-1111, at most 3 times); any
+# other failure, a wrong hash included, sends the rest of the download to the
+# master without the flag; upload.reuploadCdnFile is never called. The flag
+# is sent only for a file of known size, without a proxy (Network.swift
+# 1181-1190: MTProxy, SOCKS5 and WEB proxies carry MTProto only) and outside a
+# 10-minute pause after transport failures of 3 downloads. A file's last part
+# reaches past its end (alignPartFetchRange), while its last hash covers only
+# the bytes there are: the hashes a part needs are those of the bytes it got
+# (592, 657). A redirect without PLH1 is upstream's CDN datacenter, which the
+# server does not send. A development build (configure.sh dev) also takes
+# plain HTTP to the development server's address, for the stand's fake CDN.
+FETCH_V2 = "submodules/TelegramCore/Sources/Network/FetchV2.swift"
+CDN_HTTPS = "submodules/TelegramCore/Sources/Network/CdnHttpsFetch.swift"
+CDN_HTTPS_DEV_MARK = "@DEV_HTTP@\n"
+CDN_HTTPS_SOURCE = r'''import Foundation
+import SwiftSignalKit
+import MtProtoKit
+
+// pluma: large files over HTTPS from the server's CDN (task 107 of the server repository, ADR 0071).
+//
+// The server answers upload.getFile with cdn_supported by an upload.fileCdnRedirect whose file_token is
+// "PLH1" | file id (32 bytes) | expiry (uint32, big-endian) | address (UTF-8, to the end). FetchV2 fetches the
+// cipher of each block from that address with a Range request, and decrypts and checks it as it does a block of
+// upload.getCdnFile: the key, the IV and the hashes come from the master over MTProto only. A redirect without
+// the tag is upstream's CDN datacenter, which the server does not send.
+
+private let cdnHttpsTokenTag: [UInt8] = [0x50, 0x4c, 0x48, 0x31]
+private let cdnHttpsTokenHeaderLength = 4 + 32 + 4
+
+// Parts of the HTTPS CDN: 512 KB up to 1 MB, aligned by the 128 KB of a hash block; as many in flight as the
+// session keeps connections to the host.
+let cdnHttpsPartSize: Int64 = 512 * 1024
+let cdnHttpsMaxPartSize: Int64 = 1024 * 1024
+let cdnHttpsPendingParts = 4
+
+private let cdnHttpsSilenceTimeout: Double = 10.0
+private let cdnHttpsRequestTimeout: Double = 30.0
+private let cdnHttpsRetryDelay: ClosedRange<Double> = 0.3 ... 0.8
+private let cdnHttpsPauseAfterFailures = 3
+private let cdnHttpsPauseDuration: Double = 10.0 * 60.0
+
+enum CdnHttpsToken {
+    // Not the server's HTTPS redirect: upstream's CDN datacenter.
+    case notHttps
+    // The tag, but no address the client takes: the download goes on from the master.
+    case invalid
+    case url(URL)
+}
+
+func cdnHttpsParseToken(_ token: Data) -> CdnHttpsToken {
+    let bytes = [UInt8](token)
+    if bytes.count < cdnHttpsTokenTag.count || Array(bytes[0 ..< cdnHttpsTokenTag.count]) != cdnHttpsTokenTag {
+        return .notHttps
+    }
+    if bytes.count <= cdnHttpsTokenHeaderLength {
+        return .invalid
+    }
+    let raw = bytes[cdnHttpsTokenHeaderLength...]
+    // Visible ASCII without the characters an address escapes: URL(string:) would escape them itself, and the
+    // request would go to another address than the server's.
+    let escaped = Set("\"<>\\^`{|}".utf8)
+    for byte in raw {
+        if byte <= 0x20 || byte >= 0x7f || escaped.contains(byte) {
+            return .invalid
+        }
+    }
+    guard let string = String(bytes: raw, encoding: .utf8), let url = URL(string: string), let host = url.host, !host.isEmpty, url.user == nil, url.password == nil else {
+        return .invalid
+    }
+    if string.hasPrefix("https://") {
+        return .url(url)
+    }
+@DEV_HTTP@
+    return .invalid
+}
+
+private struct CdnHttpsPause {
+    var failedDownloads = Set<Int64>()
+    var pausedUntil: Double = 0.0
+}
+
+private let cdnHttpsPause = Atomic<CdnHttpsPause>(value: CdnHttpsPause())
+
+// Whether a download may ask the server for a redirect now. Not with a proxy (MTProxy, SOCKS5, WEB): the request
+// to the CDN would go around it. Not for 10 minutes after transport failures of 3 downloads in a row.
+func cdnHttpsIsAvailable(network: Network) -> Bool {
+    if network.isProxyActive {
+        return false
+    }
+    let timestamp = CFAbsoluteTimeGetCurrent()
+    return cdnHttpsPause.with { $0.pausedUntil <= timestamp }
+}
+
+func cdnHttpsProxyAllows(network: Network) -> Bool {
+    return !network.isProxyActive
+}
+
+private func cdnHttpsReportSuccess() {
+    let _ = cdnHttpsPause.modify { current in
+        var updated = current
+        updated.failedDownloads.removeAll()
+        return updated
+    }
+}
+
+private func cdnHttpsReportTransportFailure(downloadId: Int64) {
+    var paused = false
+    let _ = cdnHttpsPause.modify { current in
+        var updated = current
+        updated.failedDownloads.insert(downloadId)
+        if updated.failedDownloads.count >= cdnHttpsPauseAfterFailures {
+            updated.failedDownloads.removeAll()
+            updated.pausedUntil = CFAbsoluteTimeGetCurrent() + cdnHttpsPauseDuration
+            paused = true
+        }
+        return updated
+    }
+    if paused {
+        Logger.shared.log("CdnHttps", "\(cdnHttpsPauseAfterFailures) downloads failed in a row, downloads go to the master for \(Int(cdnHttpsPauseDuration / 60.0)) minutes")
+    }
+}
+
+// The cipher of a CDN block at offset, decrypted: AES-256-CTR with the redirect's key, the last 4 bytes of its IV
+// the offset / 16 (big-endian). The same for upload.getCdnFile and the HTTPS CDN.
+func cdnDecryptPart(_ data: Data, offset: Int64, key: Data, iv: Data) -> Data? {
+    var partIv = iv
+    let partIvCount = partIv.count
+    partIv.withUnsafeMutableBytes { rawBytes -> Void in
+        let bytes = rawBytes.baseAddress!.assumingMemoryBound(to: UInt8.self)
+        var ivOffset: Int32 = Int32(clamping: (offset / 16)).bigEndian
+        memcpy(bytes.advanced(by: partIvCount - 4), &ivOffset, 4)
+    }
+    return MTAesCtrDecrypt(data, key, partIv)
+}
+
+enum CdnHttpsPartResult {
+    // The cipher of the range, exactly.
+    case data(Data)
+    // 403 or 410: the address expired or the CDN does not take its signature; a new one comes from the master.
+    case addressExpired
+    // Anything else: the download goes on from the master.
+    case failed
+}
+
+// The cipher of range (clipped to the file) from the address of a redirect.
+func cdnHttpsFetchPart(url: URL, range: Range<Int64>, fileSize: Int64, downloadId: Int64, statsBasePath: String, statsCategory: MediaResourceStatsCategory) -> Signal<CdnHttpsPartResult, NoError> {
+    return Signal { subscriber in
+        let clipped = range.lowerBound ..< min(range.upperBound, fileSize)
+        if clipped.isEmpty {
+            subscriber.putNext(.failed)
+            subscriber.putCompletion()
+            return EmptyDisposable
+        }
+        let request = CdnHttpsPartRequest(url: url, range: clipped, fileSize: fileSize, downloadId: downloadId, completion: { result, isCellular in
+            if case let .data(data) = result {
+                let bytes = Int64(data.count)
+                updateNetworkUsageStats(basePath: statsBasePath, category: statsCategory, delta: NetworkUsageStatsConnectionsEntry(
+                    cellular: NetworkUsageStatsDirectionsEntry(incoming: isCellular ? bytes : 0, outgoing: 0),
+                    wifi: NetworkUsageStatsDirectionsEntry(incoming: isCellular ? 0 : bytes, outgoing: 0)
+                ))
+            }
+            subscriber.putNext(result)
+            subscriber.putCompletion()
+        })
+        request.start()
+        return ActionDisposable {
+            request.cancel()
+        }
+    }
+}
+
+private enum CdnHttpsOutcome {
+    case success(Data, isCellular: Bool)
+    case expired(Int)
+    // A network error, a silence of 10 s or 5xx: retried once.
+    case transient(String)
+    // TLS or the whole request past 30 s: not retried.
+    case transport(String)
+    // An answer the client does not take: not a failure of the transport.
+    case rejected(String)
+    case cancelled
+}
+
+// One request of a part with its one retry.
+private final class CdnHttpsPartRequest {
+    private let url: URL
+    private let range: Range<Int64>
+    private let fileSize: Int64
+    private let downloadId: Int64
+    private let completion: (CdnHttpsPartResult, Bool) -> Void
+    private let host: String
+
+    private let lock = NSLock()
+    private var task: URLSessionDataTask?
+    private var cancelled = false
+
+    init(url: URL, range: Range<Int64>, fileSize: Int64, downloadId: Int64, completion: @escaping (CdnHttpsPartResult, Bool) -> Void) {
+        self.url = url
+        self.range = range
+        self.fileSize = fileSize
+        self.downloadId = downloadId
+        self.completion = completion
+        self.host = url.host ?? ""
+    }
+
+    func start() {
+        self.attempt(1)
+    }
+
+    func cancel() {
+        self.lock.lock()
+        self.cancelled = true
+        let task = self.task
+        self.task = nil
+        self.lock.unlock()
+        task?.cancel()
+    }
+
+    private func attempt(_ number: Int) {
+        self.lock.lock()
+        defer {
+            self.lock.unlock()
+        }
+        if self.cancelled {
+            return
+        }
+        self.task = cdnHttpsTasks.start(session: cdnHttpsSession, url: self.url, range: self.range, fileSize: self.fileSize, completion: { [weak self] outcome in
+            self?.finish(attempt: number, outcome: outcome)
+        })
+    }
+
+    private func finish(attempt: Int, outcome: CdnHttpsOutcome) {
+        self.lock.lock()
+        let cancelled = self.cancelled
+        self.task = nil
+        self.lock.unlock()
+        if cancelled {
+            return
+        }
+        let offset = self.range.lowerBound
+        switch outcome {
+        case let .success(data, isCellular):
+            cdnHttpsReportSuccess()
+            self.completion(.data(data), isCellular)
+        case let .expired(status):
+            Logger.shared.log("CdnHttps", "\(self.host): \(status) at \(offset), asking for a new address")
+            self.completion(.addressExpired, false)
+        case let .transient(reason):
+            if attempt == 1 {
+                Logger.shared.log("CdnHttps", "\(self.host): \(reason) at \(offset), retrying")
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + Double.random(in: cdnHttpsRetryDelay), execute: { [weak self] in
+                    self?.attempt(2)
+                })
+            } else {
+                Logger.shared.log("CdnHttps", "\(self.host): \(reason) at \(offset) again")
+                cdnHttpsReportTransportFailure(downloadId: self.downloadId)
+                self.completion(.failed, false)
+            }
+        case let .transport(reason):
+            Logger.shared.log("CdnHttps", "\(self.host): \(reason) at \(offset)")
+            cdnHttpsReportTransportFailure(downloadId: self.downloadId)
+            self.completion(.failed, false)
+        case let .rejected(reason):
+            Logger.shared.log("CdnHttps", "\(self.host): \(reason) at \(offset)")
+            self.completion(.failed, false)
+        case .cancelled:
+            break
+        }
+    }
+}
+
+private enum CdnHttpsResponseCheck {
+    case accepted(Int64)
+    case outcome(CdnHttpsOutcome)
+}
+
+// Only 206 with Content-Range "bytes a-b/total" for exactly the range asked for, total the file's size, and a body
+// of b - a + 1 bytes without content coding.
+private func cdnHttpsCheckResponse(_ response: URLResponse, range: Range<Int64>, fileSize: Int64) -> CdnHttpsResponseCheck {
+    guard let response = response as? HTTPURLResponse else {
+        return .outcome(.rejected("not an HTTP answer"))
+    }
+    switch response.statusCode {
+    case 206:
+        break
+    case 403, 410:
+        return .outcome(.expired(response.statusCode))
+    case 500 ... 599:
+        return .outcome(.transient("\(response.statusCode)"))
+    default:
+        return .outcome(.rejected("\(response.statusCode)"))
+    }
+    let expected = "bytes \(range.lowerBound)-\(range.upperBound - 1)/\(fileSize)"
+    guard let contentRange = response.value(forHTTPHeaderField: "Content-Range"), contentRange == expected else {
+        return .outcome(.rejected("206 for another range"))
+    }
+    if let coding = response.value(forHTTPHeaderField: "Content-Encoding"), coding.lowercased() != "identity" {
+        return .outcome(.rejected("206 with content coding"))
+    }
+    let length = range.upperBound - range.lowerBound
+    if let contentLength = response.value(forHTTPHeaderField: "Content-Length"), contentLength != "\(length)" {
+        return .outcome(.rejected("206 of another length"))
+    }
+    return .accepted(length)
+}
+
+private let cdnHttpsTlsErrors: Set<URLError.Code> = [
+    .secureConnectionFailed,
+    .serverCertificateHasBadDate,
+    .serverCertificateUntrusted,
+    .serverCertificateHasUnknownRoot,
+    .serverCertificateNotYetValid,
+    .clientCertificateRejected,
+    .clientCertificateRequired,
+    .appTransportSecurityRequiresSecureConnection
+]
+
+// The session of the HTTPS CDN and its requests: no cache, cookies or credentials, no redirects, no waiting for
+// connectivity; a silence of 10 s or 30 s for the whole request fail it.
+private final class CdnHttpsTasks: NSObject, URLSessionDataDelegate {
+    private final class Entry {
+        let range: Range<Int64>
+        let fileSize: Int64
+        let started: Double
+        let completion: (CdnHttpsOutcome) -> Void
+        var expectedLength: Int64 = 0
+        var data = Data()
+        var outcome: CdnHttpsOutcome?
+        var isCellular = false
+
+        init(range: Range<Int64>, fileSize: Int64, started: Double, completion: @escaping (CdnHttpsOutcome) -> Void) {
+            self.range = range
+            self.fileSize = fileSize
+            self.started = started
+            self.completion = completion
+        }
+    }
+
+    private let lock = NSLock()
+    private var entries: [Int: Entry] = [:]
+
+    static func makeSession(delegate: CdnHttpsTasks) -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.httpCookieStorage = nil
+        configuration.httpCookieAcceptPolicy = .never
+        configuration.httpShouldSetCookies = false
+        configuration.urlCredentialStorage = nil
+        configuration.timeoutIntervalForRequest = cdnHttpsSilenceTimeout
+        configuration.timeoutIntervalForResource = cdnHttpsRequestTimeout
+        configuration.httpMaximumConnectionsPerHost = cdnHttpsPendingParts
+        configuration.waitsForConnectivity = false
+        let queue = OperationQueue()
+        queue.name = "CdnHttps"
+        queue.maxConcurrentOperationCount = 1
+        return URLSession(configuration: configuration, delegate: delegate, delegateQueue: queue)
+    }
+
+    func start(session: URLSession, url: URL, range: Range<Int64>, fileSize: Int64, completion: @escaping (CdnHttpsOutcome) -> Void) -> URLSessionDataTask {
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: cdnHttpsSilenceTimeout)
+        request.httpMethod = "GET"
+        request.httpShouldHandleCookies = false
+        request.setValue("bytes=\(range.lowerBound)-\(range.upperBound - 1)", forHTTPHeaderField: "Range")
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        request.setValue("Pluma", forHTTPHeaderField: "User-Agent")
+        let task = session.dataTask(with: request)
+        let entry = Entry(range: range, fileSize: fileSize, started: CFAbsoluteTimeGetCurrent(), completion: completion)
+        self.lock.lock()
+        self.entries[task.taskIdentifier] = entry
+        self.lock.unlock()
+        task.resume()
+        return task
+    }
+
+    private func entry(_ task: URLSessionTask) -> Entry? {
+        self.lock.lock()
+        defer {
+            self.lock.unlock()
+        }
+        return self.entries[task.taskIdentifier]
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        // The redirect's answer itself is refused below.
+        completionHandler(nil)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        guard let entry = self.entry(dataTask) else {
+            completionHandler(.cancel)
+            return
+        }
+        switch cdnHttpsCheckResponse(response, range: entry.range, fileSize: entry.fileSize) {
+        case let .accepted(length):
+            entry.expectedLength = length
+            completionHandler(.allow)
+        case let .outcome(outcome):
+            entry.outcome = outcome
+            completionHandler(.cancel)
+        }
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard let entry = self.entry(dataTask), entry.outcome == nil else {
+            return
+        }
+        entry.data.append(data)
+        if Int64(entry.data.count) > entry.expectedLength {
+            entry.outcome = .rejected("206 longer than its range")
+            dataTask.cancel()
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
+        guard let entry = self.entry(task) else {
+            return
+        }
+        entry.isCellular = metrics.transactionMetrics.last?.isCellular ?? false
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        self.lock.lock()
+        let entry = self.entries.removeValue(forKey: task.taskIdentifier)
+        self.lock.unlock()
+        guard let entry else {
+            return
+        }
+        let outcome: CdnHttpsOutcome
+        if let result = entry.outcome {
+            outcome = result
+        } else if let error = error as? URLError {
+            if error.code == .cancelled {
+                outcome = .cancelled
+            } else if cdnHttpsTlsErrors.contains(error.code) {
+                outcome = .transport("TLS error \(error.code.rawValue)")
+            } else if error.code == .timedOut && CFAbsoluteTimeGetCurrent() - entry.started >= cdnHttpsRequestTimeout - 1.0 {
+                outcome = .transport("request timeout")
+            } else {
+                outcome = .transient("network error \(error.code.rawValue)")
+            }
+        } else if error != nil {
+            outcome = .transient("network error")
+        } else if Int64(entry.data.count) == entry.expectedLength {
+            outcome = .success(entry.data, isCellular: entry.isCellular)
+        } else {
+            outcome = .rejected("206 shorter than its range")
+        }
+        entry.completion(outcome)
+    }
+}
+
+private let cdnHttpsTasks = CdnHttpsTasks()
+private let cdnHttpsSession = CdnHttpsTasks.makeSession(delegate: cdnHttpsTasks)
+'''
+
+
+def cdn_https_source(dev_host):
+    """CdnHttpsFetch.swift; a development build takes plain HTTP to
+    dev_host as well."""
+    dev = ""
+    if dev_host:
+        dev = src(" " * 4, f"""
+            // A development build: plain HTTP to the development server only (ci/configure.sh dev).
+            if string.hasPrefix("http://"), host == "{dev_host}" {{
+                return .url(url)
+            }}
+            """)
+    return CDN_HTTPS_SOURCE.replace(CDN_HTTPS_DEV_MARK, dev)
+
+
+# A clipped range of a ready part: the bytes it got.
+_CDN_RECEIVED = ("pendingReadyPart.fetchRange.lowerBound ..< (pendingReadyPart.fetchRange.lowerBound"
+                 " + Int64(pendingReadyPart.fetchedData.count))")
+CDN_DOWNLOAD_EDITS = (
+    (FETCH_V2,
+     "        let encryptionIv: Data\n"
+     "        \n"
+     "        init(\n"
+     "            id: Int,\n"
+     "            sourceDatacenterId: Int,\n"
+     "            fileToken: Data,\n"
+     "            encryptionKey: Data,\n"
+     "            encryptionIv: Data\n"
+     "        ) {\n"
+     "            self.id = id\n"
+     "            self.sourceDatacenterId = sourceDatacenterId\n"
+     "            self.fileToken = fileToken\n"
+     "            self.encryptionKey = encryptionKey\n"
+     "            self.encryptionIv = encryptionIv\n"
+     "        }\n",
+     "        let encryptionIv: Data\n"
+     "        // pluma: the address of the HTTPS CDN and the hashes of its redirect; nil for a CDN datacenter (task 107).\n"
+     "        let httpsUrl: URL?\n"
+     "        let httpsHashes: [Api.FileHash]\n"
+     "        \n"
+     "        init(\n"
+     "            id: Int,\n"
+     "            sourceDatacenterId: Int,\n"
+     "            fileToken: Data,\n"
+     "            encryptionKey: Data,\n"
+     "            encryptionIv: Data,\n"
+     "            httpsUrl: URL? = nil,\n"
+     "            httpsHashes: [Api.FileHash] = []\n"
+     "        ) {\n"
+     "            self.id = id\n"
+     "            self.sourceDatacenterId = sourceDatacenterId\n"
+     "            self.fileToken = fileToken\n"
+     "            self.encryptionKey = encryptionKey\n"
+     "            self.encryptionIv = encryptionIv\n"
+     "            self.httpsUrl = httpsUrl\n"
+     "            self.httpsHashes = httpsHashes\n"
+     "        }\n"),
+    (FETCH_V2,
+     "        private let fastDownloads: Bool\n",
+     "        private let fastDownloads: Bool\n"
+     "        // pluma: CDN redirects and their fallbacks on any network engine, not only the Rust one (task 102).\n"
+     "        private let cdnFallbacks = true\n"),
+    (FETCH_V2,
+     "                            if state.completedHashRanges.isSuperset(of: RangeSet<Int64>(pendingReadyPart.fetchRange)) {\n",
+     "                            // pluma: the hashes of the bytes the part got; the file's last part reaches past its end (task 107).\n"
+     f"                            if state.completedHashRanges.isSuperset(of: RangeSet<Int64>({_CDN_RECEIVED})) {{\n"),
+    (FETCH_V2,
+     "                                    if self.fastDownloads {\n"
+     "                                        self.cdnVerificationFailures += 1\n",
+     "                                    if self.cdnFallbacks {\n"
+     "                                        self.cdnVerificationFailures += 1\n"
+     "                                        // pluma: a part of the HTTPS CDN that fails its hash ends the CDN for this download (task 107).\n"
+     "                                        if case let .cdn(cdnData) = state.fetchLocation, cdnData.httpsUrl != nil {\n"
+     "                                            self.cdnVerificationFailures = maxCdnFailuresBeforeFallback\n"
+     "                                        }\n"),
+    (FETCH_V2,
+     "                if self.fastDownloads, self.cdnVerificationFailures >= maxCdnFailuresBeforeFallback, ",
+     "                if self.cdnFallbacks, self.cdnVerificationFailures >= maxCdnFailuresBeforeFallback, "),
+    (FETCH_V2,
+     "                        requiredHashRanges.formUnion(RangeSet<Int64>(pendingReadyPart.fetchRange))\n",
+     f"                        requiredHashRanges.formUnion(RangeSet<Int64>({_CDN_RECEIVED}))\n"),
+    (FETCH_V2,
+     "                let requestedOffset = part.fetchRange.lowerBound\n"
+     "                \n"
+     "                let throughputMeter = self.network.downloadThroughputMeter\n"
+     "                filePartRequest = self.network.multiplexedRequestManager.requestWithAdditionalInfo(\n"
+     "                    to: .cdn(cdnData.id),\n",
+     "                let requestedOffset = part.fetchRange.lowerBound\n"
+     "                \n"
+     + src(" " * 16, """
+         // pluma: the part over HTTPS from the server's CDN (task 107). 403 or 410 is an expired address: a new
+         // one from the master, as for FILE_TOKEN_INVALID; any other failure sends the download there for good.
+         if let httpsUrl = cdnData.httpsUrl {
+             guard let fileSize = self.knownSize, cdnHttpsProxyAllows(network: self.network) else {
+                 filePartRequest = Signal<FilePartResult, NoError>.single(.cdnFailure(sourceDatacenterId: cdnData.sourceDatacenterId, error: "CDN_HTTPS_UNAVAILABLE"))
+                 break
+             }
+             let statsCategory = (self.parameters?.tag as? TelegramMediaResourceFetchTag)?.statsCategory ?? .generic
+             filePartRequest = cdnHttpsFetchPart(url: httpsUrl, range: fetchRange, fileSize: fileSize, downloadId: self.consumerId, statsBasePath: self.network.basePath, statsCategory: statsCategory)
+             |> map { result -> FilePartResult in
+                 switch result {
+                 case let .data(fetchedData):
+                     guard let decryptedData = cdnDecryptPart(fetchedData, offset: requestedOffset, key: cdnData.encryptionKey, iv: cdnData.encryptionIv) else {
+                         return .cdnFailure(sourceDatacenterId: cdnData.sourceDatacenterId, error: "CDN_HTTPS_DECRYPTION_FAILED")
+                     }
+                     return .data(data: decryptedData, verifyPartHashData: VerifyPartHashData(fetchRange: fetchRange, fetchedData: fetchedData))
+                 case .addressExpired:
+                     return .cdnFailure(sourceDatacenterId: cdnData.sourceDatacenterId, error: "FILE_TOKEN_INVALID")
+                 case .failed:
+                     return .cdnFailure(sourceDatacenterId: cdnData.sourceDatacenterId, error: "CDN_HTTPS_FAILED")
+                 }
+             }
+             break
+         }
+         """)
+     + "                \n"
+     + "                let throughputMeter = self.network.downloadThroughputMeter\n"
+     "                filePartRequest = self.network.multiplexedRequestManager.requestWithAdditionalInfo(\n"
+     "                    to: .cdn(cdnData.id),\n"),
+    (FETCH_V2,
+     "                            var partIv = cdnData.encryptionIv\n"
+     "                            let partIvCount = partIv.count\n"
+     "                            partIv.withUnsafeMutableBytes { rawBytes -> Void in\n"
+     "                                let bytes = rawBytes.baseAddress!.assumingMemoryBound(to: UInt8.self)\n"
+     "                                var ivOffset: Int32 = Int32(clamping: (requestedOffset / 16)).bigEndian\n"
+     "                                memcpy(bytes.advanced(by: partIvCount - 4), &ivOffset, 4)\n"
+     "                            }\n"
+     "                            \n"
+     "                            let fetchedData = bytes.makeData()\n"
+     "                            guard let decryptedData = MTAesCtrDecrypt(fetchedData, cdnData.encryptionKey, partIv) else {\n",
+     "                            // pluma: the decryption, shared with the HTTPS CDN (CdnHttpsFetch.swift, task 107).\n"
+     "                            let fetchedData = bytes.makeData()\n"
+     "                            guard let decryptedData = cdnDecryptPart(fetchedData, offset: requestedOffset, key: cdnData.encryptionKey, iv: cdnData.encryptionIv) else {\n"),
+    (FETCH_V2,
+     "                |> `catch` { [fastDownloads = self.fastDownloads] error -> Signal<FilePartResult, NoError> in\n"
+     "                    if fastDownloads {\n",
+     "                |> `catch` { [cdnFallbacks = self.cdnFallbacks] error -> Signal<FilePartResult, NoError> in\n"
+     "                    if cdnFallbacks {\n"),
+    (FETCH_V2,
+     "                                flags: self.fastDownloads && !self.cdnDisabled ? (1 << 1) : 0,\n",
+     "                                // pluma: for a file of known size, without a proxy or a pause of the HTTPS CDN (task 107).\n"
+     "                                flags: self.cdnFallbacks && !self.cdnDisabled && self.knownSize != nil && cdnHttpsIsAvailable(network: self.network) ? (1 << 1) : 0,\n"),
+    (FETCH_V2,
+     "                                return .cdnRedirect(CdnData(\n"
+     "                                    id: Int(dcId),\n"
+     "                                    sourceDatacenterId: sourceDatacenterId,\n"
+     "                                    fileToken: fileToken.makeData(),\n"
+     "                                    encryptionKey: encryptionKey,\n"
+     "                                    encryptionIv: encryptionIv\n"
+     "                                ))\n",
+     src(" " * 32, """
+         // pluma: a token of the server's HTTPS CDN carries the address (task 107); a token the client does not
+         // take sends this download to the master for good.
+         var httpsUrl: URL?
+         switch cdnHttpsParseToken(fileToken.makeData()) {
+         case .notHttps:
+             break
+         case .invalid:
+             return .cdnFailure(sourceDatacenterId: sourceDatacenterId, error: "CDN_HTTPS_TOKEN_INVALID")
+         case let .url(url):
+             httpsUrl = url
+         }
+         return .cdnRedirect(CdnData(
+             id: Int(dcId),
+             sourceDatacenterId: sourceDatacenterId,
+             fileToken: fileToken.makeData(),
+             encryptionKey: encryptionKey,
+             encryptionIv: encryptionIv,
+             httpsUrl: httpsUrl,
+             httpsHashes: httpsUrl != nil ? fileHashes : []
+         ))
+         """)),
+    (FETCH_V2,
+     "                        let cdnState = FetchImpl.FetchingState(\n"
+     "                            fetchLocation: .cdn(cdnData),\n"
+     "                            partSize: self.cdnPartSize,\n"
+     "                            minPartSize: self.cdnPartSize,\n"
+     "                            maxPartSize: self.cdnPartSize * 2,\n"
+     "                            partAlignment: self.cdnPartSize,\n"
+     "                            partDivision: 1 * 1024 * 1024,\n"
+     "                            maxPendingParts: self.cdnPendingParts,\n",
+     "                        // pluma: over HTTPS, parts of 512 KB up to 1 MB, as many in flight as connections (task 107).\n"
+     "                        let isHttps = cdnData.httpsUrl != nil\n"
+     "                        let cdnState = FetchImpl.FetchingState(\n"
+     "                            fetchLocation: .cdn(cdnData),\n"
+     "                            partSize: isHttps ? cdnHttpsPartSize : self.cdnPartSize,\n"
+     "                            minPartSize: self.cdnPartSize,\n"
+     "                            maxPartSize: isHttps ? cdnHttpsMaxPartSize : self.cdnPartSize * 2,\n"
+     "                            partAlignment: self.cdnPartSize,\n"
+     "                            partDivision: 1 * 1024 * 1024,\n"
+     "                            maxPendingParts: isHttps ? cdnHttpsPendingParts : self.cdnPendingParts,\n"),
+    (FETCH_V2,
+     "                        if self.fastDownloads {\n"
+     "                            cdnState.completedRanges = state.completedRanges\n"
+     "                        }\n",
+     "                        if self.cdnFallbacks {\n"
+     "                            cdnState.completedRanges = state.completedRanges\n"
+     "                        }\n"
+     "                        // pluma: the redirect's hashes, so the first parts do not wait for upload.getCdnFileHashes (task 107).\n"
+     "                        if isHttps {\n"
+     "                            self.storeHashes(cdnData.httpsHashes, into: cdnState)\n"
+     "                        }\n"),
+    (FETCH_V2,
+     "                    case let .cdnRefresh(cdnData, refreshToken):\n"
+     "                        if self.fastDownloads {\n",
+     "                    case let .cdnRefresh(cdnData, refreshToken):\n"
+     "                        if self.cdnFallbacks {\n"),
+    (FETCH_V2,
+     "                    if self.fastDownloads, case let .cdn(cdnData) = state.fetchLocation {\n",
+     "                    if self.cdnFallbacks, case let .cdn(cdnData) = state.fetchLocation {\n"),
+    (NETWORK,
+     "    private let webProxyActive: ValuePromise<Bool>\n",
+     "    private let webProxyActive: ValuePromise<Bool>\n"
+     "    // pluma: whether a proxy (MTProxy, SOCKS5, WEB) is on; the HTTPS CDN would go around it (task 107).\n"
+     "    private let proxyActive: Atomic<Bool>\n"
+     "    public var isProxyActive: Bool {\n"
+     "        return self.proxyActive.with { $0 }\n"
+     "    }\n"),
+    (NETWORK,
+     "        self.webProxyActive = ValuePromise<Bool>(initialWebProxyActive, ignoreRepeated: true)\n",
+     "        self.webProxyActive = ValuePromise<Bool>(initialWebProxyActive, ignoreRepeated: true)\n"
+     "        self.proxyActive = Atomic<Bool>(value: context.apiEnvironment.socksProxySettings != nil)\n"),
+    (NETWORK,
+     "        self.webProxyActive.set(activeServer?.isWebProxy == true)\n",
+     "        self.webProxyActive.set(activeServer?.isWebProxy == true)\n"
+     "        let _ = self.proxyActive.swap(activeServer != nil)\n"),
+    (BUILD_CONFIG,
+     "    dataDict[@\"tz_offset\"] = @((int)tzOffset);\n",
+     "    dataDict[@\"tz_offset\"] = @((int)tzOffset);\n"
+     "    // pluma: the session takes large files over HTTPS from the server's CDN (task 107, ADR 0071).\n"
+     "    dataDict[@\"pluma_cdn\"] = @1;\n"),
+)
+# What would tie a CDN branch to the engine again past the edits, ask for a
+# redirect elsewhere, or reach the HTTPS CDN another way: fastDownloads only
+# in its declaration, its value and the four places of the engine's flow
+# control, one cdn_supported flag, cdnFallbacks only where the edits put it,
+# the decryption only in cdnDecryptPart, upstream's CDN requests as they were.
+CDN_DOWNLOAD_GUARDS = (
+    (FETCH_V2, "fastDownloads", 6),
+    (FETCH_V2, "self.fastDownloads ? fastDownload", 2),
+    (FETCH_V2, "                if self.fastDownloads {\n                    maxPendingParts = min(maxPendingParts, state.window)\n", 1),
+    (FETCH_V2, "                        if self.fastDownloads {\n                            self.adaptWindow(", 1),
+    (FETCH_V2, "(1 << 1)", 1),
+    (FETCH_V2, "cdnFallbacks", 10),
+    (FETCH_V2, "httpsUrl", 14),
+    (FETCH_V2, "cdnHttpsIsAvailable(", 1),
+    (FETCH_V2, "cdnHttpsFetchPart(", 1),
+    (FETCH_V2, "cdnDecryptPart(", 2),
+    (FETCH_V2, "MTAesCtrDecrypt(", 0),
+    (FETCH_V2, "upload.getCdnFile(", 1),
+    (FETCH_V2, "upload.reuploadCdnFile(", 2),
+    (FETCH_V2, "storeHashes(", 4),
+    (NETWORK, "proxyActive", 4),
+    (BUILD_CONFIG, "pluma_cdn", 1),
+)
+# The log of the HTTPS CDN names the host, the status and the offset: never
+# the address (it carries the signature), the token, the key, the IV or bytes.
+CDN_HTTPS_LOG = re.compile(r'Logger\.shared\.log\("[^"]*", "((?:[^"\\\n]|\\.)*)"\)')
+CDN_HTTPS_LOG_ALLOWED = re.compile(r"\\\((?:self\.host|self\.loggingIdentifier|offset|status|reason|attempt|"
+                                   r"cdnHttpsPauseAfterFailures|Int\(cdnHttpsPauseDuration / 60\.0\))\)")
+CDN_HTTPS_LOG_SECRETS = re.compile(r"\b(?:url|httpsUrl|string|token|fileToken|key|iv|encryptionKey|encryptionIv|"
+                                   r"partIv|data|fetchedData|cdnData)\b")
+
+
+def patch_cdn_downloads(tree, c):
+    """upload.getFile with cdn_supported, the CDN fallbacks on MtProtoKit and
+    the HTTPS CDN."""
+    for rel, old, new in CDN_DOWNLOAD_EDITS:
+        tree.replace(rel, old, new)
+    tree.add_file(CDN_HTTPS, cdn_https_source(c.dev_cdn_http).encode("utf-8"))
+
+
+def verify_cdn_downloads(tree, c):
+    if tree.sha256(CDN_HTTPS) is None:
+        raise PatchError(f"{CDN_HTTPS}: missing; no HTTPS CDN")
+    source = tree.read(CDN_HTTPS)
+    if not c.dev_cdn_http and ('"http://"' in source or "A development build" in source):
+        raise PatchError(f"{CDN_HTTPS}: a build for the real server takes plain HTTP (a development build's)")
+    for m in CDN_HTTPS_LOG.finditer(source):
+        rest = CDN_HTTPS_LOG_ALLOWED.sub("", m.group(1))
+        if "\\(" in rest or CDN_HTTPS_LOG_SECRETS.search(rest):
+            raise PatchError(f"{CDN_HTTPS}: a log line with more than the host, status and offset: {m.group(0)[:80]!r}")
+    if source != cdn_https_source(c.dev_cdn_http):
+        raise PatchError(f"{CDN_HTTPS}: not the file of the patch")
+    for rel, old, new in CDN_DOWNLOAD_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or (old not in new and old in text):
+            raise PatchError(f"{rel}: CDN downloads are tied to the Rust engine again or miss the HTTPS CDN "
+                             f"({new.strip().splitlines()[-1]!r} is not there once)")
+    for rel, s, count in CDN_DOWNLOAD_GUARDS:
+        found = tree.read(rel).count(s)
+        if found != count:
+            raise PatchError(f"{rel}: {found} occurrences of {s!r}, expected {count}; "
+                             "another CDN branch, engine check or HTTPS CDN path")
+
+
 def main(argv=None):
     if (argv if argv is not None else sys.argv[1:]) == ["--paths"]:
         print("\n".join(UPSTREAM_PATHS))
@@ -7511,10 +8311,13 @@ def main(argv=None):
     ap.add_argument("--server-ipv6", default="")
     ap.add_argument("--rsa-public-key", required=True, help="PKCS#1 PEM of the server key")
     ap.add_argument("--team-id", required=True, help="the Apple Team ID that signs the app")
+    ap.add_argument("--dev-cdn-http", default="",
+                    help="a development build: the address of the development server, to which the HTTPS CDN "
+                         "takes plain HTTP as well")
     a = ap.parse_args(argv)
     try:
         c = Config(load_env(a.upstream), load_env(a.app), a.server_ipv4, a.server_port, a.server_ipv6,
-                   pathlib.Path(a.rsa_public_key).read_text(), a.team_id)
+                   pathlib.Path(a.rsa_public_key).read_text(), a.team_id, a.dev_cdn_http)
         tree = Tree(a.source)
         patch(tree, c)
         verify(tree, c)
