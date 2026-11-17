@@ -1680,6 +1680,7 @@ def patch(tree, c):
     patch_premium_stickers(tree)
     premium_for_everyone(tree)
     patch_no_ai_editor(tree)
+    patch_translate_emojify(tree)
     patch_app_update(tree)
     patch_video_quality(tree)
     patch_store(tree, c)
@@ -5078,6 +5079,7 @@ def verify(tree, c):
     verify_premium_for_everyone(tree)
     verify_transcribe_view_once(tree)
     verify_no_ai_editor(tree)
+    verify_translate_emojify(tree)
     verify_app_update(tree)
     verify_video_quality(tree)
     verify_store(tree, c)
@@ -5219,7 +5221,8 @@ def verify_transcribe_view_once(tree):
 # shows. The two caption panels never enable it. The rich editor's button is
 # made but never added, and its action bar takes the room. The translate mode
 # of the same screen (messages, bios, gallery, Instant View) is left to
-# message translation, which the server turns off until it has a provider.
+# message translation (task 101, below), which the server turns off until it
+# has a provider.
 NO_AI_EDITOR_EDITS = (
     ("submodules/TelegramUI/Components/Chat/ChatTextInputPanelNode/Sources/ChatTextInputPanelNode.swift",
      "        if self.isAIEnabled, inputHasNonWhitespaceText, let node = self.richTextInputNode {\n",
@@ -5280,6 +5283,61 @@ def verify_no_ai_editor(tree):
         found = tree.read(rel).count(s)
         if found != count:
             raise PatchError(f"{rel}: {found} occurrences of {s!r}, expected {count}; another way into the AI editor")
+
+
+# --- No emojify in translation (task 101) --------------------------------------
+# The translate mode of TextProcessingScreen (a message, a bio, the gallery,
+# Instant View) offers an "emojify" toggle under the translation
+# (TextProcessingTranslateContentComponent.swift 715-720 and 757-768): turned
+# on, it asks for the translation again with the emojify flag
+# (messages.composeMessageWithAI flags.3; line 242 of the component,
+# Translate.swift 860-866). Adding emoji is the AI editor's work, not
+# translation: the server translates with its own translation model and
+# answers that form ERR_ENTERPRISE_IS_BLOCKED, so the toggle would only ever
+# turn a translation into an error. It is hidden in translate mode; without
+# it the text area lays out no button (TextProcessingTextAreaComponent.swift
+# 288-341). The flag in the request is state that only the toggle sets, so
+# it stays false. The stylize mode's toggle belongs to the AI editor (task
+# 079) and is left as it is.
+TRANSLATE_CONTENT = _UI_COMPONENTS + "TextProcessingScreen/Sources/TextProcessingTranslateContentComponent.swift"
+TRANSLATE_EMOJIFY_OLD = src(" " * 12, """
+    if isTranslate {
+        displayEmojify = true
+    } else if case let .stylize(isComposeWithAI) = component.mode, !isComposeWithAI {
+""")
+TRANSLATE_EMOJIFY = src(" " * 12, """
+    if isTranslate {
+        // pluma: no emojify toggle in translation; the server translates, it does not add emoji (task 101).
+        displayEmojify = false
+    } else if case let .stylize(isComposeWithAI) = component.mode, !isComposeWithAI {
+""")
+# What would bring the toggle or the flag back past the edit: the toggle
+# shown on another condition, the flag set other than by the toggle, or the
+# translate request no longer taking it from that state.
+TRANSLATE_EMOJIFY_GUARDS = (
+    (TRANSLATE_CONTENT, "displayEmojify = true\n", 1),
+    (TRANSLATE_CONTENT, "emojify: displayEmojify ? (\n", 1),
+    (TRANSLATE_CONTENT, "component.externalState.emojify = ", 1),
+    (TRANSLATE_CONTENT, "component.externalState.emojify = !component.externalState.emojify\n", 1),
+    (TRANSLATE_CONTENT, "mappedMode = .translate(toLanguage: result.language, emojify: component.externalState.emojify, "
+                        "style: component.externalState.style)\n", 1),
+)
+UPSTREAM_PATHS += tuple(sorted({TRANSLATE_CONTENT} - set(UPSTREAM_PATHS)))
+
+
+def patch_translate_emojify(tree):
+    tree.replace(TRANSLATE_CONTENT, TRANSLATE_EMOJIFY_OLD, TRANSLATE_EMOJIFY)
+
+
+def verify_translate_emojify(tree):
+    text = tree.read(TRANSLATE_CONTENT)
+    if text.count(TRANSLATE_EMOJIFY) != 1 or TRANSLATE_EMOJIFY_OLD in text:
+        raise PatchError(f"{TRANSLATE_CONTENT}: translation offers the emojify toggle again")
+    for rel, s, count in TRANSLATE_EMOJIFY_GUARDS:
+        found = tree.read(rel).count(s)
+        if found != count:
+            raise PatchError(f"{rel}: {found} occurrences of {s!r}, expected {count}; "
+                             "another way to emojify a translation")
 
 
 # --- account directories on a fresh install ----------------------------------

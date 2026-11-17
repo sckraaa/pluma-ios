@@ -1667,6 +1667,12 @@ DAMAGE = (
     (patch.CALL_CAPTURE, "_videoCapturerResolution.second, 25);\n", "_videoCapturerResolution.second, 30);\n"),
     # No AI message editor: each edit.
     *((rel, old, old.replace(", ", ",  ", 1)) for rel, old, _, _ in patch.NO_AI_EDITOR_EDITS),
+    # No emojify in translation: the toggle's condition, and the flag of the
+    # translate request taken from somewhere else.
+    (patch.TRANSLATE_CONTENT, "            if isTranslate {\n                displayEmojify = true\n",
+     "            if isTranslate || true {\n                displayEmojify = true\n"),
+    (patch.TRANSLATE_CONTENT, "mappedMode = .translate(toLanguage: result.language, emojify: component.externalState.emojify,",
+     "mappedMode = .translate(toLanguage: result.language, emojify: true,"),
     # Transcription: a gate that no longer keeps a view-once message out, a
     # view-once message no longer recognised, the button set before the gate
     # or after it.
@@ -2138,6 +2144,13 @@ class UpstreamTest(unittest.TestCase):
         # A trim in the gallery is saved when the handle is let go.
         self.assertIn(patch.TRIM_SAVE, tree.read(patch.CHAT_EDITOR_VIDEO))
         self.assertEqual(tree.read(patch.CHAT_EDITOR_VIDEO).count("self?.saveCurrentItemEdits()"), 1)
+        # Translation offers no emojify toggle; the stylize mode keeps its own.
+        translate = tree.read(patch.TRANSLATE_CONTENT)
+        self.assertIn("            if isTranslate {\n"
+                      "                // pluma: no emojify toggle in translation;", translate)
+        self.assertIn("                displayEmojify = false\n"
+                      "            } else if case let .stylize(isComposeWithAI) = component.mode, !isComposeWithAI {\n"
+                      "                displayEmojify = true\n", translate)
         # What App Store Connect asks: the purpose of background location,
         # no SF Camera, Siri phrases for every intent.
         self.assertIn("    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>\n"
@@ -3177,6 +3190,77 @@ class NoAiEditorTest(unittest.TestCase):
             patch.patch_no_ai_editor(tree)
             rel = patch.NO_AI_EDITOR_EDITS[0][0]
             self.assertIn("        if false && self.isAIEnabled, inputHasNonWhitespaceText,", tree.read(rel))
+
+
+class TranslateEmojifyTest(unittest.TestCase):
+    # The upstream file, made of the text the edit expects and of the lines
+    # the guards count, as the pinned commit has them.
+    UPSTREAM = (patch.TRANSLATE_EMOJIFY_OLD
+                + "                displayEmojify = true\n            }\n"
+                + "                    emojify: displayEmojify ? (\n"
+                + "                            component.externalState.emojify = !component.externalState.emojify\n"
+                + "                    mappedMode = .translate(toLanguage: result.language, "
+                  "emojify: component.externalState.emojify, style: component.externalState.style)\n")
+
+    def tree(self, root, text=UPSTREAM):
+        (root / "Telegram").mkdir(exist_ok=True)
+        (root / "Telegram/BUILD").write_text("")
+        (root / "versions.json").write_text("{}")
+        tree = patch.Tree(root)
+        tree.write(patch.TRANSLATE_CONTENT, text)
+        return tree
+
+    def test_upstream_paths_cover_the_edit(self):
+        self.assertIn(patch.TRANSLATE_CONTENT, patch.UPSTREAM_PATHS)
+
+    def test_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            with self.assertRaisesRegex(patch.PatchError, "offers the emojify toggle again"):
+                patch.verify_translate_emojify(tree)
+            patch.patch_translate_emojify(tree)
+            patch.verify_translate_emojify(tree)
+            text = tree.read(patch.TRANSLATE_CONTENT)
+            self.assertIn("            if isTranslate {\n", text)
+            self.assertIn("                displayEmojify = false\n            } else if case let .stylize(", text)
+            # A second run finds no upstream text.
+            with self.assertRaises(patch.PatchError):
+                patch.patch_translate_emojify(tree)
+
+    def test_upstream_changed(self):
+        # The condition moved: the patch stops with the file's name.
+        changed = self.UPSTREAM.replace("            if isTranslate {\n", "            if isTranslate, !isRich {\n")
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d), changed)
+            with self.assertRaises(patch.PatchError) as e:
+                patch.patch_translate_emojify(tree)
+            self.assertIn(patch.TRANSLATE_CONTENT, str(e.exception))
+
+    def test_check(self):
+        # The edit undone, or the toggle shown again some other way.
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(pathlib.Path(d))
+            patch.patch_translate_emojify(tree)
+            patched = tree.read(patch.TRANSLATE_CONTENT)
+            tree.write(patch.TRANSLATE_CONTENT, patched.replace(patch.TRANSLATE_EMOJIFY, patch.TRANSLATE_EMOJIFY_OLD))
+            with self.assertRaisesRegex(patch.PatchError, "offers the emojify toggle again"):
+                patch.verify_translate_emojify(tree)
+            tree.write(patch.TRANSLATE_CONTENT, patched)
+            patch.verify_translate_emojify(tree)
+
+    def test_another_way_in(self):
+        # Each guard on its own: the toggle on another condition, the flag set
+        # elsewhere, the request no longer reading the toggle's state.
+        for i, (rel, s, count) in enumerate(patch.TRANSLATE_EMOJIFY_GUARDS):
+            for damage in ("added", "removed"):
+                with self.subTest(guard=i, damage=damage), tempfile.TemporaryDirectory() as d:
+                    tree = self.tree(pathlib.Path(d))
+                    patch.patch_translate_emojify(tree)
+                    text = tree.read(rel)
+                    self.assertEqual(text.count(s), count)
+                    tree.write(rel, text + s if damage == "added" else text.replace(s, ""))
+                    with self.assertRaisesRegex(patch.PatchError, "another way to emojify a translation"):
+                        patch.verify_translate_emojify(tree)
 
 
 class ServiceAccountTest(unittest.TestCase):
