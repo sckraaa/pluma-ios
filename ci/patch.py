@@ -12047,8 +12047,8 @@ final class PlumaPaths: @unchecked Sendable {
 
     // The monitor of the network and the state of the app, once for the process.
     func start() {
-        self.queue.async {
-            if self.monitor != nil {
+        self.queue.async { [weak self] in
+            guard let self = self, self.monitor == nil else {
                 return
             }
             let monitor = NWPathMonitor()
