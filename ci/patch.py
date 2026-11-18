@@ -9177,7 +9177,8 @@ static NSArray<NSString *> *MTPathsOfAddresses(NSArray<MTDatacenterAddress *> *a
 
     // Task 113.
     MTPathSettings *_settings;
-    bool _unsupported;
+    // Until when the probes rest (unsupportedAt:).
+    CFAbsoluteTime _unsupportedUntil;
     NSString *_fingerprint;
     bool _constrained;
     NSString *_key;
@@ -9249,13 +9250,26 @@ static NSArray<NSString *> *MTPathsOfAddresses(NSArray<MTDatacenterAddress *> *a
     os_unfair_lock_unlock(&_lock);
 }
 
+// Under the lock: whether the probes rest. A gateway closes the connection right after
+// res_pq both when it knows no probe and when its limits refuse one (the server's task 113
+// brief, «Контракт пробы»), so the rest lasts until the next app configuration or
+// failed_ttl_s, whichever is first, not for good.
+- (bool)unsupportedAt:(CFAbsoluteTime)now {
+    return now < _unsupportedUntil;
+}
+
+// Under the lock.
+- (void)markUnsupported {
+    _unsupportedUntil = CFAbsoluteTimeGetCurrent() + _settings.failedTtl;
+}
+
 // Under the lock. Without probes the stay on the edges ends here: from now on the
 // direct path is first again, whatever happened to it before.
 - (bool)edgesFirstNow:(CFAbsoluteTime)now {
     if (_configuredFirst) {
         return true;
     }
-    if (!_unsupported) {
+    if (![self unsupportedAt:now]) {
         return false;
     }
     if (_firstUntil != 0.0) {
@@ -9305,7 +9319,7 @@ static NSArray<NSString *> *MTPathsOfAddresses(NSArray<MTDatacenterAddress *> *a
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     bool edgesFirst = [self edgesFirstNow:now];
     NSInteger rank;
-    if (_unsupported) {
+    if ([self unsupportedAt:now]) {
         // Without probes: the direct addresses, then the edges in their order, or the
         // edges first.
         rank = address.websocket ? (edgesFirst ? 0 : 16) + (NSInteger)[edges indexOfObject:address] : (edgesFirst ? 16 : 0);
@@ -9339,7 +9353,7 @@ static NSArray<NSString *> *MTPathsOfAddresses(NSArray<MTDatacenterAddress *> *a
     bool away = false;
     bool measure = false;
     NSString *path = MTPathOfAddress(address);
-    if (_unsupported) {
+    if ([self unsupportedAt:now]) {
         if (!address.websocket && ![self edgesFirstNow:now]) {
             if (_freezes != 0 && now - _lastFreeze > MTEdgeFreezeWindow) {
                 _freezes = 0;
@@ -9394,7 +9408,7 @@ static NSArray<NSString *> *MTPathsOfAddresses(NSArray<MTDatacenterAddress *> *a
     os_unfair_lock_lock(&_lock);
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     bool launch = false;
-    if (_unsupported) {
+    if ([self unsupportedAt:now]) {
         if (address.websocket && ![self edgesFirstNow:now]) {
             [self moveToEdgesAt:now];
         }
@@ -9423,7 +9437,7 @@ static NSArray<NSString *> *MTPathsOfAddresses(NSArray<MTDatacenterAddress *> *a
     bool countryChanged = ![_settings.country isEqualToString:settings.country];
     _settings = settings;
     // A new app configuration is a new chance for the probes.
-    _unsupported = false;
+    _unsupportedUntil = 0.0;
     os_unfair_lock_unlock(&_lock);
     if (countryChanged) {
         [self networkChanged];
@@ -9542,7 +9556,7 @@ static NSArray<NSString *> *MTPathsOfAddresses(NSArray<MTDatacenterAddress *> *a
     }
     // The transports move at once to a remembered path; without one, when the race picks.
     bool reset = best != nil && !MTPathEqual(best, _inUse);
-    bool active = _writable && !_unsupported;
+    bool active = _writable && ![self unsupportedAt:now];
     bool measure = active && !first && now - _lastNetworkRank >= MTPathNetworkInterval;
     if (measure) {
         _lastNetworkRank = now;
@@ -9817,7 +9831,7 @@ static NSArray<NSString *> *MTPathsOfAddresses(NSArray<MTDatacenterAddress *> *a
         return nil;
     }
     os_unfair_lock_lock(&_lock);
-    bool unsupported = _unsupported;
+    bool unsupported = [self unsupportedAt:CFAbsoluteTimeGetCurrent()];
     os_unfair_lock_unlock(&_lock);
     if (unsupported) {
         return nil;
@@ -9902,10 +9916,10 @@ static NSArray<NSString *> *MTPathsOfAddresses(NSArray<MTDatacenterAddress *> *a
     }
     os_unfair_lock_lock(&_lock);
     if (winner.outcome == MTPathOutcomeUnsupported) {
-        _unsupported = true;
+        [self markUnsupported];
         os_unfair_lock_unlock(&_lock);
         if (MTLogEnabled()) {
-            MTLog(@"[MTEdgeRoute the server does not answer probes; the order of task 109 until the next app configuration]");
+            MTLog(@"[MTEdgeRoute the server does not answer probes; the order of task 109 until the next app configuration or failed_ttl_s]");
         }
         return;
     }
@@ -9966,7 +9980,7 @@ static NSArray<NSString *> *MTPathsOfAddresses(NSArray<MTDatacenterAddress *> *a
         return;
     }
     if (result.outcome == MTPathOutcomeUnsupported) {
-        _unsupported = true;
+        [self markUnsupported];
         os_unfair_lock_unlock(&_lock);
         return;
     }
@@ -10010,7 +10024,7 @@ static NSArray<NSString *> *MTPathsOfAddresses(NSArray<MTDatacenterAddress *> *a
 
 - (void)requestRank:(NSString *)reason {
     os_unfair_lock_lock(&_lock);
-    if (!_writable || _unsupported || _key == nil) {
+    if (!_writable || [self unsupportedAt:CFAbsoluteTimeGetCurrent()] || _key == nil) {
         os_unfair_lock_unlock(&_lock);
         return;
     }
@@ -10112,7 +10126,7 @@ static NSArray<NSString *> *MTPathsOfAddresses(NSArray<MTDatacenterAddress *> *a
         }
     }
     if (unsupported) {
-        _unsupported = true;
+        [self markUnsupported];
     }
     if (unsupported || ![key isEqualToString:_key]) {
         os_unfair_lock_unlock(&_lock);
@@ -10257,7 +10271,7 @@ static NSArray<NSString *> *MTPathsOfAddresses(NSArray<MTDatacenterAddress *> *a
 
 - (NSTimeInterval)silenceSuspectSeconds {
     os_unfair_lock_lock(&_lock);
-    NSTimeInterval result = _writable && !_unsupported ? _settings.suspect : 0.0;
+    NSTimeInterval result = _writable && ![self unsupportedAt:CFAbsoluteTimeGetCurrent()] ? _settings.suspect : 0.0;
     os_unfair_lock_unlock(&_lock);
     return result;
 }
@@ -10265,7 +10279,7 @@ static NSArray<NSString *> *MTPathsOfAddresses(NSArray<MTDatacenterAddress *> *a
 - (void)transportSuspectsSilenceWithAddress:(MTDatacenterAddress *)__unused address {
     os_unfair_lock_lock(&_lock);
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    bool measure = _writable && !_unsupported && now - _lastSuspect >= MTPathSilenceInterval;
+    bool measure = _writable && ![self unsupportedAt:now] && now - _lastSuspect >= MTPathSilenceInterval;
     if (measure) {
         _lastSuspect = now;
     }

@@ -136,7 +136,7 @@ class PathContractTest(unittest.TestCase):
         self.assertIn("readOnly: supplementary || isAppExtension)", patch.PATH_NETWORK)
         route = patch.EDGE_ROUTE_M_SOURCE
         self.assertIn("    if (!_writable) {\n        return nil;\n    }\n", route)
-        self.assertIn("    if (!_writable || _unsupported || _key == nil) {\n", route)
+        self.assertIn("    if (!_writable || [self unsupportedAt:CFAbsoluteTimeGetCurrent()] || _key == nil) {\n", route)
         self.assertEqual(route.count("writeToFile:"), 1)
 
 
