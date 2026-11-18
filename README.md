@@ -131,6 +131,7 @@ Set these in the repository's *Settings → Secrets and variables → Actions �
 | `PLUMA_SERVER_IPV4` | The server's IPv4 address. MtProtoKit takes an address, not a host name. |
 | `PLUMA_SERVER_PORT` | The port of the server's MTProto gateway (gnetway). |
 | `PLUMA_SERVER_IPV6` | Optional. The server's IPv6 address. |
+| `PLUMA_EDGE_WS_URLS` | Optional. The server's edges through a CDN, for networks where its address is blocked: 1 to 4 `wss://<host>/apiws` addresses by commas, in the order the app tries them after the direct address. Empty, the build has none. The server's `pluma_edge` replaces the list at run time. |
 | `PLUMA_RSA_PUBLIC_KEY` | The server key as a PKCS#1 PEM: `openssl rsa -in server_pkcs1.key -RSAPublicKey_out` |
 | `PLUMA_TEAM_ID` | The Apple Team ID (10 characters, *Membership details* in the Apple Developer account). Setting it turns on signed builds. |
 | `PLUMA_AGE_RECIPIENT` | The owner's [age](https://age-encryption.org) public key (`age1...`); see [Signing](#signing). |
