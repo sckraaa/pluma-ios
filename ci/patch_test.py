@@ -4123,6 +4123,7 @@ class EdgesTest(unittest.TestCase):
 
     def setUp(self):
         self.written = set()
+        self.patched_with = None
 
     def tearDown(self):
         for rel in self.written:
@@ -4131,6 +4132,7 @@ class EdgesTest(unittest.TestCase):
             else:
                 (self.root / rel).unlink(missing_ok=True)
         self.written.clear()
+        self.patched_with = None
 
     def run_patch(self, **over):
         c = config(**over)
@@ -4139,16 +4141,34 @@ class EdgesTest(unittest.TestCase):
         patch.verify(tree, c)
         return tree, c
 
+    def patched(self, **over):
+        """The tree patched with over and verified, once per test for the same
+        over: each case of damage takes back what it changed, so a case costs
+        one verify of the tree, not a patch and two."""
+        if self.patched_with is None or self.patched_with[0] != over:
+            self.tearDown()
+            self.patched_with = (over, *self.run_patch(**over))
+        return self.patched_with[1], self.patched_with[2]
+
+    def refused(self, rel, damage, **over):
+        """rel of the patched tree changed by damage(text): verify must stop,
+        naming the file."""
+        tree, c = self.patched(**over)
+        data = (self.root / rel).read_bytes()
+        tree.write(rel, damage(data.decode("utf-8")))
+        try:
+            with self.assertRaises(patch.PatchError) as e:
+                patch.verify(tree, c)
+        finally:
+            tree.write_bytes(rel, data)
+        self.assertIn(pathlib.PurePath(rel).name, str(e.exception))
+
     def damaged(self, rel, old, new, **over):
         """The patched tree with old replaced by new in rel: verify must stop."""
-        self.tearDown()
-        tree, c = self.run_patch(**over)
-        text = tree.read(rel)
-        self.assertEqual(text.count(old), 1, (rel, old[:60]))
-        tree.write(rel, text.replace(old, new))
-        with self.assertRaises(patch.PatchError) as e:
-            patch.verify(tree, c)
-        self.assertIn(pathlib.PurePath(rel).name, str(e.exception))
+        def damage(text):
+            self.assertEqual(text.count(old), 1, (rel, old[:60]))
+            return text.replace(old, new)
+        self.refused(rel, damage, **over)
 
     def test_upstream_paths_cover_the_files(self):
         for rel, _, _ in patch.EDGE_EDITS:
@@ -4159,10 +4179,11 @@ class EdgesTest(unittest.TestCase):
         for rel, text in patch.edge_files(c):
             self.assertEqual(tree.read(rel), text)
             self.assertNotIn(rel, self.files)
-        # Only the edits: each file is upstream's with them applied.
-        for rel in sorted({rel for rel, _, _ in patch.EDGE_EDITS} - {NETWORK, ACCOUNT}):
+        # Only the edits: each file is upstream's with them applied (and with those
+        # of the paths, task 113, which build on them).
+        for rel in sorted({rel for rel, _, _ in patch.EDGE_EDITS + patch.PATH_EDITS} - {NETWORK, ACCOUNT}):
             expected = self.files[rel].decode("utf-8")
-            for r, old, new in patch.EDGE_EDITS:
+            for r, old, new in patch.EDGE_EDITS + patch.PATH_EDITS:
                 if r == rel:
                     expected = expected.replace(old, new)
             self.assertEqual(tree.read(rel), expected, rel)
@@ -4175,6 +4196,7 @@ class EdgesTest(unittest.TestCase):
         choose = tree.read(patch.EDGE_CONTEXT_M)
         self.assertIn("if (schemeWithEarliestFailure == nil || failure < earliestFailure || "
                       "(failure == earliestFailure && rank < bestRank)) {\n", choose)
+        self.assertIn("        NSInteger rank = [[MTEdgeRoute shared] rankOfAddress:scheme.address edges:edges];\n", choose)
         discover = tree.read(patch.EDGE_DISCOVER_M)
         self.assertIn("static const NSTimeInterval MTEdgeProbeDelay = 3.0;\n", discover)
         self.assertIn("            if (![[MTEdgeRoute shared] edgesFirstForgettingBefore:NULL]) {\n"
@@ -4245,8 +4267,11 @@ class EdgesTest(unittest.TestCase):
             self.damaged(patch.EDGE_SWIFT, "PlumaEdgeConfiguration.builtInUrls, edgesFirst: false,",
                          "PlumaEdgeConfiguration.builtInUrls, edgesFirst: true,")
         with self.subTest("edges first in the choice"):
-            self.damaged(patch.EDGE_CONTEXT_M, "(edgesFirst ? 0 : 16) + (NSInteger)[edges indexOfObject:scheme.address] : (edgesFirst ? 16 : 0);",
-                         "(edgesFirst ? 16 : 0) + (NSInteger)[edges indexOfObject:scheme.address] : (edgesFirst ? 0 : 16);")
+            self.damaged(patch.EDGE_ROUTE_M, "(edgesFirst ? 0 : 16) + (NSInteger)[edges indexOfObject:address] : (edgesFirst ? 16 : 0);",
+                         "(edgesFirst ? 16 : 0) + (NSInteger)[edges indexOfObject:address] : (edgesFirst ? 0 : 16);")
+        with self.subTest("the choice without the route"):
+            self.damaged(patch.EDGE_CONTEXT_M, "        NSInteger rank = [[MTEdgeRoute shared] rankOfAddress:scheme.address edges:edges];\n",
+                         "        NSInteger rank = 0;\n")
         with self.subTest("no delay of the probe"):
             self.damaged(patch.EDGE_DISCOVER_M, "static const NSTimeInterval MTEdgeProbeDelay = 3.0;\n",
                          "static const NSTimeInterval MTEdgeProbeDelay = 0.0;\n")
@@ -4258,12 +4283,7 @@ class EdgesTest(unittest.TestCase):
         # The new files as the patch writes them.
         for rel, _ in patch.edge_files(config()):
             with self.subTest(file=rel):
-                self.tearDown()
-                tree, c = self.run_patch()
-                tree.write(rel, tree.read(rel) + "\n")
-                with self.assertRaises(patch.PatchError) as e:
-                    patch.verify(tree, c)
-                self.assertIn(pathlib.PurePath(rel).name, str(e.exception))
+                self.refused(rel, lambda text: text + "\n")
         # Another way to an edge or around the route.
         with self.subTest("socket elsewhere"):
             self.damaged(patch.EDGE_DISCOVER_M, "        if (address.websocket) {\n",
