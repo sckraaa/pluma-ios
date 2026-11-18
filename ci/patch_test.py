@@ -4159,10 +4159,11 @@ class EdgesTest(unittest.TestCase):
         for rel, text in patch.edge_files(c):
             self.assertEqual(tree.read(rel), text)
             self.assertNotIn(rel, self.files)
-        # Only the edits: each file is upstream's with them applied.
-        for rel in sorted({rel for rel, _, _ in patch.EDGE_EDITS} - {NETWORK, ACCOUNT}):
+        # Only the edits: each file is upstream's with them applied (and with those
+        # of the paths, task 113, which build on them).
+        for rel in sorted({rel for rel, _, _ in patch.EDGE_EDITS + patch.PATH_EDITS} - {NETWORK, ACCOUNT}):
             expected = self.files[rel].decode("utf-8")
-            for r, old, new in patch.EDGE_EDITS:
+            for r, old, new in patch.EDGE_EDITS + patch.PATH_EDITS:
                 if r == rel:
                     expected = expected.replace(old, new)
             self.assertEqual(tree.read(rel), expected, rel)
@@ -4175,6 +4176,7 @@ class EdgesTest(unittest.TestCase):
         choose = tree.read(patch.EDGE_CONTEXT_M)
         self.assertIn("if (schemeWithEarliestFailure == nil || failure < earliestFailure || "
                       "(failure == earliestFailure && rank < bestRank)) {\n", choose)
+        self.assertIn("        NSInteger rank = [[MTEdgeRoute shared] rankOfAddress:scheme.address edges:edges];\n", choose)
         discover = tree.read(patch.EDGE_DISCOVER_M)
         self.assertIn("static const NSTimeInterval MTEdgeProbeDelay = 3.0;\n", discover)
         self.assertIn("            if (![[MTEdgeRoute shared] edgesFirstForgettingBefore:NULL]) {\n"
@@ -4245,8 +4247,11 @@ class EdgesTest(unittest.TestCase):
             self.damaged(patch.EDGE_SWIFT, "PlumaEdgeConfiguration.builtInUrls, edgesFirst: false,",
                          "PlumaEdgeConfiguration.builtInUrls, edgesFirst: true,")
         with self.subTest("edges first in the choice"):
-            self.damaged(patch.EDGE_CONTEXT_M, "(edgesFirst ? 0 : 16) + (NSInteger)[edges indexOfObject:scheme.address] : (edgesFirst ? 16 : 0);",
-                         "(edgesFirst ? 16 : 0) + (NSInteger)[edges indexOfObject:scheme.address] : (edgesFirst ? 0 : 16);")
+            self.damaged(patch.EDGE_ROUTE_M, "(edgesFirst ? 0 : 16) + (NSInteger)[edges indexOfObject:address] : (edgesFirst ? 16 : 0);",
+                         "(edgesFirst ? 16 : 0) + (NSInteger)[edges indexOfObject:address] : (edgesFirst ? 0 : 16);")
+        with self.subTest("the choice without the route"):
+            self.damaged(patch.EDGE_CONTEXT_M, "        NSInteger rank = [[MTEdgeRoute shared] rankOfAddress:scheme.address edges:edges];\n",
+                         "        NSInteger rank = 0;\n")
         with self.subTest("no delay of the probe"):
             self.damaged(patch.EDGE_DISCOVER_M, "static const NSTimeInterval MTEdgeProbeDelay = 3.0;\n",
                          "static const NSTimeInterval MTEdgeProbeDelay = 0.0;\n")

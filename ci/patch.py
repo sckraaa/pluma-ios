@@ -115,6 +115,8 @@ NETWORK_ENGINE_DEFAULT = ("        #if os(macOS)\n"
 # Where the network code lives: what verify() scans (without the unit tests,
 # which are not in the app and carry Telegram's addresses as fixtures).
 NETWORK_DIRS = ("submodules/MtProtoKit", "submodules/TelegramCore/Sources", "submodules/TelegramVoip/Sources")
+# The headers MtProtoKit's own include, for the check that compiles the paths (task 113).
+MT_DEPENDENCY_HEADERS = "submodules/EncryptionProvider/PublicHeaders"
 
 NETWORK = "submodules/TelegramCore/Sources/Network/Network.swift"
 ACCOUNT = "submodules/TelegramCore/Sources/Account/Account.swift"
@@ -1086,7 +1088,7 @@ SIRI_PHRASES["Base"] = SIRI_PHRASES["en"]
 
 # Everything the patch reads, edits or checks: the check job fetches only
 # these (ci/fetch-upstream.sh sparse).
-UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_DIRS
+UPSTREAM_PATHS = ((VERSIONS, BAZELRC, APP_BUILD, "build-system/Make") + NETWORK_DIRS + (MT_DEPENDENCY_HEADERS,)
                   + (APP_ICON, INTRO_RESOURCES)
                   + tuple(sorted(r for r in BRAND_REPLACED if not r.startswith((APP_ICON + "/", INTRO_RESOURCES + "/"))))
                   + (APP_DELEGATE, INTRO_ANIMATIONS, INTRO_CONTROLLER, INTRO_HEADER, INTRO_TEXTURES, INTRO_SPLASH, STRINGS)
@@ -5118,6 +5120,7 @@ def verify(tree, c):
     verify_call_colors(tree)
     verify_cdn_downloads(tree, c)
     verify_edges(tree, c)
+    verify_paths(tree, c)
 
     build = tree.read(APP_BUILD)
     if "<string>Telegram</string>" in build or "<string>telegram</string>" in build:
@@ -8822,36 +8825,79 @@ API_AVAILABLE(ios(13.0), macos(10.15))
 
 EDGE_ROUTE_H_SOURCE = r'''#import <Foundation/Foundation.h>
 
+@class MTContext;
 @class MTDatacenterAddress;
+@class MTSignal;
 
-// pluma: the order between the direct addresses of the Pluma server and its
-// edges (task 109, ADR 0072 of the server repository: "Контракт клиентов",
-// items 5 and 6). The edges go last unless the server's pluma_edge puts them
-// first; the client moves to them when the direct path does not connect, or
-// goes silent twice within ten minutes, and keeps to them for sticky_s once
-// an edge has answered. All of it lives in the memory of the process: after
-// a restart the direct path is first again. One route for the process, as
-// there is one server.
+// pluma: the path to the Pluma server: the direct addresses or one of its edges (task
+// 109, ADR 0072 of the server repository), chosen by probes (task 113, ADR 0073). One
+// route for the process, as there is one server; all accounts share it.
+//
+// With probes (the gateway answers pluma.probe): a path is taken when it carried
+// 64 KiB in time, not when it answered req_pq (MTPathProbe); the search for an address
+// races the paths that way, the remembered best one first. The choice is remembered by
+// network (the country of the server's pluma_probe and the platform's fingerprint of
+// the network) in a file all processes of the app read and only the app writes, and
+// background measurements move to a clearly better path (MTPathLogic.h).
+//
+// Without probes (a gateway that closes the connection on pluma.probe), until the next
+// app configuration, the order of task 109: the edges go last unless the server's
+// pluma_edge puts them first; the client moves to them when the direct path does not
+// connect, or goes silent twice within ten minutes, and keeps to them for sticky_s once
+// an edge has answered.
 @interface MTEdgeRoute : NSObject
 
 + (MTEdgeRoute * _Nonnull)shared;
 
-// pluma_edge, or the build's order: whether the edges go first, and how long
-// the client keeps to them after moving there.
+// pluma_edge, or the build's order: whether the edges go first, and how long the client
+// keeps to them after moving there without probes.
 - (void)setEdgesFirst:(bool)edgesFirst stickySeconds:(NSTimeInterval)stickySeconds;
 
-// Whether the edges go first now; forgetBefore receives the time before
-// which the choice of an address counts no failure (the start of the
-// process, or the last change of the order).
+// Whether the edges go first now; forgetBefore receives the time before which the
+// choice of an address counts no failure (the start of the process, or the last change
+// of the path or of the order).
 - (bool)edgesFirstForgettingBefore:(int32_t * _Nullable)forgetBefore;
 
-// A connection of a transport closed. Returns whether its failure counts for
-// the choice of the next address: the first silence of the direct path does
-// not, so that it is tried again before the edges.
+// The rank of an address among those that failed as long ago, lower first; edges: the
+// edges of the datacenter in their order.
+- (NSInteger)rankOfAddress:(MTDatacenterAddress * _Nonnull)address edges:(NSArray<MTDatacenterAddress *> * _Nonnull)edges;
+
+// A connection of a transport closed. Returns whether its failure counts for the choice
+// of the next address: the first silence of a path does not, so that it is tried again.
 - (bool)transportClosedWithAddress:(MTDatacenterAddress * _Nonnull)address opened:(bool)opened silent:(bool)silent error:(bool)error;
 
 // A connection of a transport received its first valid data.
 - (void)transportReceivedValidDataWithAddress:(MTDatacenterAddress * _Nonnull)address;
+
+// The values of the server's pluma_probe (or the built-in ones) and its country.
+- (void)setProbeValues:(NSDictionary<NSString *, NSNumber *> * _Nonnull)values country:(NSString * _Nonnull)country;
+
+// The platform's fingerprint of the network in use, and whether it is a constrained
+// (low data) one.
+- (void)setNetworkFingerprint:(NSString * _Nonnull)fingerprint constrained:(bool)constrained;
+
+// The app is on the screen.
+- (void)setForeground:(bool)foreground;
+
+// A context to the server: the route probes and resets through it. storagePath: the
+// file of the memory; readOnly for a process that only reads it (an extension, a
+// supplementary account).
+- (void)attachContext:(MTContext * _Nonnull)context storagePath:(NSString * _Nonnull)storagePath readOnly:(bool)readOnly;
+
+// The search for an address of the server by probes, as MTDiscoverConnectionSignals
+// gives it: the scheme of the first path that passed; nil for the search of upstream
+// (another datacenter, a proxy of the user's, no probes).
+- (MTSignal * _Nullable)discoverSchemeWithContext:(MTContext * _Nonnull)context datacenterId:(NSInteger)datacenterId addressList:(NSArray<MTDatacenterAddress *> * _Nonnull)addressList alternatePorts:(NSArray<NSNumber *> * _Nonnull)alternatePorts media:(bool)media;
+
+// How long a request may wait without a byte before the path is measured (suspect_ms);
+// 0 where there are no measurements.
+- (NSTimeInterval)silenceSuspectSeconds;
+
+// A request of a transport has waited silenceSuspectSeconds without a byte.
+- (void)transportSuspectsSilenceWithAddress:(MTDatacenterAddress * _Nonnull)address;
+
+// Bytes a transport sent or received: a file is being transferred while they are many.
+- (void)transportMovedBytes:(NSUInteger)length;
 
 @end
 '''
@@ -8860,27 +8906,308 @@ EDGE_ROUTE_M_SOURCE = r'''#import "MTEdgeRoute.h"
 
 #import <os/lock.h>
 
+#import <MtProtoKit/MTApiEnvironment.h>
+#import <MtProtoKit/MTContext.h>
 #import <MtProtoKit/MTDatacenterAddress.h>
+#import <MtProtoKit/MTDatacenterAddressSet.h>
+#import <MtProtoKit/MTDisposable.h>
 #import <MtProtoKit/MTLogging.h>
+#import <MtProtoKit/MTQueue.h>
+#import <MtProtoKit/MTSignal.h>
+#import <MtProtoKit/MTTcpTransport.h>
+#import <MtProtoKit/MTTimer.h>
+#import <MtProtoKit/MTTransportScheme.h>
+#import "MTDiscoverConnectionSignals.h"
+#import "MTPathLogic.h"
+#import "MTPathProbe.h"
+#import "MTTcpConnection.h"
 
-// The direct path is "frozen" when a connection that opened stays silent
-// after a request until MTTcpConnection gives up on the response (12 s and
-// more); two such within ten minutes, whatever answered in between, move the
-// client to the edges. A path that freezes after its first kilobytes still
-// answers small requests, so a success between the two does not break the row.
+// Without probes (task 109): the direct path is "frozen" when a connection that opened
+// stays silent after a request until MTTcpConnection gives up on the response (12 s and
+// more); two such within ten minutes, whatever answered in between, move the client to
+// the edges. A path that freezes after its first kilobytes still answers small
+// requests, so a success between the two does not break the row. With probes the same
+// two silences of the path in use move the client off it at once.
 static const NSTimeInterval MTEdgeFreezeWindow = 10.0 * 60.0;
 static const int MTEdgeFreezesToMove = 2;
 static const NSTimeInterval MTEdgeDefaultStickySeconds = 1800.0;
 
+// The server is datacenter 1.
+static const NSInteger MTPathDatacenterId = 1;
+// A measurement this long after the first working connection of a launch.
+static const NSTimeInterval MTPathLaunchDelay = 5.0;
+// A return to the app after this long in the background counts as a launch.
+static const NSTimeInterval MTPathBackgroundLaunch = 30.0 * 60.0;
+// At most one measurement for a change of network in this time, and one for a silence.
+static const NSTimeInterval MTPathNetworkInterval = 2.0 * 60.0;
+static const NSTimeInterval MTPathSilenceInterval = 60.0;
+// A file is being transferred while the transports move this much in this time.
+static const NSTimeInterval MTPathTransferWindow = 5.0;
+static const NSUInteger MTPathTransferBytes = 128 * 1024;
+static const NSTimeInterval MTPathTransferCheck = 10.0;
+// The search of upstream retries a round that found nothing after 1 s, doubling to 15 s.
+static const NSTimeInterval MTPathRetryFrom = 1.0;
+static const NSTimeInterval MTPathRetryUpTo = 15.0;
+// Ranks of addresses: those of excluded paths after all others.
+static const NSInteger MTPathExcludedRank = 32;
+
+static NSString *MTPathOfAddress(MTDatacenterAddress *address) {
+    return address.websocket ? address.ip : MTPathDirect;
+}
+
+static NSString *MTPathAddressKey(MTDatacenterAddress *address) {
+    return [NSString stringWithFormat:@"%@|%d|%d", address.ip, (int)address.port, address.websocket ? 1 : 0];
+}
+
+static bool MTPathEqual(NSString *a, NSString *b) {
+    return (a == nil && b == nil) || (a != nil && b != nil && [a isEqualToString:b]);
+}
+
+// The paths of the server as a context has them: the direct one, then the edges in
+// their order.
+static NSArray<NSString *> *MTPathsOfAddresses(NSArray<MTDatacenterAddress *> *addresses) {
+    NSMutableArray<NSString *> *paths = [[NSMutableArray alloc] init];
+    for (MTDatacenterAddress *address in addresses) {
+        if (!address.websocket && ![paths containsObject:MTPathDirect]) {
+            [paths insertObject:MTPathDirect atIndex:0];
+        } else if (address.websocket && ![paths containsObject:address.ip]) {
+            [paths addObject:address.ip];
+        }
+    }
+    return paths;
+}
+
+// A probe the races of all contexts share: one per address at a time.
+@interface MTPathSharedProbe : NSObject
+
+@property (nonatomic, strong) NSMutableArray<MTSubscriber *> *subscribers;
+@property (nonatomic, strong) id<MTDisposable> disposable;
+@property (nonatomic) bool cancelled;
+
+@end
+
+@implementation MTPathSharedProbe
+
+@end
+
+@class MTPathRace;
+
+@interface MTEdgeRoute ()
+
+- (MTSignal *)gateSignalWithContext:(MTContext *)context datacenterId:(NSInteger)datacenterId address:(MTDatacenterAddress *)address;
+- (void)race:(MTPathRace *)race finishedWithResults:(NSArray<MTPathProbeResult *> *)results winner:(MTPathProbeResult *)winner;
+
+@end
+
+// One round of the race of a search for an address (the brief's section 3), on the
+// queue of MTTcpConnection: the tiers of MTPathRaceTiers, each started after
+// race_stagger_ms or when every path of the ones before dropped out; the first address
+// that passed is the scheme. Where none passed but one kept receiving to the deadline,
+// that one: on a very slow network nothing would pass ever.
+@interface MTPathRaceEntry : NSObject
+
+@property (nonatomic, strong) MTDatacenterAddress *address;
+@property (nonatomic) NSUInteger tier;
+@property (nonatomic) bool started;
+@property (nonatomic) bool done;
+@property (nonatomic, strong) id<MTDisposable> disposable;
+
+@end
+
+@implementation MTPathRaceEntry
+
+@end
+
+@interface MTPathRace : NSObject
+
+@end
+
+@implementation MTPathRace
+{
+    MTEdgeRoute *_route;
+    MTContext *_context;
+    NSInteger _datacenterId;
+    bool _media;
+    NSArray<MTPathRaceEntry *> *_entries;
+    NSUInteger _tiers;
+    NSUInteger _startedTiers;
+    NSTimeInterval _stagger;
+    MTSubscriber *_subscriber;
+    MTTimer *_timer;
+    NSMutableArray<MTPathProbeResult *> *_results;
+    bool _finished;
+}
+
+- (instancetype)initWithRoute:(MTEdgeRoute *)route context:(MTContext *)context datacenterId:(NSInteger)datacenterId media:(bool)media entries:(NSArray<MTPathRaceEntry *> *)entries tiers:(NSUInteger)tiers stagger:(NSTimeInterval)stagger subscriber:(MTSubscriber *)subscriber {
+    self = [super init];
+    if (self != nil) {
+        _route = route;
+        _context = context;
+        _datacenterId = datacenterId;
+        _media = media;
+        _entries = entries;
+        _tiers = tiers;
+        _stagger = stagger;
+        _subscriber = subscriber;
+        _results = [[NSMutableArray alloc] init];
+    }
+    return self;
+}
+
+- (void)start {
+    [self startNextTier];
+    if (!_finished && _startedTiers < _tiers) {
+        __weak MTPathRace *weakSelf = self;
+        _timer = [[MTTimer alloc] initWithTimeout:_stagger repeat:false completion:^{
+            __strong MTPathRace *strongSelf = weakSelf;
+            if (strongSelf != nil && !strongSelf->_finished && strongSelf->_startedTiers == 1) {
+                [strongSelf startNextTier];
+            }
+        } queue:[MTTcpConnection tcpQueue].nativeQueue];
+        [_timer start];
+    }
+}
+
+- (void)startNextTier {
+    if (_finished || _startedTiers >= _tiers) {
+        return;
+    }
+    NSUInteger tier = _startedTiers;
+    _startedTiers += 1;
+    // All of the tier count as running before the first answers: a cached answer comes
+    // at once.
+    for (MTPathRaceEntry *entry in _entries) {
+        if (entry.tier == tier) {
+            entry.started = true;
+        }
+    }
+    for (MTPathRaceEntry *entry in _entries) {
+        if (entry.tier != tier) {
+            continue;
+        }
+        __weak MTPathRace *weakSelf = self;
+        entry.disposable = [[_route gateSignalWithContext:_context datacenterId:_datacenterId address:entry.address] startWithNext:^(MTPathProbeResult *result) {
+            [[MTTcpConnection tcpQueue] dispatchOnQueue:^{
+                __strong MTPathRace *strongSelf = weakSelf;
+                [strongSelf entry:entry result:result];
+            }];
+        }];
+        if (_finished) {
+            return;
+        }
+    }
+}
+
+- (void)entry:(MTPathRaceEntry *)entry result:(MTPathProbeResult *)result {
+    if (_finished || entry.done) {
+        return;
+    }
+    entry.done = true;
+    [_results addObject:result];
+    if (result.passed || result.outcome == MTPathOutcomeUnsupported) {
+        [self finishWithWinner:result];
+        return;
+    }
+    for (MTPathRaceEntry *other in _entries) {
+        if (other.started && !other.done) {
+            return;
+        }
+    }
+    if (_startedTiers < _tiers) {
+        [self startNextTier];
+        return;
+    }
+    MTPathProbeResult *working = nil;
+    for (MTPathProbeResult *other in _results) {
+        if (other.works && (working == nil || other.scoreMs < working.scoreMs)) {
+            working = other;
+        }
+    }
+    [self finishWithWinner:working];
+}
+
+- (void)finishWithWinner:(MTPathProbeResult *)winner {
+    if (_finished) {
+        return;
+    }
+    _finished = true;
+    [_timer invalidate];
+    _timer = nil;
+    for (MTPathRaceEntry *entry in _entries) {
+        [entry.disposable dispose];
+        entry.disposable = nil;
+    }
+    [_route race:self finishedWithResults:_results winner:winner];
+    MTSubscriber *subscriber = _subscriber;
+    _subscriber = nil;
+    if (winner != nil) {
+        [subscriber putNext:[[MTTransportScheme alloc] initWithTransportClass:[MTTcpTransport class] address:winner.address media:_media]];
+    }
+    [subscriber putCompletion];
+}
+
+- (void)cancel {
+    if (!_finished) {
+        _finished = true;
+        _subscriber = nil;
+        [_timer invalidate];
+        _timer = nil;
+        for (MTPathRaceEntry *entry in _entries) {
+            [entry.disposable dispose];
+            entry.disposable = nil;
+        }
+    }
+}
+
+@end
+
 @implementation MTEdgeRoute
 {
     os_unfair_lock _lock;
+    dispatch_queue_t _queue;
+
+    // Task 109.
     bool _configuredFirst;
     NSTimeInterval _stickySeconds;
     CFAbsoluteTime _firstUntil;
     CFAbsoluteTime _forgetBefore;
     int _freezes;
     CFAbsoluteTime _lastFreeze;
+    NSString *_freezePath;
+
+    // Task 113.
+    MTPathSettings *_settings;
+    bool _unsupported;
+    NSString *_fingerprint;
+    bool _constrained;
+    NSString *_key;
+    NSUInteger _epoch;
+    NSString *_current;
+    NSString *_inUse;
+    MTPathMemory *_memory;
+    NSString *_storagePath;
+    bool _writable;
+    bool _loaded;
+    NSHashTable<MTContext *> *_contexts;
+    NSMutableDictionary<NSString *, MTPathProbeResult *> *_gatePassed;
+    NSMutableDictionary<NSString *, MTPathSharedProbe *> *_gateInFlight;
+    NSMutableSet<NSString *> *_epochFailed;
+    bool _foreground;
+    CFAbsoluteTime _backgroundSince;
+    bool _launchPending;
+    bool _probing;
+    NSString *_pendingRank;
+    NSInteger _round;
+    NSString *_winPath;
+    NSInteger _winRound;
+    CFAbsoluteTime _lastSuspect;
+    CFAbsoluteTime _lastNetworkRank;
+    NSUInteger _periodicGeneration;
+    CFAbsoluteTime _bucketStart;
+    NSUInteger _bucketBytes;
+    CFAbsoluteTime _lastHeavy;
+    NSString *_transferCandidate;
+    CFAbsoluteTime _transferSince;
 }
 
 + (MTEdgeRoute *)shared {
@@ -8896,11 +9223,21 @@ static const NSTimeInterval MTEdgeDefaultStickySeconds = 1800.0;
     self = [super init];
     if (self != nil) {
         _lock = OS_UNFAIR_LOCK_INIT;
+        _queue = dispatch_queue_create("org.mtproto.pathRoute", DISPATCH_QUEUE_SERIAL);
         _stickySeconds = MTEdgeDefaultStickySeconds;
         _forgetBefore = CFAbsoluteTimeGetCurrent();
+        _settings = [MTPathSettings builtIn];
+        _memory = [[MTPathMemory alloc] initWithDictionary:nil];
+        _contexts = [NSHashTable weakObjectsHashTable];
+        _gatePassed = [[NSMutableDictionary alloc] init];
+        _gateInFlight = [[NSMutableDictionary alloc] init];
+        _epochFailed = [[NSMutableSet alloc] init];
+        _launchPending = true;
     }
     return self;
 }
+
+#pragma mark - task 109
 
 - (void)setEdgesFirst:(bool)edgesFirst stickySeconds:(NSTimeInterval)stickySeconds {
     os_unfair_lock_lock(&_lock);
@@ -8912,11 +9249,14 @@ static const NSTimeInterval MTEdgeDefaultStickySeconds = 1800.0;
     os_unfair_lock_unlock(&_lock);
 }
 
-// Under the lock. The stay on the edges ends here: from now on the direct
-// path is first again, whatever happened to it before.
+// Under the lock. Without probes the stay on the edges ends here: from now on the
+// direct path is first again, whatever happened to it before.
 - (bool)edgesFirstNow:(CFAbsoluteTime)now {
     if (_configuredFirst) {
         return true;
+    }
+    if (!_unsupported) {
+        return false;
     }
     if (_firstUntil != 0.0) {
         if (now < _firstUntil) {
@@ -8951,43 +9291,1000 @@ static const NSTimeInterval MTEdgeDefaultStickySeconds = 1800.0;
     }
 }
 
+// Under the lock: the paths excluded in this network.
+- (NSSet<NSString *> *)excludedNow:(CFAbsoluteTime)now {
+    NSMutableSet<NSString *> *excluded = [[NSMutableSet alloc] initWithSet:_epochFailed];
+    if (_key != nil) {
+        [excluded unionSet:[_memory excludedForKey:_key now:now]];
+    }
+    return excluded;
+}
+
+- (NSInteger)rankOfAddress:(MTDatacenterAddress *)address edges:(NSArray<MTDatacenterAddress *> *)edges {
+    os_unfair_lock_lock(&_lock);
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    bool edgesFirst = [self edgesFirstNow:now];
+    NSInteger rank;
+    if (_unsupported) {
+        // Without probes: the direct addresses, then the edges in their order, or the
+        // edges first.
+        rank = address.websocket ? (edgesFirst ? 0 : 16) + (NSInteger)[edges indexOfObject:address] : (edgesFirst ? 16 : 0);
+    } else {
+        // With probes: the path in use, then the order of pluma_edge, the excluded paths last.
+        NSMutableArray<NSString *> *paths = [[NSMutableArray alloc] initWithObjects:MTPathDirect, nil];
+        for (MTDatacenterAddress *edge in edges) {
+            [paths addObject:edge.ip];
+        }
+        NSArray<NSString *> *order = MTPathOrder(paths, edgesFirst);
+        NSSet<NSString *> *excluded = [self excludedNow:now];
+        NSString *path = MTPathOfAddress(address);
+        if (_current != nil && [path isEqualToString:_current]) {
+            rank = 0;
+        } else {
+            NSUInteger index = [order indexOfObject:path];
+            rank = 1 + (index == NSNotFound ? (NSInteger)order.count : (NSInteger)index) + ([excluded containsObject:path] ? MTPathExcludedRank : 0);
+        }
+    }
+    os_unfair_lock_unlock(&_lock);
+    return rank;
+}
+
 - (bool)transportClosedWithAddress:(MTDatacenterAddress *)address opened:(bool)opened silent:(bool)silent error:(bool)error {
-    if (!error || address.websocket || !opened || !silent) {
+    if (!error || !opened || !silent) {
         return true;
     }
     os_unfair_lock_lock(&_lock);
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     bool report = true;
-    if (![self edgesFirstNow:now]) {
-        if (_freezes != 0 && now - _lastFreeze > MTEdgeFreezeWindow) {
+    bool away = false;
+    bool measure = false;
+    NSString *path = MTPathOfAddress(address);
+    if (_unsupported) {
+        if (!address.websocket && ![self edgesFirstNow:now]) {
+            if (_freezes != 0 && now - _lastFreeze > MTEdgeFreezeWindow) {
+                _freezes = 0;
+            }
+            _freezes += 1;
+            _lastFreeze = now;
+            if (_freezes >= MTEdgeFreezesToMove) {
+                if (MTLogEnabled()) {
+                    MTLog(@"[MTEdgeRoute the direct path froze %d times in a row]", _freezes);
+                }
+                [self moveToEdgesAt:now];
+            } else {
+                report = false;
+                if (MTLogEnabled()) {
+                    MTLog(@"[MTEdgeRoute the direct path froze; it is tried again first]");
+                }
+            }
+        }
+    } else {
+        // The guard of task 109 stays: the first silence of a path measures it, the
+        // second within ten minutes moves the client off it.
+        if (!MTPathEqual(_freezePath, path) || (_freezes != 0 && now - _lastFreeze > MTEdgeFreezeWindow)) {
             _freezes = 0;
         }
+        _freezePath = path;
         _freezes += 1;
         _lastFreeze = now;
         if (_freezes >= MTEdgeFreezesToMove) {
-            if (MTLogEnabled()) {
-                MTLog(@"[MTEdgeRoute the direct path froze %d times in a row]", _freezes);
-            }
-            [self moveToEdgesAt:now];
+            _freezes = 0;
+            away = true;
         } else {
             report = false;
-            if (MTLogEnabled()) {
-                MTLog(@"[MTEdgeRoute the direct path froze; it is tried again first]");
+            if (_writable && now - _lastSuspect >= MTPathSilenceInterval) {
+                _lastSuspect = now;
+                measure = true;
             }
         }
     }
     os_unfair_lock_unlock(&_lock);
+    if (away) {
+        if (MTLogEnabled()) {
+            MTLog(@"[MTEdgeRoute a path froze twice in a row]");
+        }
+        [self moveAwayFromPath:path];
+    } else if (measure) {
+        [self requestRank:@"silence"];
+    }
     return report;
 }
 
 - (void)transportReceivedValidDataWithAddress:(MTDatacenterAddress *)address {
-    if (!address.websocket) {
+    os_unfair_lock_lock(&_lock);
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    bool launch = false;
+    if (_unsupported) {
+        if (address.websocket && ![self edgesFirstNow:now]) {
+            [self moveToEdgesAt:now];
+        }
+    } else {
+        _inUse = MTPathOfAddress(address);
+        if (_writable && _launchPending && _key != nil) {
+            _launchPending = false;
+            launch = true;
+        }
+    }
+    os_unfair_lock_unlock(&_lock);
+    if (launch) {
+        __weak MTEdgeRoute *weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(MTPathLaunchDelay * NSEC_PER_SEC)), _queue, ^{
+            __strong MTEdgeRoute *strongSelf = weakSelf;
+            [strongSelf launchCheck];
+        });
+    }
+}
+
+#pragma mark - task 113: the network
+
+- (void)setProbeValues:(NSDictionary<NSString *, NSNumber *> *)values country:(NSString *)country {
+    MTPathSettings *settings = [[MTPathSettings alloc] initWithValues:values country:country];
+    os_unfair_lock_lock(&_lock);
+    bool countryChanged = ![_settings.country isEqualToString:settings.country];
+    _settings = settings;
+    // A new app configuration is a new chance for the probes.
+    _unsupported = false;
+    os_unfair_lock_unlock(&_lock);
+    if (countryChanged) {
+        [self networkChanged];
+    }
+}
+
+- (void)setNetworkFingerprint:(NSString *)fingerprint constrained:(bool)constrained {
+    os_unfair_lock_lock(&_lock);
+    bool changed = !MTPathEqual(_fingerprint, fingerprint);
+    _fingerprint = fingerprint;
+    _constrained = constrained;
+    os_unfair_lock_unlock(&_lock);
+    if (changed) {
+        [self networkChanged];
+    }
+}
+
+- (void)setForeground:(bool)foreground {
+    os_unfair_lock_lock(&_lock);
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    bool was = _foreground;
+    _foreground = foreground;
+    NSString *pending = nil;
+    bool launch = false;
+    if (!foreground) {
+        if (was) {
+            _backgroundSince = now;
+        }
+    } else if (!was) {
+        launch = _backgroundSince != 0.0 && now - _backgroundSince >= MTPathBackgroundLaunch;
+        pending = _pendingRank;
+        _pendingRank = nil;
+    }
+    os_unfair_lock_unlock(&_lock);
+    if (pending != nil) {
+        [self requestRank:pending];
+    }
+    if (launch) {
+        // A return after long in the background counts as a launch.
+        __weak MTEdgeRoute *weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(MTPathLaunchDelay * NSEC_PER_SEC)), _queue, ^{
+            __strong MTEdgeRoute *strongSelf = weakSelf;
+            [strongSelf launchCheck];
+        });
+    }
+}
+
+- (void)attachContext:(MTContext *)context storagePath:(NSString *)storagePath readOnly:(bool)readOnly {
+    os_unfair_lock_lock(&_lock);
+    [_contexts addObject:context];
+    if (!readOnly) {
+        _writable = true;
+    }
+    // The app reads the file once; the others again with each context, the app may
+    // have written it since.
+    bool load = !_loaded || !_writable;
+    _storagePath = storagePath;
+    os_unfair_lock_unlock(&_lock);
+    if (!load) {
+        return;
+    }
+    NSDictionary *dictionary = nil;
+    NSError *error = nil;
+    NSData *data = [NSData dataWithContentsOfFile:storagePath options:0 error:&error];
+    if (data != nil) {
+        id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+        if ([object isKindOfClass:[NSDictionary class]]) {
+            dictionary = object;
+        } else if (MTLogEnabled()) {
+            MTLog(@"[MTEdgeRoute the memory of paths is unreadable (%d); it starts empty]", (int)error.code);
+        }
+    } else if (!([error.domain isEqualToString:NSCocoaErrorDomain] && error.code == NSFileReadNoSuchFileError) && MTLogEnabled()) {
+        MTLog(@"[MTEdgeRoute the memory of paths cannot be read (%d); it starts empty]", (int)error.code);
+    }
+    os_unfair_lock_lock(&_lock);
+    _memory = [[MTPathMemory alloc] initWithDictionary:dictionary];
+    _loaded = true;
+    // The choice of this network is taken again from what was read.
+    _key = nil;
+    bool known = _fingerprint != nil;
+    os_unfair_lock_unlock(&_lock);
+    if (known) {
+        [self networkChanged];
+    }
+}
+
+// The country or the fingerprint changed (or became known): another key of the memory.
+- (void)networkChanged {
+    os_unfair_lock_lock(&_lock);
+    if (_fingerprint == nil || !_loaded) {
+        os_unfair_lock_unlock(&_lock);
+        return;
+    }
+    NSString *key = MTPathNetworkKey(_settings.country, _fingerprint);
+    if ([key isEqualToString:_key]) {
+        os_unfair_lock_unlock(&_lock);
+        return;
+    }
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    bool first = _key == nil;
+    _key = key;
+    _epoch += 1;
+    [_gatePassed removeAllObjects];
+    [_epochFailed removeAllObjects];
+    _freezes = 0;
+    _winPath = nil;
+    _transferCandidate = nil;
+    NSString *best = [_memory bestForKey:key now:now];
+    if (best != nil && [_memory isExcludedPath:best key:key now:now]) {
+        best = nil;
+    }
+    bool changed = !MTPathEqual(best, _current);
+    _current = best;
+    if (changed) {
+        _forgetBefore = now;
+    }
+    // The transports move at once to a remembered path; without one, when the race picks.
+    bool reset = best != nil && !MTPathEqual(best, _inUse);
+    bool active = _writable && !_unsupported;
+    bool measure = active && !first && now - _lastNetworkRank >= MTPathNetworkInterval;
+    if (measure) {
+        _lastNetworkRank = now;
+    }
+    os_unfair_lock_unlock(&_lock);
+    if (MTLogEnabled()) {
+        MTLog(@"[MTEdgeRoute network changed: %@]", best != nil ? @"a remembered path" : @"no remembered path");
+    }
+    if (reset) {
+        [self resetTransports];
+    }
+    if (!active) {
+        return;
+    }
+    // A remembered path is taken at once and checked beside it; without one, the race.
+    if (best != nil) {
+        [self gatePath:best];
+    } else {
+        [self raceAll];
+    }
+    if (measure) {
+        // After the check or the race, so that the measurement has the bandwidth alone.
+        __weak MTEdgeRoute *weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(MTPathLaunchDelay * NSEC_PER_SEC)), _queue, ^{
+            __strong MTEdgeRoute *strongSelf = weakSelf;
+            [strongSelf requestRank:@"network"];
+        });
+    }
+}
+
+#pragma mark - task 113: contexts
+
+// Under the lock: a context to probe through, without a proxy of the user's.
+- (MTContext *)probingContext {
+    for (MTContext *context in _contexts) {
+        if (context.apiEnvironment.socksProxySettings == nil) {
+            return context;
+        }
+    }
+    return nil;
+}
+
+- (NSArray<MTContext *> *)liveContexts {
+    os_unfair_lock_lock(&_lock);
+    NSArray<MTContext *> *contexts = _contexts.allObjects;
+    os_unfair_lock_unlock(&_lock);
+    return contexts;
+}
+
+- (void)resetTransports {
+    for (MTContext *context in [self liveContexts]) {
+        [context resetTransportsOfDatacenterWithId:MTPathDatacenterId];
+    }
+}
+
+// The search for an address, by the race, in every context.
+- (void)raceAll {
+    for (MTContext *context in [self liveContexts]) {
+        if (context.apiEnvironment.socksProxySettings == nil) {
+            [context transportSchemeForDatacenterWithIdRequired:MTPathDatacenterId media:false];
+        }
+    }
+}
+
+// The address of a path: an edge by its URL, the direct path by its first IPv4 address.
+- (MTDatacenterAddress *)addressOfPath:(NSString *)path context:(MTContext *)context {
+    MTDatacenterAddress *fallback = nil;
+    for (MTDatacenterAddress *address in [context addressSetForDatacenterWithId:MTPathDatacenterId].addressList) {
+        if (![MTPathOfAddress(address) isEqualToString:path]) {
+            continue;
+        }
+        if (address.websocket || !address.isIpv6) {
+            return address;
+        }
+        if (fallback == nil) {
+            fallback = address;
+        }
+    }
+    return fallback;
+}
+
+- (void)persistData:(NSData *)data {
+    if (data == nil) {
         return;
     }
     os_unfair_lock_lock(&_lock);
+    NSString *path = _storagePath;
+    os_unfair_lock_unlock(&_lock);
+    if (path == nil) {
+        return;
+    }
+    dispatch_async(_queue, ^{
+        NSError *error = nil;
+        if (![data writeToFile:path options:NSDataWritingAtomic error:&error] && MTLogEnabled()) {
+            MTLog(@"[MTEdgeRoute the memory of paths was not written (%d)]", (int)error.code);
+        }
+    });
+}
+
+// Under the lock: the file of the memory, for a process that writes it.
+- (NSData *)memoryData {
+    if (!_writable) {
+        return nil;
+    }
+    NSError *error = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:[_memory dictionary] options:0 error:&error];
+    if (data == nil && MTLogEnabled()) {
+        MTLog(@"[MTEdgeRoute the memory of paths was not serialized (%d)]", (int)error.code);
+    }
+    return data;
+}
+
+- (void)switchToPath:(NSString *)path {
+    os_unfair_lock_lock(&_lock);
+    if (MTPathEqual(_current, path)) {
+        os_unfair_lock_unlock(&_lock);
+        return;
+    }
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (![self edgesFirstNow:now]) {
-        [self moveToEdgesAt:now];
+    _current = path;
+    _forgetBefore = now;
+    _winPath = nil;
+    _transferCandidate = nil;
+    NSData *data = nil;
+    if (_key != nil && _writable) {
+        [_memory setBest:path forKey:_key now:now];
+        [_memory setSwitchedForKey:_key now:now];
+        data = [self memoryData];
+    }
+    // The transports already there (the race picked the path they took) stay.
+    bool reset = !MTPathEqual(path, _inUse);
+    os_unfair_lock_unlock(&_lock);
+    if (MTLogEnabled()) {
+        MTLog(@"[MTEdgeRoute the path is now %@]", [path isEqualToString:MTPathDirect] ? @"direct" : [NSURL URLWithString:path].host);
+    }
+    [self persistData:data];
+    if (reset) {
+        [self resetTransports];
+    }
+}
+
+// The path in use failed: the best other path that worked in this network, or the race.
+- (void)moveAwayFromPath:(NSString *)path {
+    os_unfair_lock_lock(&_lock);
+    MTContext *context = [self probingContext];
+    os_unfair_lock_unlock(&_lock);
+    NSArray<NSString *> *paths = context != nil ? MTPathsOfAddresses([context addressSetForDatacenterWithId:MTPathDatacenterId].addressList) : @[];
+    os_unfair_lock_lock(&_lock);
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    [_epochFailed addObject:path];
+    for (NSString *addressKey in _gatePassed.allKeys) {
+        if ([MTPathOfAddress(_gatePassed[addressKey].address) isEqualToString:path]) {
+            [_gatePassed removeObjectForKey:addressKey];
+        }
+    }
+    NSMutableDictionary<NSString *, NSNumber *> *scores = [[NSMutableDictionary alloc] init];
+    NSSet<NSString *> *excluded = [self excludedNow:now];
+    if (_key != nil) {
+        for (NSString *other in paths) {
+            double score = [_memory scoreOfPath:other key:_key];
+            if (![excluded containsObject:other] && [_memory passedPath:other key:_key] && !isnan(score)) {
+                scores[other] = @([_memory effectiveScore:score path:other key:_key]);
+            }
+        }
+    }
+    NSString *best = MTPathBestOf(scores, MTPathOrder(paths, [self edgesFirstNow:now]));
+    if (best == nil && MTPathEqual(_current, path)) {
+        _current = nil;
+        _forgetBefore = now;
+    }
+    bool writable = _writable;
+    os_unfair_lock_unlock(&_lock);
+    if (best != nil) {
+        [self switchToPath:best];
+        if (writable) {
+            [self gatePath:best];
+        }
+    } else {
+        [self resetTransports];
+        [self raceAll];
+    }
+}
+
+#pragma mark - task 113: probes
+
+- (MTSignal *)gateSignalWithContext:(MTContext *)context datacenterId:(NSInteger)datacenterId address:(MTDatacenterAddress *)address {
+    __weak MTEdgeRoute *weakSelf = self;
+    NSString *addressKey = MTPathAddressKey(address);
+    return [[MTSignal alloc] initWithGenerator:^id<MTDisposable>(MTSubscriber *subscriber) {
+        __strong MTEdgeRoute *strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            [subscriber putCompletion];
+            return nil;
+        }
+        os_unfair_lock_lock(&strongSelf->_lock);
+        MTPathProbeResult *cached = strongSelf->_gatePassed[addressKey];
+        NSUInteger epoch = strongSelf->_epoch;
+        MTPathSettings *settings = strongSelf->_settings;
+        MTPathSharedProbe *shared = nil;
+        bool start = false;
+        if (cached == nil) {
+            shared = strongSelf->_gateInFlight[addressKey];
+            if (shared == nil) {
+                shared = [[MTPathSharedProbe alloc] init];
+                shared.subscribers = [[NSMutableArray alloc] init];
+                strongSelf->_gateInFlight[addressKey] = shared;
+                start = true;
+            }
+            [shared.subscribers addObject:subscriber];
+        }
+        os_unfair_lock_unlock(&strongSelf->_lock);
+        if (cached != nil) {
+            [subscriber putNext:cached];
+            [subscriber putCompletion];
+            return nil;
+        }
+        if (start) {
+            id<MTDisposable> disposable = [[MTPathProbe probeWithContext:context datacenterId:datacenterId address:address down:settings.gateDown up:settings.up stall:settings.stall deadline:settings.deadline] startWithNext:^(MTPathProbeResult *result) {
+                __strong MTEdgeRoute *innerSelf = weakSelf;
+                if (innerSelf == nil) {
+                    return;
+                }
+                os_unfair_lock_lock(&innerSelf->_lock);
+                if (innerSelf->_gateInFlight[addressKey] == shared) {
+                    [innerSelf->_gateInFlight removeObjectForKey:addressKey];
+                }
+                if (result.passed && innerSelf->_epoch == epoch) {
+                    innerSelf->_gatePassed[addressKey] = result;
+                }
+                NSArray<MTSubscriber *> *subscribers = [shared.subscribers copy];
+                [shared.subscribers removeAllObjects];
+                os_unfair_lock_unlock(&innerSelf->_lock);
+                for (MTSubscriber *other in subscribers) {
+                    [other putNext:result];
+                    [other putCompletion];
+                }
+            }];
+            bool dispose = false;
+            os_unfair_lock_lock(&strongSelf->_lock);
+            if (shared.cancelled) {
+                dispose = true;
+            } else {
+                shared.disposable = disposable;
+            }
+            os_unfair_lock_unlock(&strongSelf->_lock);
+            if (dispose) {
+                [disposable dispose];
+            }
+        }
+        return [[MTBlockDisposable alloc] initWithBlock:^{
+            __strong MTEdgeRoute *innerSelf = weakSelf;
+            if (innerSelf == nil) {
+                return;
+            }
+            id<MTDisposable> toDispose = nil;
+            os_unfair_lock_lock(&innerSelf->_lock);
+            [shared.subscribers removeObject:subscriber];
+            if (shared.subscribers.count == 0 && innerSelf->_gateInFlight[addressKey] == shared) {
+                [innerSelf->_gateInFlight removeObjectForKey:addressKey];
+                shared.cancelled = true;
+                toDispose = shared.disposable;
+                shared.disposable = nil;
+            }
+            os_unfair_lock_unlock(&innerSelf->_lock);
+            [toDispose dispose];
+        }];
+    }];
+}
+
+- (MTSignal *)discoverSchemeWithContext:(MTContext *)context datacenterId:(NSInteger)datacenterId addressList:(NSArray<MTDatacenterAddress *> *)addressList alternatePorts:(NSArray<NSNumber *> *)alternatePorts media:(bool)media {
+    if (datacenterId != MTPathDatacenterId || context.apiEnvironment.socksProxySettings != nil || addressList.count == 0) {
+        return nil;
+    }
+    os_unfair_lock_lock(&_lock);
+    bool unsupported = _unsupported;
+    os_unfair_lock_unlock(&_lock);
+    if (unsupported) {
+        return nil;
+    }
+    __weak MTEdgeRoute *weakSelf = self;
+    MTSignal *roundSignal = [[[MTSignal alloc] initWithGenerator:^id<MTDisposable>(MTSubscriber *subscriber) {
+        __strong MTEdgeRoute *strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            [subscriber putCompletion];
+            return nil;
+        }
+        os_unfair_lock_lock(&strongSelf->_lock);
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        NSString *best = strongSelf->_current;
+        if (best == nil && strongSelf->_key != nil) {
+            best = [strongSelf->_memory bestForKey:strongSelf->_key now:now];
+        }
+        NSSet<NSString *> *excluded = [strongSelf excludedNow:now];
+        bool edgesFirst = [strongSelf edgesFirstNow:now];
+        NSTimeInterval stagger = strongSelf->_settings.raceStagger;
+        os_unfair_lock_unlock(&strongSelf->_lock);
+        if (best != nil && [excluded containsObject:best]) {
+            best = nil;
+        }
+        NSArray<NSArray<NSString *> *> *tiers = MTPathRaceTiers(MTPathsOfAddresses(addressList), best, edgesFirst, excluded);
+        NSMutableArray<MTPathRaceEntry *> *entries = [[NSMutableArray alloc] init];
+        NSMutableSet<NSString *> *seen = [[NSMutableSet alloc] init];
+        for (MTDatacenterAddress *address in addressList) {
+            NSString *path = MTPathOfAddress(address);
+            NSUInteger tier = 0;
+            while (tier < tiers.count && ![tiers[tier] containsObject:path]) {
+                tier += 1;
+            }
+            MTPathRaceEntry *entry = [[MTPathRaceEntry alloc] init];
+            entry.address = address;
+            entry.tier = tier;
+            [entries addObject:entry];
+            [seen addObject:MTPathAddressKey(address)];
+        }
+        // The other ports of upstream's search, for networks that filter ports, only when
+        // everything else dropped out.
+        for (MTDatacenterAddress *address in addressList) {
+            if (address.websocket || address.isIpv6) {
+                continue;
+            }
+            for (NSNumber *port in alternatePorts) {
+                MTDatacenterAddress *portAddress = [[MTDatacenterAddress alloc] initWithIp:address.ip port:(uint16_t)port.intValue preferForMedia:address.preferForMedia restrictToTcp:address.restrictToTcp cdn:address.cdn preferForProxy:address.preferForProxy secret:address.secret];
+                if ([seen containsObject:MTPathAddressKey(portAddress)]) {
+                    continue;
+                }
+                [seen addObject:MTPathAddressKey(portAddress)];
+                MTPathRaceEntry *entry = [[MTPathRaceEntry alloc] init];
+                entry.address = portAddress;
+                entry.tier = tiers.count;
+                [entries addObject:entry];
+            }
+        }
+        NSUInteger tierCount = tiers.count;
+        for (MTPathRaceEntry *entry in entries) {
+            tierCount = MAX(tierCount, entry.tier + 1);
+        }
+        MTPathRace *race = [[MTPathRace alloc] initWithRoute:strongSelf context:context datacenterId:datacenterId media:media entries:entries tiers:tierCount stagger:stagger subscriber:subscriber];
+        [race start];
+        return [[MTBlockDisposable alloc] initWithBlock:^{
+            [[MTTcpConnection tcpQueue] dispatchOnQueue:^{
+                [race cancel];
+            }];
+        }];
+    }] startOn:[MTTcpConnection tcpQueue]];
+    return [[[MTDiscoverConnectionSignals repeatSignal:roundSignal withBackoffFrom:MTPathRetryFrom upTo:MTPathRetryUpTo onQueue:[MTQueue concurrentDefaultQueue]] take:1] catch:^MTSignal *(__unused id error) {
+        return [MTSignal complete];
+    }];
+}
+
+- (void)race:(MTPathRace *)__unused race finishedWithResults:(NSArray<MTPathProbeResult *> *)results winner:(MTPathProbeResult *)winner {
+    if (winner == nil) {
+        // Every path dropped out: the network, not the paths; nothing is remembered.
+        if (MTLogEnabled()) {
+            MTLog(@"[MTEdgeRoute no path passed]");
+        }
+        return;
+    }
+    os_unfair_lock_lock(&_lock);
+    if (winner.outcome == MTPathOutcomeUnsupported) {
+        _unsupported = true;
+        os_unfair_lock_unlock(&_lock);
+        if (MTLogEnabled()) {
+            MTLog(@"[MTEdgeRoute the server does not answer probes; the order of task 109 until the next app configuration]");
+        }
+        return;
+    }
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    NSMutableSet<NSString *> *working = [[NSMutableSet alloc] init];
+    for (MTPathProbeResult *result in results) {
+        if (result.works) {
+            [working addObject:MTPathOfAddress(result.address)];
+        }
+    }
+    NSMutableSet<NSString *> *recorded = [[NSMutableSet alloc] init];
+    for (MTPathProbeResult *result in results) {
+        NSString *path = MTPathOfAddress(result.address);
+        if (!result.works) {
+            if ([working containsObject:path]) {
+                continue;
+            }
+            [_epochFailed addObject:path];
+        }
+        if (_key != nil && _writable && ![recorded containsObject:path] && (result.works || ![working containsObject:path])) {
+            [recorded addObject:path];
+            [_memory recordPath:path key:_key outcome:result.outcome scoreMs:result.scoreMs rank:false now:now badTtl:_settings.badTtl failedTtl:_settings.failedTtl];
+        }
+    }
+    NSData *data = [self memoryData];
+    os_unfair_lock_unlock(&_lock);
+    [self persistData:data];
+    [self switchToPath:MTPathOfAddress(winner.address)];
+}
+
+// A check of the remembered path beside the connection that already uses it.
+- (void)gatePath:(NSString *)path {
+    os_unfair_lock_lock(&_lock);
+    MTContext *context = [self probingContext];
+    NSUInteger epoch = _epoch;
+    os_unfair_lock_unlock(&_lock);
+    if (context == nil) {
+        return;
+    }
+    MTDatacenterAddress *address = [self addressOfPath:path context:context];
+    if (address == nil) {
+        return;
+    }
+    __weak MTEdgeRoute *weakSelf = self;
+    [[self gateSignalWithContext:context datacenterId:MTPathDatacenterId address:address] startWithNext:^(MTPathProbeResult *result) {
+        __strong MTEdgeRoute *strongSelf = weakSelf;
+        [strongSelf gateOfPath:path epoch:epoch result:result];
+    }];
+}
+
+- (void)gateOfPath:(NSString *)path epoch:(NSUInteger)epoch result:(MTPathProbeResult *)result {
+    if (result.passed) {
+        return;
+    }
+    os_unfair_lock_lock(&_lock);
+    if (_epoch != epoch) {
+        os_unfair_lock_unlock(&_lock);
+        return;
+    }
+    if (result.outcome == MTPathOutcomeUnsupported) {
+        _unsupported = true;
+        os_unfair_lock_unlock(&_lock);
+        return;
+    }
+    if (_key != nil && _writable) {
+        [_memory recordPath:path key:_key outcome:result.outcome scoreMs:result.scoreMs rank:false now:CFAbsoluteTimeGetCurrent() badTtl:_settings.badTtl failedTtl:_settings.failedTtl];
+    }
+    NSData *data = [self memoryData];
+    bool current = MTPathEqual(_current, path);
+    os_unfair_lock_unlock(&_lock);
+    [self persistData:data];
+    if (current) {
+        if (MTLogEnabled()) {
+            MTLog(@"[MTEdgeRoute the remembered path did not pass]");
+        }
+        [self moveAwayFromPath:path];
+    }
+}
+
+#pragma mark - task 113: measurements
+
+- (void)launchCheck {
+    os_unfair_lock_lock(&_lock);
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    double ranked = _key != nil ? [_memory lastRankForKey:_key] : now;
+    bool due = _key != nil && now - ranked >= _settings.rankMinInterval;
+    // Measured recently: the periodic measurements go on from that one.
+    NSTimeInterval next = MAX(ranked + _settings.reprobe - now, MTPathSilenceInterval);
+    _periodicGeneration += 1;
+    NSUInteger generation = _periodicGeneration;
+    os_unfair_lock_unlock(&_lock);
+    if (due) {
+        [self requestRank:@"launch"];
+    } else {
+        __weak MTEdgeRoute *weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(next * NSEC_PER_SEC)), _queue, ^{
+            __strong MTEdgeRoute *strongSelf = weakSelf;
+            [strongSelf periodicCheck:generation];
+        });
+    }
+}
+
+- (void)requestRank:(NSString *)reason {
+    os_unfair_lock_lock(&_lock);
+    if (!_writable || _unsupported || _key == nil) {
+        os_unfair_lock_unlock(&_lock);
+        return;
+    }
+    if (!_foreground || _probing) {
+        // In the app on the screen only, one at a time.
+        _pendingRank = reason;
+        os_unfair_lock_unlock(&_lock);
+        return;
+    }
+    MTContext *context = [self probingContext];
+    if (context == nil) {
+        os_unfair_lock_unlock(&_lock);
+        return;
+    }
+    _probing = true;
+    _round += 1;
+    NSInteger roundId = _round;
+    NSString *key = _key;
+    NSString *current = _current;
+    MTPathSettings *settings = _settings;
+    os_unfair_lock_unlock(&_lock);
+    if (MTLogEnabled()) {
+        MTLog(@"[MTEdgeRoute measuring the paths (%@)]", reason);
+    }
+    NSArray<NSString *> *paths = MTPathsOfAddresses([context addressSetForDatacenterWithId:MTPathDatacenterId].addressList);
+    // The direct path and the one in use first; the other edges after them, if needed.
+    NSMutableArray<NSString *> *first = [[NSMutableArray alloc] init];
+    for (NSString *path in paths) {
+        if ([path isEqualToString:MTPathDirect] || MTPathEqual(path, current)) {
+            [first addObject:path];
+        }
+    }
+    NSMutableArray<MTPathProbeResult *> *results = [[NSMutableArray alloc] init];
+    __weak MTEdgeRoute *weakSelf = self;
+    [self measurePaths:first context:context settings:settings results:results completion:^{
+        __strong MTEdgeRoute *strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+        MTPathProbeResult *direct = nil;
+        for (MTPathProbeResult *result in results) {
+            if (!result.address.websocket) {
+                direct = result;
+            }
+        }
+        os_unfair_lock_lock(&strongSelf->_lock);
+        bool edgesFirst = [strongSelf edgesFirstNow:CFAbsoluteTimeGetCurrent()];
+        os_unfair_lock_unlock(&strongSelf->_lock);
+        NSArray<NSString *> *participants = MTPathRankParticipants(paths, current, edgesFirst, direct != nil && direct.works, direct != nil ? direct.scoreMs : NAN, settings.edgeProbeIfDirectMs);
+        NSMutableArray<NSString *> *rest = [[NSMutableArray alloc] init];
+        for (NSString *path in participants) {
+            if (![first containsObject:path]) {
+                [rest addObject:path];
+            }
+        }
+        [strongSelf measurePaths:rest context:context settings:settings results:results completion:^{
+            __strong MTEdgeRoute *innerSelf = weakSelf;
+            [innerSelf rankFinishedWithResults:results paths:paths key:key roundId:roundId];
+        }];
+    }];
+}
+
+// One after another, so that they do not share the bandwidth they measure.
+- (void)measurePaths:(NSArray<NSString *> *)paths context:(MTContext *)context settings:(MTPathSettings *)settings results:(NSMutableArray<MTPathProbeResult *> *)results completion:(void (^)(void))completion {
+    if (paths.count == 0) {
+        completion();
+        return;
+    }
+    NSArray<NSString *> *rest = [paths subarrayWithRange:NSMakeRange(1, paths.count - 1)];
+    MTDatacenterAddress *address = [self addressOfPath:paths[0] context:context];
+    if (address == nil) {
+        [self measurePaths:rest context:context settings:settings results:results completion:completion];
+        return;
+    }
+    __weak MTEdgeRoute *weakSelf = self;
+    [[MTPathProbe probeWithContext:context datacenterId:MTPathDatacenterId address:address down:settings.rankDown up:settings.up stall:settings.stall deadline:settings.deadline] startWithNext:^(MTPathProbeResult *result) {
+        [results addObject:result];
+        dispatch_async(self->_queue, ^{
+            __strong MTEdgeRoute *strongSelf = weakSelf;
+            [strongSelf measurePaths:rest context:context settings:settings results:results completion:completion];
+        });
+    }];
+}
+
+- (bool)transferringAt:(CFAbsoluteTime)now {
+    return _lastHeavy != 0.0 && now - _lastHeavy < MTPathTransferWindow;
+}
+
+- (void)rankFinishedWithResults:(NSArray<MTPathProbeResult *> *)results paths:(NSArray<NSString *> *)paths key:(NSString *)key roundId:(NSInteger)roundId {
+    os_unfair_lock_lock(&_lock);
+    _probing = false;
+    NSString *pending = _pendingRank;
+    _pendingRank = nil;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    bool unsupported = false;
+    for (MTPathProbeResult *result in results) {
+        if (result.outcome == MTPathOutcomeUnsupported) {
+            unsupported = true;
+        }
+    }
+    if (unsupported) {
+        _unsupported = true;
+    }
+    if (unsupported || ![key isEqualToString:_key]) {
+        os_unfair_lock_unlock(&_lock);
+        if (pending != nil) {
+            [self requestRank:pending];
+        }
+        return;
+    }
+    bool anyWorks = false;
+    for (MTPathProbeResult *result in results) {
+        anyWorks = anyWorks || result.works;
+    }
+    NSMutableDictionary<NSString *, NSNumber *> *scores = [[NSMutableDictionary alloc] init];
+    if (anyWorks) {
+        // Where nothing worked, it is the network: nothing is remembered.
+        for (MTPathProbeResult *result in results) {
+            NSString *path = MTPathOfAddress(result.address);
+            [_memory recordPath:path key:key outcome:result.outcome scoreMs:result.scoreMs rank:true now:now badTtl:_settings.badTtl failedTtl:_settings.failedTtl];
+            if (result.works) {
+                scores[path] = @([_memory effectiveScore:result.scoreMs path:path key:key]);
+            }
+        }
+        [_memory setRankedForKey:key now:now];
+    }
+    bool edgesFirst = [self edgesFirstNow:now];
+    NSString *best = MTPathBestOf(scores, MTPathOrder(paths, edgesFirst));
+    NSString *current = _current;
+    NSString *target = nil;
+    NSTimeInterval again = 0.0;
+    if (best != nil && current == nil) {
+        target = best;
+    } else if (best != nil && ![best isEqualToString:current]) {
+        NSNumber *currentScore = scores[current];
+        bool previousWin = MTPathEqual(_winPath, best) && _winRound == roundId - 1;
+        MTPathSwitch decision = MTPathDecideSwitch(currentScore != nil ? currentScore.doubleValue : INFINITY, currentScore != nil, scores[best].doubleValue, previousWin, now - [_memory lastSwitchForKey:key], [self transferringAt:now], 0.0, _settings);
+        switch (decision) {
+            case MTPathSwitchNow:
+                target = best;
+                break;
+            case MTPathSwitchConfirm:
+                _winPath = best;
+                _winRound = roundId;
+                again = _settings.confirm;
+                break;
+            case MTPathSwitchWaitDwell:
+                _winPath = best;
+                _winRound = roundId;
+                again = MAX([_memory lastSwitchForKey:key] + _settings.minDwell - now, 1.0);
+                break;
+            case MTPathSwitchWaitTransfer:
+                _transferCandidate = best;
+                _transferSince = now;
+                break;
+            case MTPathSwitchStay:
+                _winPath = nil;
+                break;
+        }
+    } else {
+        _winPath = nil;
+    }
+    NSData *data = [self memoryData];
+    _periodicGeneration += 1;
+    NSUInteger generation = _periodicGeneration;
+    NSTimeInterval reprobe = _settings.reprobe;
+    bool transfer = _transferCandidate != nil;
+    os_unfair_lock_unlock(&_lock);
+    [self persistData:data];
+    __weak MTEdgeRoute *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(reprobe * NSEC_PER_SEC)), _queue, ^{
+        __strong MTEdgeRoute *strongSelf = weakSelf;
+        [strongSelf periodicCheck:generation];
+    });
+    if (again > 0.0) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(again * NSEC_PER_SEC)), _queue, ^{
+            __strong MTEdgeRoute *strongSelf = weakSelf;
+            [strongSelf requestRank:@"confirm"];
+        });
+    }
+    if (transfer) {
+        [self scheduleTransferCheck];
+    }
+    if (target != nil) {
+        [self switchToPath:target];
+    }
+    if (pending != nil) {
+        [self requestRank:pending];
+    }
+}
+
+- (void)scheduleTransferCheck {
+    __weak MTEdgeRoute *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(MTPathTransferCheck * NSEC_PER_SEC)), _queue, ^{
+        __strong MTEdgeRoute *strongSelf = weakSelf;
+        [strongSelf transferCheck];
+    });
+}
+
+// A switch waits for a transfer of a file, at most MTPathTransferWait.
+- (void)transferCheck {
+    os_unfair_lock_lock(&_lock);
+    NSString *candidate = _transferCandidate;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    bool wait = candidate != nil && [self transferringAt:now] && now - _transferSince < MTPathTransferWait;
+    if (candidate != nil && !wait) {
+        _transferCandidate = nil;
+    }
+    os_unfair_lock_unlock(&_lock);
+    if (candidate == nil) {
+        return;
+    }
+    if (wait) {
+        [self scheduleTransferCheck];
+    } else {
+        [self switchToPath:candidate];
+    }
+}
+
+- (void)periodicCheck:(NSUInteger)generation {
+    os_unfair_lock_lock(&_lock);
+    bool current = generation == _periodicGeneration;
+    bool lowPower = false;
+    if (@available(iOS 9.0, macOS 12.0, *)) {
+        lowPower = [NSProcessInfo processInfo].lowPowerModeEnabled;
+    }
+    // No periodic measurements in the background or in the modes that save data or power.
+    bool run = current && _foreground && !_constrained && !lowPower;
+    NSTimeInterval reprobe = _settings.reprobe;
+    os_unfair_lock_unlock(&_lock);
+    if (!current) {
+        return;
+    }
+    if (run) {
+        [self requestRank:@"periodic"];
+    } else {
+        __weak MTEdgeRoute *weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(reprobe * NSEC_PER_SEC)), _queue, ^{
+            __strong MTEdgeRoute *strongSelf = weakSelf;
+            [strongSelf periodicCheck:generation];
+        });
+    }
+}
+
+- (NSTimeInterval)silenceSuspectSeconds {
+    os_unfair_lock_lock(&_lock);
+    NSTimeInterval result = _writable && !_unsupported ? _settings.suspect : 0.0;
+    os_unfair_lock_unlock(&_lock);
+    return result;
+}
+
+- (void)transportSuspectsSilenceWithAddress:(MTDatacenterAddress *)__unused address {
+    os_unfair_lock_lock(&_lock);
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    bool measure = _writable && !_unsupported && now - _lastSuspect >= MTPathSilenceInterval;
+    if (measure) {
+        _lastSuspect = now;
+    }
+    os_unfair_lock_unlock(&_lock);
+    if (measure) {
+        [self requestRank:@"suspect"];
+    }
+}
+
+- (void)transportMovedBytes:(NSUInteger)length {
+    os_unfair_lock_lock(&_lock);
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - _bucketStart >= MTPathTransferWindow) {
+        _bucketStart = now;
+        _bucketBytes = 0;
+    }
+    _bucketBytes += length;
+    if (_bucketBytes >= MTPathTransferBytes) {
+        _lastHeavy = now;
     }
     os_unfair_lock_unlock(&_lock);
 }
@@ -9141,12 +10438,13 @@ EDGE_CHOOSE_OLD = src(" " * 8, """
 """)
 
 EDGE_CHOOSE_NEW = src(" " * 8, """
-    // pluma: the edges of the Pluma server (task 109, MTEdgeRoute). Of the addresses
-    // that failed as long ago (or never), the direct ones go before the edges and the
-    // edges in their order, unless the edges go first now; failures before the last
-    // change of that order count as none. No edge with a proxy of the user's.
+    // pluma: the path to the Pluma server (tasks 109 and 113, MTEdgeRoute). Of the
+    // addresses that failed as long ago (or never), the route's rank decides: the path in
+    // use first, then the direct ones before the edges and the edges in their order,
+    // unless the edges go first now; failures before the last change of the path or of
+    // that order count as none. No edge with a proxy of the user's.
     int32_t forgetBefore = 0;
-    bool edgesFirst = [[MTEdgeRoute shared] edgesFirstForgettingBefore:&forgetBefore];
+    [[MTEdgeRoute shared] edgesFirstForgettingBefore:&forgetBefore];
     bool proxy = _apiEnvironment.socksProxySettings != nil;
     NSMutableArray<MTDatacenterAddress *> *edges = [[NSMutableArray alloc] init];
     for (MTTransportScheme *scheme in schemes) {
@@ -9162,7 +10460,7 @@ EDGE_CHOOSE_NEW = src(" " * 8, """
         if (scheme.address.websocket && proxy) {
             continue;
         }
-        NSInteger rank = scheme.address.websocket ? (edgesFirst ? 0 : 16) + (NSInteger)[edges indexOfObject:scheme.address] : (edgesFirst ? 16 : 0);
+        NSInteger rank = [[MTEdgeRoute shared] rankOfAddress:scheme.address edges:edges];
         [self _withTransportSchemeStatsForDatacenterId:datacenterId transportScheme:scheme process:^MTTransportSchemeStats *(MTTransportSchemeStats *current) {
             int32_t failure = current.lastFailureTimestamp < forgetBefore ? 0 : current.lastFailureTimestamp;
             if (schemeWithEarliestFailure == nil || failure < earliestFailure || (failure == earliestFailure && rank < bestRank)) {
@@ -9459,19 +10757,1623 @@ EDGE_EDITS = (
 
 # What would reach an edge another way, or the direct path through one: the
 # WebSocket connection only in MTTcpConnection, the route only where the
-# edits ask it, the marks of the edges only where the edits put them.
+# edits ask it (those of the paths, task 113, among them), the marks of the
+# edges only where the edits put them.
 EDGE_GUARDS = (
     (EDGE_CONNECTION_M, "MTWebSocketConnection alloc]", 1),
     (EDGE_CONNECTION_M, "_scheme.address.websocket", 1),
-    (EDGE_CONTEXT_M, "MTEdgeRoute shared]", 2),
-    (EDGE_CONTEXT_M, ".websocket", 4),
-    (EDGE_TRANSPORT_M, "MTEdgeRoute shared]", 2),
-    (EDGE_DISCOVER_M, "MTEdgeRoute shared]", 1),
+    (EDGE_CONTEXT_M, "MTEdgeRoute shared]", 7),
+    (EDGE_CONTEXT_M, ".websocket", 3),
+    (EDGE_TRANSPORT_M, "MTEdgeRoute shared]", 4),
+    (EDGE_DISCOVER_M, "MTEdgeRoute shared]", 2),
     (EDGE_DISCOVER_M, ".websocket", 3),
     (EDGE_ADDRESS_M, "_websocket", 5),
     (NETWORK, "plumaEdge", 3),
     (ACCOUNT, "updatePlumaEdge(", 1),
 )
+
+
+
+# --- paths chosen by probes ---------------------------------------------------
+# Task 113 (ADR 0073 of the server repository, the brief's "Контракт пробы"):
+# the server's gateway answers an unencrypted pluma.probe with as many bytes
+# as asked, and a path from Russia to the server's address passes the first
+# ~16 KB of a connection and then goes silent. So a path is taken when it has
+# carried 64 KiB in time, not when it answered req_pq: the search for an
+# address races the direct path and the edges that way (MTEdgeRoute,
+# MTPathProbe), the remembered best path of this network first. The memory of
+# paths is a file next to the accounts, keyed by the country of the server's
+# pluma_probe and the fingerprint of the network (PlumaPaths.swift); the app
+# writes it, extensions read it. Background measurements of 192 KiB move to a
+# clearly better path (MTPathLogic: the score, the hysteresis). A gateway that
+# closes the connection on pluma.probe turns it all off until the next app
+# configuration: the order of task 109. A proxy of the user's turns the
+# probes off, as it turns off the edges.
+#
+# All of it belongs to the edges: a build without PLUMA_EDGE_WS_URLS has one
+# path, and none of this.
+
+PATH_LOGIC_H = MT_SOURCES + "MTPathLogic.h"
+PATH_LOGIC_M = MT_SOURCES + "MTPathLogic.m"
+PATH_PROBE_H = MT_SOURCES + "MTPathProbe.h"
+PATH_PROBE_M = MT_SOURCES + "MTPathProbe.m"
+PATH_PROBE_SWIFT = "submodules/TelegramCore/Sources/Network/PlumaProbe.swift"
+PATH_PATHS_SWIFT = "submodules/TelegramCore/Sources/Network/PlumaPaths.swift"
+
+PATH_LOGIC_H_SOURCE = r'''#import <Foundation/Foundation.h>
+
+// pluma: the rules of the choice of a path to the Pluma server (task 113, ADR 0073 of
+// the server repository), without sockets, timers or files, so that they can be
+// checked on their own. A path is the direct one (MTPathDirect: every address of the
+// server that is not an edge) or an edge, by its wss:// URL.
+//
+// The probe (the brief's "Контракт пробы"): after res_pq the client sends the
+// unencrypted pluma.probe#5c316d30 nonce:int128 down:int pad:bytes, and the gateway
+// answers at once with ceil(down / 16384) messages
+// pluma.probeData#6ab3780b nonce:int128 seq:int total:int server_ms:long pad:bytes,
+// seq 0 to total - 1, 16384 bytes of pad each but the last; down is clamped to
+// [16384, 524288] and the pads add up to it.
+
+extern NSString * _Nonnull const MTPathDirect;
+
+typedef NS_ENUM(int32_t, MTPathOutcome) {
+    // Everything arrived.
+    MTPathOutcomeOk = 0,
+    // Not everything by the deadline, but the bytes never stopped.
+    MTPathOutcomeSlow = 1,
+    // The path gave bytes, then none for the stall time, before everything arrived.
+    MTPathOutcomeFrozen = 2,
+    // No connection, a close, nothing by the deadline, or a wrong answer.
+    MTPathOutcomeFailed = 3,
+    // A close right after a valid res_pq with not one byte of the answer: a gateway
+    // without probes, or one that refused this one. The path is not judged.
+    MTPathOutcomeUnsupported = 4
+};
+
+extern const uint32_t MTPathProbeConstructor;
+extern const uint32_t MTPathProbeDataConstructor;
+extern const int32_t MTPathProbeChunk;
+extern const int32_t MTPathProbeMinDown;
+extern const int32_t MTPathProbeMaxDown;
+extern const int32_t MTPathProbeMaxUp;
+
+int32_t MTPathProbeClampedDown(int32_t down);
+int32_t MTPathProbeTotal(int32_t down);
+
+// The unencrypted message pluma.probe: auth_key_id 0, messageId, the length, the object.
+NSData * _Nonnull MTPathProbeMessage(const uint8_t * _Nonnull nonce, int32_t down, NSData * _Nonnull pad, int64_t messageId);
+
+// Whether message is the unencrypted res_pq answering the nonce.
+bool MTPathIsResPQ(NSData * _Nonnull message, const uint8_t * _Nonnull nonce);
+
+// 1: message is a pluma.probeData of the nonce, with its seq, total and the length of
+// its pad; 0: it is not a pluma.probeData; -1: a malformed one, or of another nonce.
+int MTPathProbeDataParse(NSData * _Nonnull message, const uint8_t * _Nonnull nonce, int32_t * _Nonnull seq, int32_t * _Nonnull total, int32_t * _Nonnull padLength);
+
+// The values of the server's pluma_probe (the brief's section 7), or the built-in ones;
+// times in seconds.
+@interface MTPathSettings : NSObject
+
+@property (nonatomic, readonly) int32_t gateDown;
+@property (nonatomic, readonly) int32_t rankDown;
+@property (nonatomic, readonly) int32_t up;
+@property (nonatomic, readonly) double stall;
+@property (nonatomic, readonly) double deadline;
+@property (nonatomic, readonly) double suspect;
+@property (nonatomic, readonly) double reprobe;
+@property (nonatomic, readonly) double rankMinInterval;
+@property (nonatomic, readonly) double minDwell;
+@property (nonatomic, readonly) double switchRatio;
+@property (nonatomic, readonly) double switchRatioNow;
+@property (nonatomic, readonly) double edgeProbeIfDirectMs;
+@property (nonatomic, readonly) double badTtl;
+@property (nonatomic, readonly) double failedTtl;
+@property (nonatomic, readonly) double raceStagger;
+@property (nonatomic, readonly) double confirm;
+// The country of the client's address, two letters, or empty until the server says.
+@property (nonatomic, strong, readonly) NSString * _Nonnull country;
+
++ (MTPathSettings * _Nonnull)builtIn;
+
+// values: the numbers of pluma_probe by their JSON names, checked by the caller; a
+// missing one is the built-in value.
+- (instancetype _Nonnull)initWithValues:(NSDictionary<NSString *, NSNumber *> * _Nonnull)values country:(NSString * _Nonnull)country;
+
+@end
+
+// The course of one probe on one connection: req_pq_multi, res_pq, pluma.probe and the
+// answer. Times are seconds on one clock; the caller feeds the events in order.
+@interface MTPathProbeTracker : NSObject
+
+@property (nonatomic, readonly) bool finished;
+@property (nonatomic, readonly) MTPathOutcome outcome;
+// From req_pq_multi to res_pq, in milliseconds; negative before res_pq.
+@property (nonatomic, readonly) double rttMs;
+// The speed of the answer, in bytes per second; 0 when unknown.
+@property (nonatomic, readonly) double bytesPerSecond;
+// The bytes of pad that arrived.
+@property (nonatomic, readonly) int64_t receivedBytes;
+// res_pq arrived and pluma.probe is still to be written.
+@property (nonatomic, readonly) bool needsProbe;
+
+// connectLimit: how long res_pq may take from the start.
+- (instancetype _Nonnull)initWithNonce:(const uint8_t * _Nonnull)nonce down:(int32_t)down stall:(double)stall deadline:(double)deadline connectLimit:(double)connectLimit startedAt:(double)now;
+
+- (void)requestSentAt:(double)now;
+- (void)probeWrittenAt:(double)now;
+// Any byte that arrived on the connection.
+- (void)bytesAt:(double)now;
+// A whole message of the transport; returns whether the probe is over.
+- (bool)message:(NSData * _Nonnull)message at:(double)now;
+- (void)closedAt:(double)now;
+// The timers: returns whether the probe is over.
+- (bool)checkAt:(double)now;
+
+// rtt + 256 KiB at the measured speed, in milliseconds (the brief's section 4);
+// infinity without a speed.
+- (double)scoreMs;
+
+@end
+
+double MTPathScoreMs(double rttMs, double bytesPerSecond);
+
+// The key of a network in the memory: a hash of the country and the platform's
+// fingerprint of the network; neither is kept as it is.
+NSString * _Nonnull MTPathNetworkKey(NSString * _Nonnull country, NSString * _Nonnull fingerprint);
+
+// paths: the direct path and the edges in the order of the build or the server;
+// edgesFirst: pluma_edge puts the edges first. The order of the start and of ties.
+NSArray<NSString *> * _Nonnull MTPathOrder(NSArray<NSString *> * _Nonnull paths, bool edgesFirst);
+
+// The groups of a race, each started after the one before it (race_stagger_ms, or at
+// once when every path of it dropped out): the remembered best path alone, or without
+// one, the first group of the order (the edges or the direct path); then the other
+// paths; last, the paths excluded in this network.
+NSArray<NSArray<NSString *> *> * _Nonnull MTPathRaceTiers(NSArray<NSString *> * _Nonnull paths, NSString * _Nullable best, bool edgesFirst, NSSet<NSString *> * _Nonnull excluded);
+
+// The paths of a background measurement: the direct one and the current one always;
+// the other edges only where the edges go first, or where the direct path did not pass
+// or scored worse than edgeIfDirectMs.
+NSArray<NSString *> * _Nonnull MTPathRankParticipants(NSArray<NSString *> * _Nonnull paths, NSString * _Nullable current, bool edgesFirst, bool directPassed, double directScoreMs, double edgeIfDirectMs);
+
+// The path of the lowest score; scores within 30% of it are a tie, which the order
+// decides.
+NSString * _Nullable MTPathBestOf(NSDictionary<NSString *, NSNumber *> * _Nonnull scores, NSArray<NSString *> * _Nonnull order);
+
+typedef NS_ENUM(int32_t, MTPathSwitch) {
+    MTPathSwitchStay = 0,
+    // A first win by switch_ratio: measure again after confirm_s.
+    MTPathSwitchConfirm = 1,
+    MTPathSwitchNow = 2,
+    // A win, but the last switch was less than min_dwell_s ago.
+    MTPathSwitchWaitDwell = 3,
+    // A win, but a file is being transferred: up to two minutes.
+    MTPathSwitchWaitTransfer = 4
+};
+
+extern const double MTPathTransferWait;
+
+// The hysteresis of the brief's section 4 for one candidate against the current path.
+// currentPassed: the current path passed the same measurement; previousWin: the
+// candidate won by switch_ratio in the measurement just before.
+MTPathSwitch MTPathDecideSwitch(double currentScoreMs, bool currentPassed, double candidateScoreMs, bool previousWin, double sinceSwitch, bool transferring, double transferWaited, MTPathSettings * _Nonnull settings);
+
+// The memory of the paths by network (the brief's section 5): up to 16 networks, the
+// least recently used goes first; an entry not written for 7 days is not fresh. The
+// dictionary is what the file keeps.
+@interface MTPathMemory : NSObject
+
+- (instancetype _Nonnull)initWithDictionary:(NSDictionary * _Nullable)dictionary;
+- (NSDictionary * _Nonnull)dictionary;
+
+- (NSString * _Nullable)bestForKey:(NSString * _Nonnull)key now:(double)now;
+- (void)setBest:(NSString * _Nonnull)path forKey:(NSString * _Nonnull)key now:(double)now;
+- (double)lastSwitchForKey:(NSString * _Nonnull)key;
+- (void)setSwitchedForKey:(NSString * _Nonnull)key now:(double)now;
+- (double)lastRankForKey:(NSString * _Nonnull)key;
+- (void)setRankedForKey:(NSString * _Nonnull)key now:(double)now;
+
+// A result of a probe: frozen excludes the path from races for badTtl, failed for
+// failedTtl, a pass of a measurement (rank) lifts both.
+- (void)recordPath:(NSString * _Nonnull)path key:(NSString * _Nonnull)key outcome:(MTPathOutcome)outcome scoreMs:(double)scoreMs rank:(bool)rank now:(double)now badTtl:(double)badTtl failedTtl:(double)failedTtl;
+- (bool)isExcludedPath:(NSString * _Nonnull)path key:(NSString * _Nonnull)key now:(double)now;
+- (NSSet<NSString *> * _Nonnull)excludedForKey:(NSString * _Nonnull)key now:(double)now;
+// The last score of the path in this network, NAN without one.
+- (double)scoreOfPath:(NSString * _Nonnull)path key:(NSString * _Nonnull)key;
+- (bool)passedPath:(NSString * _Nonnull)path key:(NSString * _Nonnull)key;
+// The score twice as high where 2 of the last 4 probes of the path were not ok.
+- (double)effectiveScore:(double)scoreMs path:(NSString * _Nonnull)path key:(NSString * _Nonnull)key;
+
+@end
+'''
+
+PATH_LOGIC_M_SOURCE = r'''#import "MTPathLogic.h"
+
+#import <CommonCrypto/CommonDigest.h>
+#import <math.h>
+
+NSString *const MTPathDirect = @"direct";
+
+const uint32_t MTPathProbeConstructor = 0x5c316d30;
+const uint32_t MTPathProbeDataConstructor = 0x6ab3780b;
+const int32_t MTPathProbeChunk = 16384;
+const int32_t MTPathProbeMinDown = 16384;
+const int32_t MTPathProbeMaxDown = 524288;
+const int32_t MTPathProbeMaxUp = 65536;
+
+// res_pq#05162463 in an unencrypted message: auth_key_id, msg_id, length, then the
+// constructor and the nonce at 24; with pq, server_nonce and the fingerprints it is
+// at least 84 bytes long, as MtProtoKit's search for an address checks it.
+static const NSUInteger MTPathResPQMinLength = 84;
+// auth_key_id, msg_id, message_data_length.
+static const NSUInteger MTPathHeaderLength = 20;
+// pluma.probeData before its pad: constructor, nonce, seq, total, server_ms.
+static const NSUInteger MTPathProbeDataFixed = 4 + 16 + 4 + 4 + 8;
+// The answer of 256 KiB the score is the time of (the brief's section 4).
+static const double MTPathScoreBytes = 256.0 * 1024.0;
+// Scores within this ratio of the best are a tie.
+static const double MTPathTieRatio = 1.3;
+static const NSUInteger MTPathMaxNetworks = 16;
+static const double MTPathFreshness = 7.0 * 24.0 * 60.0 * 60.0;
+static const int MTPathHistoryLength = 4;
+const double MTPathTransferWait = 120.0;
+
+int32_t MTPathProbeClampedDown(int32_t down) {
+    if (down < MTPathProbeMinDown) {
+        return MTPathProbeMinDown;
+    }
+    if (down > MTPathProbeMaxDown) {
+        return MTPathProbeMaxDown;
+    }
+    return down;
+}
+
+int32_t MTPathProbeTotal(int32_t down) {
+    int32_t clamped = MTPathProbeClampedDown(down);
+    return (clamped + MTPathProbeChunk - 1) / MTPathProbeChunk;
+}
+
+static void MTPathAppendInt32(NSMutableData *data, uint32_t value) {
+    uint8_t bytes[4] = { (uint8_t)value, (uint8_t)(value >> 8), (uint8_t)(value >> 16), (uint8_t)(value >> 24) };
+    [data appendBytes:bytes length:4];
+}
+
+static uint32_t MTPathReadInt32(const uint8_t *bytes) {
+    return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) | ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
+}
+
+// The size of a TL bytes value: its length prefix, the data and zeros to a multiple of 4.
+static NSUInteger MTPathTLBytesSize(NSUInteger prefix, NSUInteger length) {
+    return (prefix + length + 3) & ~(NSUInteger)3;
+}
+
+NSData *MTPathProbeMessage(const uint8_t *nonce, int32_t down, NSData *pad, int64_t messageId) {
+    NSUInteger prefix = pad.length < 254 ? 1 : 4;
+    NSUInteger bodyLength = 4 + 16 + 4 + MTPathTLBytesSize(prefix, pad.length);
+    NSMutableData *data = [[NSMutableData alloc] initWithCapacity:MTPathHeaderLength + bodyLength];
+    uint8_t zero[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+    [data appendBytes:zero length:8];
+    MTPathAppendInt32(data, (uint32_t)((uint64_t)messageId & 0xffffffffu));
+    MTPathAppendInt32(data, (uint32_t)((uint64_t)messageId >> 32));
+    MTPathAppendInt32(data, (uint32_t)bodyLength);
+    MTPathAppendInt32(data, MTPathProbeConstructor);
+    [data appendBytes:nonce length:16];
+    MTPathAppendInt32(data, (uint32_t)down);
+    if (prefix == 1) {
+        uint8_t length = (uint8_t)pad.length;
+        [data appendBytes:&length length:1];
+    } else {
+        uint8_t length[4] = { 254, (uint8_t)pad.length, (uint8_t)(pad.length >> 8), (uint8_t)(pad.length >> 16) };
+        [data appendBytes:length length:4];
+    }
+    [data appendData:pad];
+    NSUInteger padding = MTPathTLBytesSize(prefix, pad.length) - prefix - pad.length;
+    [data appendBytes:zero length:padding];
+    return data;
+}
+
+bool MTPathIsResPQ(NSData *message, const uint8_t *nonce) {
+    if (message.length < MTPathResPQMinLength) {
+        return false;
+    }
+    const uint8_t *bytes = message.bytes;
+    uint8_t zero[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+    uint8_t resPQ[4] = { 0x63, 0x24, 0x16, 0x05 };
+    return memcmp(bytes, zero, 8) == 0 && memcmp(bytes + 20, resPQ, 4) == 0 && memcmp(bytes + 24, nonce, 16) == 0;
+}
+
+int MTPathProbeDataParse(NSData *message, const uint8_t *nonce, int32_t *seq, int32_t *total, int32_t *padLength) {
+    if (message.length < MTPathHeaderLength + 4) {
+        return 0;
+    }
+    const uint8_t *bytes = message.bytes;
+    uint8_t zero[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+    if (memcmp(bytes, zero, 8) != 0 || MTPathReadInt32(bytes + MTPathHeaderLength) != MTPathProbeDataConstructor) {
+        return 0;
+    }
+    // message_data_length is the object exactly; bytes after it are the transport's.
+    NSUInteger length = MTPathReadInt32(bytes + 16);
+    if (length > message.length - MTPathHeaderLength || length < MTPathProbeDataFixed + 4) {
+        return -1;
+    }
+    const uint8_t *body = bytes + MTPathHeaderLength;
+    if (memcmp(body + 4, nonce, 16) != 0) {
+        return -1;
+    }
+    const uint8_t *pad = body + MTPathProbeDataFixed;
+    NSUInteger prefix;
+    NSUInteger padBytes;
+    if (pad[0] < 254) {
+        prefix = 1;
+        padBytes = pad[0];
+    } else if (pad[0] == 254) {
+        prefix = 4;
+        padBytes = (NSUInteger)pad[1] | ((NSUInteger)pad[2] << 8) | ((NSUInteger)pad[3] << 16);
+    } else {
+        return -1;
+    }
+    if (MTPathProbeDataFixed + MTPathTLBytesSize(prefix, padBytes) != length || padBytes > (NSUInteger)MTPathProbeChunk) {
+        return -1;
+    }
+    *seq = (int32_t)MTPathReadInt32(body + 20);
+    *total = (int32_t)MTPathReadInt32(body + 24);
+    *padLength = (int32_t)padBytes;
+    return 1;
+}
+
+@implementation MTPathSettings
+
++ (MTPathSettings *)builtIn {
+    return [[MTPathSettings alloc] initWithValues:@{} country:@""];
+}
+
+static double MTPathValue(NSDictionary<NSString *, NSNumber *> *values, NSString *key, double builtIn) {
+    NSNumber *value = values[key];
+    return value != nil ? value.doubleValue : builtIn;
+}
+
+- (instancetype)initWithValues:(NSDictionary<NSString *, NSNumber *> *)values country:(NSString *)country {
+    self = [super init];
+    if (self != nil) {
+        // The defaults of the brief's section 7, the same as the server's.
+        _gateDown = (int32_t)MTPathValue(values, @"gate_down", 65536);
+        _rankDown = (int32_t)MTPathValue(values, @"rank_down", 196608);
+        _up = (int32_t)MTPathValue(values, @"up", 20480);
+        _stall = MTPathValue(values, @"stall_ms", 1500) / 1000.0;
+        _deadline = MTPathValue(values, @"deadline_ms", 6000) / 1000.0;
+        _suspect = MTPathValue(values, @"suspect_ms", 4000) / 1000.0;
+        _reprobe = MTPathValue(values, @"reprobe_s", 21600);
+        _rankMinInterval = MTPathValue(values, @"rank_min_interval_s", 1800);
+        _minDwell = MTPathValue(values, @"min_dwell_s", 600);
+        _switchRatio = MTPathValue(values, @"switch_ratio", 0.7);
+        _switchRatioNow = MTPathValue(values, @"switch_ratio_now", 0.25);
+        _edgeProbeIfDirectMs = MTPathValue(values, @"edge_probe_if_direct_ms", 1500);
+        _badTtl = MTPathValue(values, @"bad_ttl_s", 86400);
+        _failedTtl = MTPathValue(values, @"failed_ttl_s", 300);
+        _raceStagger = MTPathValue(values, @"race_stagger_ms", 800) / 1000.0;
+        _confirm = MTPathValue(values, @"confirm_s", 60);
+        _country = country;
+    }
+    return self;
+}
+
+@end
+
+@implementation MTPathProbeTracker
+{
+    uint8_t _nonce[16];
+    int32_t _down;
+    int32_t _total;
+    double _stall;
+    double _deadline;
+    double _connectLimit;
+    double _startedAt;
+    double _requestSentAt;
+    double _resPQAt;
+    double _probeWrittenAt;
+    double _lastByteAt;
+    double _firstDataAt;
+    double _lastDataAt;
+    int64_t _bytesAfterFirst;
+    int32_t _nextSeq;
+    bool _answerStarted;
+}
+
+- (instancetype)initWithNonce:(const uint8_t *)nonce down:(int32_t)down stall:(double)stall deadline:(double)deadline connectLimit:(double)connectLimit startedAt:(double)now {
+    self = [super init];
+    if (self != nil) {
+        memcpy(_nonce, nonce, 16);
+        _down = MTPathProbeClampedDown(down);
+        _total = MTPathProbeTotal(down);
+        _stall = stall;
+        _deadline = deadline;
+        _connectLimit = connectLimit;
+        _startedAt = now;
+        _requestSentAt = -1.0;
+        _resPQAt = -1.0;
+        _probeWrittenAt = -1.0;
+        _lastByteAt = -1.0;
+        _firstDataAt = -1.0;
+        _lastDataAt = -1.0;
+        _rttMs = -1.0;
+        _outcome = MTPathOutcomeFailed;
+    }
+    return self;
+}
+
+- (void)finishWith:(MTPathOutcome)outcome at:(double)now {
+    if (_finished) {
+        return;
+    }
+    _finished = true;
+    _outcome = outcome;
+    _needsProbe = false;
+    // The speed of what arrived: the bytes after the first message over the time to
+    // the last one; with one message, its bytes over the time after the round trip.
+    if (_bytesAfterFirst > 0 && _lastDataAt > _firstDataAt) {
+        _bytesPerSecond = (double)_bytesAfterFirst / (_lastDataAt - _firstDataAt);
+    } else if (_receivedBytes > 0 && _probeWrittenAt >= 0.0) {
+        double elapsed = MAX(_lastDataAt - _probeWrittenAt - MAX(_rttMs, 0.0) / 1000.0, 0.001);
+        _bytesPerSecond = (double)_receivedBytes / elapsed;
+    }
+}
+
+- (void)requestSentAt:(double)now {
+    if (_requestSentAt < 0.0) {
+        _requestSentAt = now;
+    }
+}
+
+- (void)probeWrittenAt:(double)now {
+    if (_finished || !_needsProbe) {
+        return;
+    }
+    _needsProbe = false;
+    _probeWrittenAt = now;
+}
+
+- (void)bytesAt:(double)now {
+    if (_finished) {
+        return;
+    }
+    _lastByteAt = now;
+    if (_probeWrittenAt >= 0.0) {
+        _answerStarted = true;
+    }
+}
+
+- (bool)message:(NSData *)message at:(double)now {
+    if (_finished) {
+        return true;
+    }
+    _lastByteAt = now;
+    if (_resPQAt < 0.0) {
+        if (!MTPathIsResPQ(message, _nonce)) {
+            [self finishWith:MTPathOutcomeFailed at:now];
+            return true;
+        }
+        _resPQAt = now;
+        _rttMs = (now - (_requestSentAt >= 0.0 ? _requestSentAt : _startedAt)) * 1000.0;
+        _needsProbe = true;
+        return false;
+    }
+    if (_probeWrittenAt < 0.0) {
+        // Nothing else comes before the probe is written.
+        [self finishWith:MTPathOutcomeFailed at:now];
+        return true;
+    }
+    _answerStarted = true;
+    int32_t seq = 0;
+    int32_t total = 0;
+    int32_t padLength = 0;
+    if (MTPathProbeDataParse(message, _nonce, &seq, &total, &padLength) != 1 || seq != _nextSeq || total != _total) {
+        [self finishWith:MTPathOutcomeFailed at:now];
+        return true;
+    }
+    bool last = seq == _total - 1;
+    int32_t expected = last ? _down - MTPathProbeChunk * (_total - 1) : MTPathProbeChunk;
+    if (padLength != expected) {
+        [self finishWith:MTPathOutcomeFailed at:now];
+        return true;
+    }
+    _nextSeq += 1;
+    _receivedBytes += padLength;
+    if (_firstDataAt < 0.0) {
+        _firstDataAt = now;
+    } else {
+        _bytesAfterFirst += (int64_t)message.length;
+    }
+    _lastDataAt = now;
+    if (last) {
+        [self finishWith:MTPathOutcomeOk at:now];
+        return true;
+    }
+    return false;
+}
+
+- (void)closedAt:(double)now {
+    if (_finished) {
+        return;
+    }
+    // A close after a valid res_pq with not one byte of the answer: no probe there.
+    if (_resPQAt >= 0.0 && !_answerStarted) {
+        [self finishWith:MTPathOutcomeUnsupported at:now];
+    } else {
+        [self finishWith:MTPathOutcomeFailed at:now];
+    }
+}
+
+- (bool)checkAt:(double)now {
+    if (_finished) {
+        return true;
+    }
+    if (_resPQAt < 0.0) {
+        if (now - _startedAt >= _connectLimit) {
+            [self finishWith:MTPathOutcomeFailed at:now];
+        }
+        return _finished;
+    }
+    if (_probeWrittenAt < 0.0) {
+        return false;
+    }
+    // The stall counts from the later of the last byte and the write of the probe plus
+    // the round trip: a path that freezes on the upload answers not one byte.
+    double since = MAX(_lastByteAt, _probeWrittenAt + MAX(_rttMs, 0.0) / 1000.0);
+    if (now - since >= _stall) {
+        [self finishWith:MTPathOutcomeFrozen at:now];
+    } else if (now - _probeWrittenAt >= _deadline) {
+        [self finishWith:MTPathOutcomeSlow at:now];
+    }
+    return _finished;
+}
+
+- (double)scoreMs {
+    return MTPathScoreMs(_rttMs, _bytesPerSecond);
+}
+
+@end
+
+double MTPathScoreMs(double rttMs, double bytesPerSecond) {
+    if (rttMs < 0.0 || bytesPerSecond <= 0.0) {
+        return INFINITY;
+    }
+    return rttMs + MTPathScoreBytes / bytesPerSecond * 1000.0;
+}
+
+NSString *MTPathNetworkKey(NSString *country, NSString *fingerprint) {
+    NSData *data = [[NSString stringWithFormat:@"%@\n%@", country, fingerprint] dataUsingEncoding:NSUTF8StringEncoding];
+    uint8_t digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
+    NSMutableString *key = [[NSMutableString alloc] initWithCapacity:32];
+    for (int i = 0; i < 16; i++) {
+        [key appendFormat:@"%02x", digest[i]];
+    }
+    return key;
+}
+
+NSArray<NSString *> *MTPathOrder(NSArray<NSString *> *paths, bool edgesFirst) {
+    NSMutableArray<NSString *> *direct = [[NSMutableArray alloc] init];
+    NSMutableArray<NSString *> *edges = [[NSMutableArray alloc] init];
+    for (NSString *path in paths) {
+        if ([direct containsObject:path] || [edges containsObject:path]) {
+            continue;
+        }
+        if ([path isEqualToString:MTPathDirect]) {
+            [direct addObject:path];
+        } else {
+            [edges addObject:path];
+        }
+    }
+    NSMutableArray<NSString *> *order = [[NSMutableArray alloc] init];
+    [order addObjectsFromArray:edgesFirst ? edges : direct];
+    [order addObjectsFromArray:edgesFirst ? direct : edges];
+    return order;
+}
+
+NSArray<NSArray<NSString *> *> *MTPathRaceTiers(NSArray<NSString *> *paths, NSString *best, bool edgesFirst, NSSet<NSString *> *excluded) {
+    NSArray<NSString *> *order = MTPathOrder(paths, edgesFirst);
+    if (best != nil && (![order containsObject:best] || [excluded containsObject:best])) {
+        best = nil;
+    }
+    NSMutableArray<NSString *> *first = [[NSMutableArray alloc] init];
+    NSMutableArray<NSString *> *rest = [[NSMutableArray alloc] init];
+    NSMutableArray<NSString *> *last = [[NSMutableArray alloc] init];
+    for (NSString *path in order) {
+        if ([excluded containsObject:path]) {
+            [last addObject:path];
+        } else if (best != nil ? [path isEqualToString:best] : [path isEqualToString:MTPathDirect] != edgesFirst) {
+            [first addObject:path];
+        } else {
+            [rest addObject:path];
+        }
+    }
+    NSMutableArray<NSArray<NSString *> *> *tiers = [[NSMutableArray alloc] init];
+    for (NSArray<NSString *> *tier in @[first, rest, last]) {
+        if (tier.count != 0) {
+            [tiers addObject:tier];
+        }
+    }
+    return tiers;
+}
+
+NSArray<NSString *> *MTPathRankParticipants(NSArray<NSString *> *paths, NSString *current, bool edgesFirst, bool directPassed, double directScoreMs, double edgeIfDirectMs) {
+    bool allEdges = edgesFirst || !directPassed || !(directScoreMs <= edgeIfDirectMs);
+    NSMutableArray<NSString *> *participants = [[NSMutableArray alloc] init];
+    for (NSString *path in MTPathOrder(paths, false)) {
+        if ([path isEqualToString:MTPathDirect] || (current != nil && [path isEqualToString:current]) || allEdges) {
+            [participants addObject:path];
+        }
+    }
+    return participants;
+}
+
+NSString *MTPathBestOf(NSDictionary<NSString *, NSNumber *> *scores, NSArray<NSString *> *order) {
+    double best = INFINITY;
+    for (NSString *path in scores) {
+        best = MIN(best, scores[path].doubleValue);
+    }
+    if (isinf(best)) {
+        return nil;
+    }
+    for (NSString *path in order) {
+        NSNumber *score = scores[path];
+        if (score != nil && score.doubleValue <= best * MTPathTieRatio) {
+            return path;
+        }
+    }
+    for (NSString *path in scores) {
+        if (scores[path].doubleValue == best) {
+            return path;
+        }
+    }
+    return nil;
+}
+
+MTPathSwitch MTPathDecideSwitch(double currentScoreMs, bool currentPassed, double candidateScoreMs, bool previousWin, double sinceSwitch, bool transferring, double transferWaited, MTPathSettings *settings) {
+    if (isinf(candidateScoreMs) || isnan(candidateScoreMs)) {
+        return MTPathSwitchStay;
+    }
+    // The current path failed the measurement the candidate passed: at once.
+    if (!currentPassed || isinf(currentScoreMs) || isnan(currentScoreMs) || currentScoreMs <= 0.0) {
+        return MTPathSwitchNow;
+    }
+    double ratio = candidateScoreMs / currentScoreMs;
+    if (ratio > settings.switchRatio) {
+        return MTPathSwitchStay;
+    }
+    if (ratio > settings.switchRatioNow && !previousWin) {
+        return MTPathSwitchConfirm;
+    }
+    if (sinceSwitch < settings.minDwell) {
+        return MTPathSwitchWaitDwell;
+    }
+    if (transferring && transferWaited < MTPathTransferWait) {
+        return MTPathSwitchWaitTransfer;
+    }
+    return MTPathSwitchNow;
+}
+
+@implementation MTPathMemory
+{
+    NSMutableDictionary<NSString *, NSMutableDictionary *> *_networks;
+}
+
+static double MTPathNumber(id value) {
+    return [value isKindOfClass:[NSNumber class]] ? [(NSNumber *)value doubleValue] : 0.0;
+}
+
+- (instancetype)initWithDictionary:(NSDictionary *)dictionary {
+    self = [super init];
+    if (self != nil) {
+        _networks = [[NSMutableDictionary alloc] init];
+        // What a file holds is checked shape by shape; anything else is dropped.
+        NSDictionary *networks = [dictionary isKindOfClass:[NSDictionary class]] ? dictionary[@"networks"] : nil;
+        if ([networks isKindOfClass:[NSDictionary class]]) {
+            for (id key in networks) {
+                NSDictionary *network = networks[key];
+                if (![key isKindOfClass:[NSString class]] || ![network isKindOfClass:[NSDictionary class]]) {
+                    continue;
+                }
+                NSMutableDictionary *entry = [[NSMutableDictionary alloc] init];
+                entry[@"t"] = @(MTPathNumber(network[@"t"]));
+                entry[@"switched"] = @(MTPathNumber(network[@"switched"]));
+                entry[@"ranked"] = @(MTPathNumber(network[@"ranked"]));
+                if ([network[@"best"] isKindOfClass:[NSString class]]) {
+                    entry[@"best"] = network[@"best"];
+                }
+                NSMutableDictionary *paths = [[NSMutableDictionary alloc] init];
+                NSDictionary *storedPaths = network[@"paths"];
+                if ([storedPaths isKindOfClass:[NSDictionary class]]) {
+                    for (id path in storedPaths) {
+                        NSDictionary *stats = storedPaths[path];
+                        if (![path isKindOfClass:[NSString class]] || ![stats isKindOfClass:[NSDictionary class]]) {
+                            continue;
+                        }
+                        NSMutableDictionary *copy = [[NSMutableDictionary alloc] init];
+                        for (NSString *field in @[@"score", @"outcome", @"at", @"history", @"count", @"bad", @"failed"]) {
+                            copy[field] = @(MTPathNumber(stats[field]));
+                        }
+                        paths[path] = copy;
+                    }
+                }
+                entry[@"paths"] = paths;
+                _networks[key] = entry;
+            }
+        }
+    }
+    return self;
+}
+
+- (NSDictionary *)dictionary {
+    return @{@"v": @1, @"networks": _networks};
+}
+
+- (NSMutableDictionary *)entryForKey:(NSString *)key create:(bool)create now:(double)now {
+    NSMutableDictionary *entry = _networks[key];
+    if (entry == nil && create) {
+        entry = [@{@"t": @(now), @"switched": @0, @"ranked": @0, @"paths": [[NSMutableDictionary alloc] init]} mutableCopy];
+        _networks[key] = entry;
+        while (_networks.count > MTPathMaxNetworks) {
+            NSString *oldest = nil;
+            for (NSString *other in _networks) {
+                if (oldest == nil || MTPathNumber(_networks[other][@"t"]) < MTPathNumber(_networks[oldest][@"t"])) {
+                    oldest = other;
+                }
+            }
+            [_networks removeObjectForKey:oldest];
+        }
+    }
+    if (entry != nil && create) {
+        entry[@"t"] = @(now);
+    }
+    return entry;
+}
+
+- (NSMutableDictionary *)statsOfPath:(NSString *)path key:(NSString *)key create:(bool)create now:(double)now {
+    NSMutableDictionary *entry = [self entryForKey:key create:create now:now];
+    NSMutableDictionary *paths = entry[@"paths"];
+    NSMutableDictionary *stats = paths[path];
+    if (stats == nil && create) {
+        stats = [@{@"score": @0, @"outcome": @(MTPathOutcomeFailed), @"at": @0, @"history": @0, @"count": @0, @"bad": @0, @"failed": @0} mutableCopy];
+        paths[path] = stats;
+    }
+    return stats;
+}
+
+- (NSString *)bestForKey:(NSString *)key now:(double)now {
+    NSMutableDictionary *entry = _networks[key];
+    if (entry == nil || now - MTPathNumber(entry[@"t"]) > MTPathFreshness) {
+        return nil;
+    }
+    return entry[@"best"];
+}
+
+- (void)setBest:(NSString *)path forKey:(NSString *)key now:(double)now {
+    [self entryForKey:key create:true now:now][@"best"] = path;
+}
+
+- (double)lastSwitchForKey:(NSString *)key {
+    return MTPathNumber(_networks[key][@"switched"]);
+}
+
+- (void)setSwitchedForKey:(NSString *)key now:(double)now {
+    [self entryForKey:key create:true now:now][@"switched"] = @(now);
+}
+
+- (double)lastRankForKey:(NSString *)key {
+    return MTPathNumber(_networks[key][@"ranked"]);
+}
+
+- (void)setRankedForKey:(NSString *)key now:(double)now {
+    [self entryForKey:key create:true now:now][@"ranked"] = @(now);
+}
+
+- (void)recordPath:(NSString *)path key:(NSString *)key outcome:(MTPathOutcome)outcome scoreMs:(double)scoreMs rank:(bool)rank now:(double)now badTtl:(double)badTtl failedTtl:(double)failedTtl {
+    if (outcome == MTPathOutcomeUnsupported) {
+        return;
+    }
+    NSMutableDictionary *stats = [self statsOfPath:path key:key create:true now:now];
+    bool passed = outcome == MTPathOutcomeOk || outcome == MTPathOutcomeSlow;
+    stats[@"outcome"] = @(outcome);
+    stats[@"score"] = @(passed && !isinf(scoreMs) ? scoreMs : 0.0);
+    stats[@"at"] = @(now);
+    // The last four outcomes, a bit each, 1 for one that was not ok.
+    int history = (((int)MTPathNumber(stats[@"history"]) << 1) | (outcome == MTPathOutcomeOk ? 0 : 1)) & ((1 << MTPathHistoryLength) - 1);
+    stats[@"history"] = @(history);
+    stats[@"count"] = @(MIN((int)MTPathNumber(stats[@"count"]) + 1, MTPathHistoryLength));
+    if (outcome == MTPathOutcomeFrozen) {
+        stats[@"bad"] = @(now + badTtl);
+    } else if (outcome == MTPathOutcomeFailed) {
+        stats[@"failed"] = @(now + failedTtl);
+    } else if (rank) {
+        stats[@"bad"] = @0;
+        stats[@"failed"] = @0;
+    } else {
+        stats[@"failed"] = @0;
+    }
+}
+
+- (bool)isExcludedPath:(NSString *)path key:(NSString *)key now:(double)now {
+    NSDictionary *stats = _networks[key][@"paths"][path];
+    return stats != nil && (MTPathNumber(stats[@"bad"]) > now || MTPathNumber(stats[@"failed"]) > now);
+}
+
+- (NSSet<NSString *> *)excludedForKey:(NSString *)key now:(double)now {
+    NSMutableSet<NSString *> *excluded = [[NSMutableSet alloc] init];
+    NSDictionary *paths = _networks[key][@"paths"];
+    for (NSString *path in paths) {
+        if ([self isExcludedPath:path key:key now:now]) {
+            [excluded addObject:path];
+        }
+    }
+    return excluded;
+}
+
+- (double)scoreOfPath:(NSString *)path key:(NSString *)key {
+    NSDictionary *stats = _networks[key][@"paths"][path];
+    double score = MTPathNumber(stats[@"score"]);
+    return stats != nil && score > 0.0 ? score : NAN;
+}
+
+- (bool)passedPath:(NSString *)path key:(NSString *)key {
+    NSDictionary *stats = _networks[key][@"paths"][path];
+    if (stats == nil) {
+        return false;
+    }
+    int outcome = (int)MTPathNumber(stats[@"outcome"]);
+    return outcome == MTPathOutcomeOk || outcome == MTPathOutcomeSlow;
+}
+
+- (double)effectiveScore:(double)scoreMs path:(NSString *)path key:(NSString *)key {
+    NSDictionary *stats = _networks[key][@"paths"][path];
+    int history = (int)MTPathNumber(stats[@"history"]);
+    int count = (int)MTPathNumber(stats[@"count"]);
+    int notOk = 0;
+    for (int i = 0; i < MIN(count, MTPathHistoryLength); i++) {
+        notOk += (history >> i) & 1;
+    }
+    return notOk >= 2 ? scoreMs * 2.0 : scoreMs;
+}
+
+@end
+'''
+
+PATH_PROBE_H_SOURCE = r'''#import <Foundation/Foundation.h>
+
+#import "MTPathLogic.h"
+
+@class MTContext;
+@class MTDatacenterAddress;
+@class MTSignal;
+
+// pluma: one probe of a path to the Pluma server (task 113, MTPathLogic.h): a
+// connection of its own to the address, as MtProtoKit's search for an address makes
+// one (obfuscated TCP, or a WebSocket to an edge), req_pq_multi, res_pq, then
+// pluma.probe and its answer. The connection closes after it.
+@interface MTPathProbeResult : NSObject
+
+@property (nonatomic, strong, readonly) MTDatacenterAddress * _Nonnull address;
+@property (nonatomic, readonly) MTPathOutcome outcome;
+@property (nonatomic, readonly) double rttMs;
+@property (nonatomic, readonly) double bytesPerSecond;
+@property (nonatomic, readonly) int64_t receivedBytes;
+@property (nonatomic, readonly) double scoreMs;
+// Everything arrived.
+@property (nonatomic, readonly) bool passed;
+// Everything arrived, or the bytes never stopped: the path works.
+@property (nonatomic, readonly) bool works;
+
+- (instancetype _Nonnull)initWithAddress:(MTDatacenterAddress * _Nonnull)address outcome:(MTPathOutcome)outcome rttMs:(double)rttMs bytesPerSecond:(double)bytesPerSecond receivedBytes:(int64_t)receivedBytes;
+
+@end
+
+@interface MTPathProbe : NSObject
+
+// Puts one MTPathProbeResult and completes; never fails. down: the bytes asked for,
+// up: the bytes of pad sent; stall and deadline in seconds.
++ (MTSignal * _Nonnull)probeWithContext:(MTContext * _Nonnull)context datacenterId:(NSInteger)datacenterId address:(MTDatacenterAddress * _Nonnull)address down:(int32_t)down up:(int32_t)up stall:(double)stall deadline:(double)deadline;
+
+@end
+'''
+
+PATH_PROBE_M_SOURCE = r'''#import "MTPathProbe.h"
+
+#import <MtProtoKit/MTDatacenterAddress.h>
+#import <MtProtoKit/MTDisposable.h>
+#import <MtProtoKit/MTLogging.h>
+#import <MtProtoKit/MTQueue.h>
+#import <MtProtoKit/MTSignal.h>
+#import <MtProtoKit/MTTcpTransport.h>
+#import <MtProtoKit/MTTimer.h>
+#import <MtProtoKit/MTTransportScheme.h>
+#import "MTDiscoverConnectionSignals.h"
+#import "MTTcpConnection.h"
+
+// How long res_pq may take: the time MtProtoKit's search for an address gives an
+// address, and an edge (TLS, the WebSocket handshake) as the edges have it (task 109).
+static const double MTPathConnectLimit = 5.0;
+static const double MTPathEdgeConnectLimit = 10.0;
+// How often the stall and the deadline are checked.
+static const NSTimeInterval MTPathCheckInterval = 0.1;
+
+@implementation MTPathProbeResult
+
+- (instancetype)initWithAddress:(MTDatacenterAddress *)address outcome:(MTPathOutcome)outcome rttMs:(double)rttMs bytesPerSecond:(double)bytesPerSecond receivedBytes:(int64_t)receivedBytes {
+    self = [super init];
+    if (self != nil) {
+        _address = address;
+        _outcome = outcome;
+        _rttMs = rttMs;
+        _bytesPerSecond = bytesPerSecond;
+        _receivedBytes = receivedBytes;
+        _scoreMs = MTPathScoreMs(rttMs, bytesPerSecond);
+        _passed = outcome == MTPathOutcomeOk;
+        _works = outcome == MTPathOutcomeOk || (outcome == MTPathOutcomeSlow && receivedBytes > 0);
+    }
+    return self;
+}
+
+@end
+
+// The probe on its connection; everything happens on the queue of MTTcpConnection.
+@interface MTPathProbeRun : NSObject <MTTcpConnectionDelegate>
+
+@end
+
+@implementation MTPathProbeRun
+{
+    MTContext *_context;
+    NSInteger _datacenterId;
+    MTDatacenterAddress *_address;
+    int32_t _down;
+    int32_t _up;
+    MTSubscriber *_subscriber;
+    MTPathProbeTracker *_tracker;
+    MTTcpConnection *_connection;
+    MTTimer *_timer;
+    MTPayloadData _payload;
+    bool _done;
+}
+
+- (instancetype)initWithContext:(MTContext *)context datacenterId:(NSInteger)datacenterId address:(MTDatacenterAddress *)address down:(int32_t)down up:(int32_t)up stall:(double)stall deadline:(double)deadline subscriber:(MTSubscriber *)subscriber {
+    self = [super init];
+    if (self != nil) {
+        _context = context;
+        _datacenterId = datacenterId;
+        _address = address;
+        _down = MTPathProbeClampedDown(down);
+        _up = MAX(0, MIN(up, MTPathProbeMaxUp));
+        _subscriber = subscriber;
+        NSData *request = [MTDiscoverConnectionSignals payloadData:&_payload context:context address:address];
+        _tracker = [[MTPathProbeTracker alloc] initWithNonce:_payload.nonce down:_down stall:stall deadline:deadline connectLimit:address.websocket ? MTPathEdgeConnectLimit : MTPathConnectLimit startedAt:CFAbsoluteTimeGetCurrent()];
+        _connection = [[MTTcpConnection alloc] initWithContext:context datacenterId:datacenterId scheme:[[MTTransportScheme alloc] initWithTransportClass:[MTTcpTransport class] address:address media:false] interface:nil usageCalculationInfo:nil getLogPrefix:nil];
+        __weak MTPathProbeRun *weakSelf = self;
+        _connection.connectionOpened = ^{
+            __strong MTPathProbeRun *strongSelf = weakSelf;
+            if (strongSelf != nil && !strongSelf->_done) {
+                [strongSelf->_tracker requestSentAt:CFAbsoluteTimeGetCurrent()];
+                [strongSelf->_connection sendDatas:@[request] completion:nil requestQuickAck:false expectDataInResponse:true];
+            }
+        };
+        _connection.connectionReceivedData = ^(NSData *data) {
+            __strong MTPathProbeRun *strongSelf = weakSelf;
+            [strongSelf received:data];
+        };
+        _connection.connectionClosed = ^{
+            __strong MTPathProbeRun *strongSelf = weakSelf;
+            [strongSelf closed];
+        };
+    }
+    return self;
+}
+
+- (NSString *)pathDescription {
+    if (_address.websocket) {
+        NSString *host = [NSURL URLWithString:_address.ip].host;
+        return [NSString stringWithFormat:@"edge %@", host != nil ? host : @"?"];
+    }
+    return [NSString stringWithFormat:@"%@:%d", _address.ip, (int)_address.port];
+}
+
+- (void)start {
+    _connection.delegate = self;
+    __weak MTPathProbeRun *weakSelf = self;
+    _timer = [[MTTimer alloc] initWithTimeout:MTPathCheckInterval repeat:true completion:^{
+        __strong MTPathProbeRun *strongSelf = weakSelf;
+        [strongSelf check];
+    } queue:[MTTcpConnection tcpQueue].nativeQueue];
+    [_timer start];
+    if (MTLogEnabled()) {
+        MTLog(@"[MTPathProbe %@: %d bytes]", [self pathDescription], (int)_down);
+    }
+    [_connection start];
+}
+
+- (void)received:(NSData *)data {
+    if (_done) {
+        return;
+    }
+    if ([_tracker message:data at:CFAbsoluteTimeGetCurrent()]) {
+        [self finish];
+        return;
+    }
+    if (_tracker.needsProbe) {
+        // pluma.probe right after res_pq, on the same connection; the pad is random, so
+        // that nothing on the way can shrink it.
+        NSMutableData *pad = [[NSMutableData alloc] initWithLength:(NSUInteger)_up];
+        if (_up > 0) {
+            arc4random_buf(pad.mutableBytes, (size_t)_up);
+        }
+        int64_t messageId = ((int64_t)([[NSDate date] timeIntervalSince1970] * 4294967296.0)) & ~(int64_t)3;
+        NSData *message = MTPathProbeMessage(_payload.nonce, _down, pad, messageId);
+        __weak MTPathProbeRun *weakSelf = self;
+        [_connection sendDatas:@[message] completion:^(bool success) {
+            __strong MTPathProbeRun *strongSelf = weakSelf;
+            if (strongSelf != nil && success) {
+                [strongSelf->_tracker probeWrittenAt:CFAbsoluteTimeGetCurrent()];
+            }
+        } requestQuickAck:false expectDataInResponse:true];
+    }
+}
+
+- (void)closed {
+    if (_done) {
+        return;
+    }
+    [_tracker closedAt:CFAbsoluteTimeGetCurrent()];
+    [self finish];
+}
+
+- (void)check {
+    if (!_done && [_tracker checkAt:CFAbsoluteTimeGetCurrent()]) {
+        [self finish];
+    }
+}
+
+- (void)tcpConnectionDownloadActivityUpdated:(MTTcpConnection *)__unused connection {
+    if (!_done) {
+        [_tracker bytesAt:CFAbsoluteTimeGetCurrent()];
+    }
+}
+
+- (void)stopConnection {
+    _done = true;
+    [_timer invalidate];
+    _timer = nil;
+    MTTcpConnection *connection = _connection;
+    _connection = nil;
+    connection.connectionOpened = nil;
+    connection.connectionReceivedData = nil;
+    connection.connectionClosed = nil;
+    connection.delegate = nil;
+    [connection stop];
+}
+
+- (void)finish {
+    if (_done) {
+        return;
+    }
+    [self stopConnection];
+    MTPathProbeResult *result = [[MTPathProbeResult alloc] initWithAddress:_address outcome:_tracker.outcome rttMs:_tracker.rttMs bytesPerSecond:_tracker.bytesPerSecond receivedBytes:_tracker.receivedBytes];
+    if (MTLogEnabled()) {
+        MTLog(@"[MTPathProbe %@: outcome %d, rtt %d ms, %d KiB/s, %d bytes]", [self pathDescription], (int)result.outcome, (int)result.rttMs, (int)(result.bytesPerSecond / 1024.0), (int)result.receivedBytes);
+    }
+    MTSubscriber *subscriber = _subscriber;
+    _subscriber = nil;
+    [subscriber putNext:result];
+    [subscriber putCompletion];
+}
+
+- (void)cancel {
+    if (!_done) {
+        _subscriber = nil;
+        [self stopConnection];
+    }
+}
+
+@end
+
+@implementation MTPathProbe
+
++ (MTSignal *)probeWithContext:(MTContext *)context datacenterId:(NSInteger)datacenterId address:(MTDatacenterAddress *)address down:(int32_t)down up:(int32_t)up stall:(double)stall deadline:(double)deadline {
+    return [[[MTSignal alloc] initWithGenerator:^id<MTDisposable>(MTSubscriber *subscriber) {
+        MTPathProbeRun *run = [[MTPathProbeRun alloc] initWithContext:context datacenterId:datacenterId address:address down:down up:up stall:stall deadline:deadline subscriber:subscriber];
+        [run start];
+        return [[MTBlockDisposable alloc] initWithBlock:^{
+            [[MTTcpConnection tcpQueue] dispatchOnQueue:^{
+                [run cancel];
+            }];
+        }];
+    }] startOn:[MTTcpConnection tcpQueue]];
+}
+
+@end
+'''
+
+PATH_PROBE_SWIFT_SOURCE = r'''import Foundation
+
+// pluma: the settings of the probes of the paths to the server (task 113, ADR 0073 of
+// the server repository, the brief's section 7): the key pluma_probe of the server's
+// app configuration,
+// {"v":1,"country":"RU","gate_down":65536,"rank_down":196608,"up":20480,…},
+// with the country of the client's address, which keys the memory of paths. Every
+// number must be within the range the server keeps it in; a number that is not, a
+// version other than 1 or a country that is not two capital letters, and the whole
+// value is the built-in one. A missing number is its built-in value.
+struct PlumaProbeConfiguration: Equatable {
+    struct Field {
+        let key: String
+        let builtIn: Double
+        let min: Double
+        let max: Double
+        let ratio: Bool
+    }
+
+    // The defaults and the ranges of the server (bff, appconfig/probe.go).
+    static let fields: [Field] = [
+        Field(key: "gate_down", builtIn: 65536, min: 16384, max: 524288, ratio: false),
+        Field(key: "rank_down", builtIn: 196608, min: 16384, max: 524288, ratio: false),
+        Field(key: "up", builtIn: 20480, min: 0, max: 65536, ratio: false),
+        Field(key: "stall_ms", builtIn: 1500, min: 300, max: 10000, ratio: false),
+        Field(key: "deadline_ms", builtIn: 6000, min: 1000, max: 30000, ratio: false),
+        Field(key: "suspect_ms", builtIn: 4000, min: 1000, max: 30000, ratio: false),
+        Field(key: "reprobe_s", builtIn: 21600, min: 600, max: 604800, ratio: false),
+        Field(key: "rank_min_interval_s", builtIn: 1800, min: 60, max: 86400, ratio: false),
+        Field(key: "min_dwell_s", builtIn: 600, min: 0, max: 86400, ratio: false),
+        Field(key: "switch_ratio", builtIn: 0.7, min: 0.05, max: 0.95, ratio: true),
+        Field(key: "switch_ratio_now", builtIn: 0.25, min: 0.05, max: 0.95, ratio: true),
+        Field(key: "edge_probe_if_direct_ms", builtIn: 1500, min: 100, max: 60000, ratio: false),
+        Field(key: "bad_ttl_s", builtIn: 86400, min: 60, max: 604800, ratio: false),
+        Field(key: "failed_ttl_s", builtIn: 300, min: 10, max: 86400, ratio: false),
+        Field(key: "race_stagger_ms", builtIn: 800, min: 0, max: 10000, ratio: false),
+        Field(key: "confirm_s", builtIn: 60, min: 10, max: 3600, ratio: false)
+    ]
+
+    static let builtIn = PlumaProbeConfiguration(country: "", values: Dictionary(uniqueKeysWithValues: PlumaProbeConfiguration.fields.map { ($0.key, $0.builtIn) }))
+
+    let country: String
+    let values: [String: Double]
+
+    init(country: String, values: [String: Double]) {
+        self.country = country
+        self.values = values
+    }
+
+    init?(value: [String: Any]) {
+        guard let version = value["v"] as? Double, version == 1.0 else {
+            return nil
+        }
+        guard let country = value["country"] as? String, plumaProbeCountryIsValid(country) else {
+            return nil
+        }
+        var values: [String: Double] = [:]
+        for field in PlumaProbeConfiguration.fields {
+            guard let raw = value[field.key] else {
+                values[field.key] = field.builtIn
+                continue
+            }
+            guard let number = raw as? Double, number.isFinite, number >= field.min, number <= field.max else {
+                return nil
+            }
+            if !field.ratio && number.rounded() != number {
+                return nil
+            }
+            values[field.key] = number
+        }
+        guard let stall = values["stall_ms"], let deadline = values["deadline_ms"], deadline > stall else {
+            return nil
+        }
+        guard let ratio = values["switch_ratio"], let ratioNow = values["switch_ratio_now"], ratioNow < ratio else {
+            return nil
+        }
+        self.country = country
+        self.values = values
+    }
+}
+
+// Two capital letters (ISO 3166-1 alpha-2), or nothing while the server does not know.
+func plumaProbeCountryIsValid(_ country: String) -> Bool {
+    if country.isEmpty {
+        return true
+    }
+    return country.unicodeScalars.count == 2 && country.unicodeScalars.allSatisfy { $0.value >= 65 && $0.value <= 90 }
+}
+
+// The fingerprint of a network: the kind and the name of the interface in use and the
+// addresses of its gateways, in one order. It never leaves the device and is kept only
+// as a hash with the country (MTPathNetworkKey).
+func plumaNetworkFingerprint(kind: String, interface: String, gateways: [String]) -> String {
+    return "\(kind)|\(interface)|\(gateways.sorted().joined(separator: ","))"
+}
+'''
+
+PATH_PATHS_SWIFT_SOURCE = r'''import Foundation
+import Network
+import MtProtoKit
+import SwiftSignalKit
+#if os(iOS)
+import UIKit
+#endif
+
+// pluma: the choice of a path to the server by probes (task 113, ADR 0073 of the server
+// repository; MTEdgeRoute in MtProtoKit): the settings of the server's pluma_probe, the
+// fingerprint of the network in use, whether the app is on the screen.
+extension PlumaProbeConfiguration {
+    static func with(appConfiguration: AppConfiguration) -> PlumaProbeConfiguration {
+        if let data = appConfiguration.data, let value = data["pluma_probe"] as? [String: Any], let configuration = PlumaProbeConfiguration(value: value) {
+            return configuration
+        }
+        return .builtIn
+    }
+
+    func apply() {
+        MTContext.setPathProbeValues(self.values.mapValues { NSNumber(value: $0) }, country: self.country)
+    }
+}
+
+// Its state lives on its own queue.
+final class PlumaPaths: @unchecked Sendable {
+    static let shared = PlumaPaths()
+
+    // A fresh app configuration (and with it the country) at most this often on changes
+    // of network.
+    private static let configurationInterval: Double = 2.0 * 60.0
+
+    private let queue = DispatchQueue(label: "org.telegram.PlumaPaths")
+    private var monitor: NWPathMonitor?
+    private var observers: [NSObjectProtocol] = []
+    private var fingerprint: String?
+    private var lastChange: Double = 0.0
+    private let changes = ValuePipe<Void>()
+
+    // Each change of the network after the first, at most every two minutes.
+    var networkChanges: Signal<Void, NoError> {
+        return self.changes.signal()
+    }
+
+    // The monitor of the network and the state of the app, once for the process.
+    func start() {
+        self.queue.async {
+            if self.monitor != nil {
+                return
+            }
+            let monitor = NWPathMonitor()
+            monitor.pathUpdateHandler = { [weak self] path in
+                self?.update(path: path)
+            }
+            monitor.start(queue: self.queue)
+            self.monitor = monitor
+            #if os(iOS)
+            let center = NotificationCenter.default
+            self.observers.append(center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: nil, using: { _ in
+                MTContext.setPathsForeground(true)
+            }))
+            self.observers.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil, using: { _ in
+                MTContext.setPathsForeground(false)
+            }))
+            #else
+            MTContext.setPathsForeground(true)
+            #endif
+        }
+    }
+
+    private func update(path: NWPath) {
+        // Without a network the last one stays: it comes back as it was, or as another.
+        guard path.status == .satisfied else {
+            return
+        }
+        let kind: String
+        if path.usesInterfaceType(.wifi) {
+            kind = "wifi"
+        } else if path.usesInterfaceType(.cellular) {
+            kind = "cellular"
+        } else if path.usesInterfaceType(.wiredEthernet) {
+            kind = "wired"
+        } else {
+            kind = "other"
+        }
+        var gateways: [String] = []
+        var constrained = false
+        if #available(iOS 13.0, macOS 10.15, *) {
+            gateways = path.gateways.map { "\($0)" }
+            constrained = path.isConstrained
+        }
+        let fingerprint = plumaNetworkFingerprint(kind: kind, interface: path.availableInterfaces.first?.name ?? "", gateways: gateways)
+        MTContext.setPathNetworkFingerprint(fingerprint, constrained: constrained)
+        if let previous = self.fingerprint, previous != fingerprint {
+            let now = CFAbsoluteTimeGetCurrent()
+            if now - self.lastChange >= PlumaPaths.configurationInterval {
+                self.lastChange = now
+                self.changes.putNext(Void())
+            }
+        }
+        self.fingerprint = fingerprint
+    }
+}
+'''
+
+
+def path_files():
+    return ((PATH_LOGIC_H, PATH_LOGIC_H_SOURCE), (PATH_LOGIC_M, PATH_LOGIC_M_SOURCE),
+            (PATH_PROBE_H, PATH_PROBE_H_SOURCE), (PATH_PROBE_M, PATH_PROBE_M_SOURCE),
+            (PATH_PROBE_SWIFT, PATH_PROBE_SWIFT_SOURCE), (PATH_PATHS_SWIFT, PATH_PATHS_SWIFT_SOURCE))
+
+
+PATH_CONTEXT_H_ANCHOR = ("- (void)updateAddressSetForDatacenterWithId:(NSInteger)datacenterId addressSet:(MTDatacenterAddressSet * _Nonnull)addressSet "
+                         "forceUpdateSchemes:(bool)forceUpdateSchemes;\n")
+PATH_CONTEXT_H = src("", """
+    // pluma: the choice of a path to the Pluma server by probes (task 113, MTEdgeRoute): the
+    // values of the server's pluma_probe and its country; the platform's fingerprint of the
+    // network in use; whether the app is on the screen; a context of the server the route
+    // probes and resets through, with the file of the memory of paths; a reset of the
+    // transports of a datacenter, which keep the schemes they were made with.
+    + (void)setPathProbeValues:(NSDictionary<NSString *, NSNumber *> * _Nonnull)values country:(NSString * _Nonnull)country NS_SWIFT_NAME(setPathProbeValues(_:country:));
+    + (void)setPathNetworkFingerprint:(NSString * _Nonnull)fingerprint constrained:(bool)constrained NS_SWIFT_NAME(setPathNetworkFingerprint(_:constrained:));
+    + (void)setPathsForeground:(bool)foreground NS_SWIFT_NAME(setPathsForeground(_:));
+    - (void)attachPathSelectionWithStoragePath:(NSString * _Nonnull)storagePath readOnly:(bool)readOnly NS_SWIFT_NAME(attachPathSelection(storagePath:readOnly:));
+    - (void)resetTransportsOfDatacenterWithId:(NSInteger)datacenterId;
+""")
+
+PATH_CONTEXT_M_ANCHOR = "- (void)scheduleSessionCleanupForAuthKeyId:(int64_t)authKeyId sessionInfo:(MTSessionInfo *)sessionInfo {\n"
+PATH_CONTEXT_M = src("", """
+    // pluma: the choice of a path to the Pluma server by probes (task 113, MTEdgeRoute).
+    + (void)setPathProbeValues:(NSDictionary<NSString *, NSNumber *> *)values country:(NSString *)country
+    {
+        [[MTEdgeRoute shared] setProbeValues:values country:country];
+    }
+
+    + (void)setPathNetworkFingerprint:(NSString *)fingerprint constrained:(bool)constrained
+    {
+        [[MTEdgeRoute shared] setNetworkFingerprint:fingerprint constrained:constrained];
+    }
+
+    + (void)setPathsForeground:(bool)foreground
+    {
+        [[MTEdgeRoute shared] setForeground:foreground];
+    }
+
+    - (void)attachPathSelectionWithStoragePath:(NSString *)storagePath readOnly:(bool)readOnly
+    {
+        [[MTEdgeRoute shared] attachContext:self storagePath:storagePath readOnly:readOnly];
+    }
+
+    - (void)resetTransportsOfDatacenterWithId:(NSInteger)datacenterId
+    {
+        [[MTContext contextQueue] dispatchOnQueue:^
+        {
+            NSArray *changeListeners = [[NSArray alloc] initWithArray:_changeListeners];
+            for (MTWeakContextChangeListener *value in changeListeners) {
+                id<MTContextChangeListener> listener = value.target;
+                if ([listener respondsToSelector:@selector(contextDatacenterTransportSchemesUpdated:datacenterId:shouldReset:)]) {
+                    [listener contextDatacenterTransportSchemesUpdated:self datacenterId:datacenterId shouldReset:true];
+                }
+            }
+        }];
+    }
+
+""")
+
+PATH_DISCOVER_ANCHOR = "    NSArray<NSNumber *> *alternatePorts = [self alternatePortsForProxySettings:proxySettings];\n"
+PATH_DISCOVER = src(" " * 4, """
+    // pluma: the search for the Pluma server by probes (task 113, MTEdgeRoute): a path is
+    // taken when it carried 64 KiB in time, not when it answered req_pq. Without probes,
+    // with a proxy of the user's or for another datacenter, upstream's search below.
+    MTSignal *pathSignal = [[MTEdgeRoute shared] discoverSchemeWithContext:context datacenterId:datacenterId addressList:bestAddressList alternatePorts:alternatePorts media:media];
+    if (pathSignal != nil) {
+        return pathSignal;
+    }
+""")
+
+PATH_SILENCE_TIMER = src(" " * 16, """
+    // pluma: a request that waits suspect_ms without a byte has the paths measured
+    // (task 113, MTEdgeRoute); on the connections of transports only.
+    if (dataToSend.expectDataInResponse && _plumaWatchesSilence && _plumaSilenceTimer == nil) {
+        NSTimeInterval suspect = [[MTEdgeRoute shared] silenceSuspectSeconds];
+        if (suspect > 0.0) {
+            __weak MTTcpConnection *weakSelf = self;
+            _plumaSilenceTimer = [[MTTimer alloc] initWithTimeout:suspect repeat:false completion:^{
+                __strong MTTcpConnection *strongSelf = weakSelf;
+                [strongSelf plumaSilence];
+            } queue:[MTTcpConnection tcpQueue].nativeQueue];
+            [_plumaSilenceTimer start];
+        }
+    }
+""")
+
+PATH_SILENCE_METHOD = src("", """
+    // pluma: a request waited suspect_ms without a byte (task 113).
+    - (void)plumaSilence
+    {
+        [_plumaSilenceTimer invalidate];
+        _plumaSilenceTimer = nil;
+        if (!_closed) {
+            [[MTEdgeRoute shared] transportSuspectsSilenceWithAddress:_scheme.address];
+        }
+    }
+
+""")
+
+PATH_ACCOUNT = src(" " * 8, """
+    // pluma: the settings of the probes of the paths follow pluma_probe of the app
+    // configuration, and a change of network fetches a fresh one: its country keys the
+    // memory of paths (task 113, PlumaPaths.swift).
+    self.managedOperationsDisposable.add((postbox.preferencesView(keys: [PreferencesKeys.appConfiguration])
+    |> map { view -> PlumaProbeConfiguration in
+        return PlumaProbeConfiguration.with(appConfiguration: view.values[PreferencesKeys.appConfiguration]?.get(AppConfiguration.self) ?? .defaultValue)
+    }
+    |> distinctUntilChanged).start(next: { configuration in
+        configuration.apply()
+    }))
+    if !supplementary {
+        self.managedOperationsDisposable.add((PlumaPaths.shared.networkChanges
+        |> mapToSignal { _ -> Signal<Void, NoError> in
+            return updateAppConfigurationOnce(postbox: postbox, network: network)
+        }).start())
+    }
+""")
+
+PATH_NETWORK_ANCHOR = ("            context.keychain = keychain\n"
+                       "            // pluma: no backup addresses from CloudKit (see below).\n")
+PATH_NETWORK = src(" " * 12, """
+    // pluma: the choice of a path to the server by probes (task 113, PlumaPaths.swift): the
+    // settings of the stored app configuration; the memory of paths in the shared container
+    // next to the accounts, which the app writes and extensions only read.
+    PlumaProbeConfiguration.with(appConfiguration: appConfiguration).apply()
+    context.attachPathSelection(storagePath: (basePath as NSString).deletingLastPathComponent + "/pluma-paths.json", readOnly: supplementary || isAppExtension)
+    PlumaPaths.shared.start()
+""")
+
+# (file, old, new) on what patch_edges leaves: each old occurs once, and new
+# holds old.
+PATH_EDITS = (
+    (EDGE_CONTEXT_H, PATH_CONTEXT_H_ANCHOR, PATH_CONTEXT_H + PATH_CONTEXT_H_ANCHOR),
+    (EDGE_CONTEXT_M, PATH_CONTEXT_M_ANCHOR, PATH_CONTEXT_M + "\n" + PATH_CONTEXT_M_ANCHOR),
+    (EDGE_DISCOVER_M, PATH_DISCOVER_ANCHOR, PATH_DISCOVER_ANCHOR + PATH_DISCOVER),
+    (EDGE_CONNECTION_H,
+     "@property (nonatomic, strong) NSString *(^getLogPrefix)();\n",
+     "@property (nonatomic, strong) NSString *(^getLogPrefix)();\n"
+     "// pluma: a connection of a transport, whose silence after a request has the paths\n"
+     "// measured (task 113, MTEdgeRoute).\n"
+     "@property (nonatomic) bool plumaWatchesSilence;\n"),
+    (EDGE_CONNECTION_M,
+     "#import <MtProtoKit/MTTimer.h>\n",
+     '#import <MtProtoKit/MTTimer.h>\n#import "MTEdgeRoute.h" // pluma: the paths (task 113)\n'),
+    (EDGE_CONNECTION_M,
+     "@property (nonatomic, strong) id packetProgressToken;\n",
+     "@property (nonatomic, strong) id packetProgressToken;\n"
+     "@property (nonatomic, strong) MTTimer *plumaSilenceTimer; // pluma: the paths (task 113)\n"),
+    (EDGE_CONNECTION_M,
+     "    MTTimer *responseTimeoutTimer = _responseTimeoutTimer;\n",
+     "    MTTimer *responseTimeoutTimer = _responseTimeoutTimer;\n"
+     "    MTTimer *plumaSilenceTimer = _plumaSilenceTimer; // pluma: the paths (task 113)\n"),
+    (EDGE_CONNECTION_M,
+     "        [responseTimeoutTimer invalidate];\n        \n        [socket disconnect];\n",
+     "        [responseTimeoutTimer invalidate];\n        [plumaSilenceTimer invalidate];\n        \n        [socket disconnect];\n"),
+    (EDGE_CONNECTION_M,
+     "                    [_responseTimeoutTimer start];\n                }\n",
+     "                    [_responseTimeoutTimer start];\n                }\n" + PATH_SILENCE_TIMER),
+    (EDGE_CONNECTION_M,
+     "    [_responseTimeoutTimer resetTimeout:MTMinTcpResponseTimeout];\n",
+     "    [_responseTimeoutTimer resetTimeout:MTMinTcpResponseTimeout];\n"
+     "    [_plumaSilenceTimer invalidate]; // pluma: a byte came (task 113)\n"
+     "    _plumaSilenceTimer = nil;\n"),
+    (EDGE_CONNECTION_M,
+     "    } else if (tag == MTTcpReadTagPacketBody) {\n        [_responseTimeoutTimer invalidate];\n        _responseTimeoutTimer = nil;\n",
+     "    } else if (tag == MTTcpReadTagPacketBody) {\n        [_responseTimeoutTimer invalidate];\n        _responseTimeoutTimer = nil;\n"
+     "        [_plumaSilenceTimer invalidate]; // pluma: the answer came (task 113)\n"
+     "        _plumaSilenceTimer = nil;\n"),
+    (EDGE_CONNECTION_M, "- (void)responseTimeout\n{\n", PATH_SILENCE_METHOD + "\n- (void)responseTimeout\n{\n"),
+    (EDGE_TRANSPORT_M,
+     "                transportContext.connection.delegate = self;\n",
+     "                transportContext.connection.delegate = self;\n"
+     "                transportContext.connection.plumaWatchesSilence = true; // pluma: the paths (task 113)\n"),
+    (EDGE_TRANSPORT_M,
+     "        if (transportContext.currentActualizationPingMessageId != 0 && transportContext.actualizationPingResendTimer == nil)\n"
+     "            [self startActualizationPingResendTimer];\n",
+     "        // pluma: a switch of the path waits for a transfer of a file (task 113).\n"
+     "        [[MTEdgeRoute shared] transportMovedBytes:data.length];\n"
+     "        \n"
+     "        if (transportContext.currentActualizationPingMessageId != 0 && transportContext.actualizationPingResendTimer == nil)\n"
+     "            [self startActualizationPingResendTimer];\n"),
+    (EDGE_TRANSPORT_M,
+     "                                id transactionId = transportContext.connection.internalId;\n",
+     "                                id transactionId = transportContext.connection.internalId;\n"
+     "                                [[MTEdgeRoute shared] transportMovedBytes:transaction.payload.length]; // pluma: see above\n"),
+    (NETWORK, PATH_NETWORK_ANCHOR, PATH_NETWORK_ANCHOR + PATH_NETWORK),
+    (ACCOUNT, EDGE_ACCOUNT_ANCHOR, EDGE_ACCOUNT_ANCHOR + PATH_ACCOUNT),
+)
+
+# What would reach the route another way or skip it: the race only from the
+# search for an address, the probe only from the route, the watch of silence
+# only on the connections of transports.
+PATH_GUARDS = (
+    (EDGE_DISCOVER_M, "discoverSchemeWithContext:context datacenterId:datacenterId addressList:bestAddressList", 1),
+    (EDGE_CONNECTION_M, "_plumaSilenceTimer", 10),
+    (EDGE_CONNECTION_M, "transportSuspectsSilenceWithAddress:", 1),
+    (EDGE_TRANSPORT_M, "plumaWatchesSilence = true", 1),
+    (EDGE_TRANSPORT_M, "transportMovedBytes:", 2),
+    (EDGE_CONTEXT_M, "resetTransportsOfDatacenterWithId:", 1),
+    (EDGE_ROUTE_M, "resetTransportsOfDatacenterWithId:", 1),
+    (EDGE_ROUTE_M, "[MTPathProbe probeWithContext:", 2),
+    (NETWORK, "attachPathSelection(", 1),
+    (ACCOUNT, "updateAppConfigurationOnce(postbox: postbox, network: network)", 1),
+)
+
+
+def patch_paths(tree):
+    """The paths chosen by probes (task 113), on top of the edges."""
+    for rel, text in path_files():
+        tree.add_file(rel, text.encode("utf-8"))
+    for rel, old, new in PATH_EDITS:
+        tree.replace(rel, old, new)
+
+
+def verify_paths(tree, c):
+    if not c.edge_urls:
+        for rel, _ in path_files():
+            if tree.sha256(rel) is not None:
+                raise PatchError(f"{rel}: a file of the paths in a build without PLUMA_EDGE_WS_URLS")
+        for rel, old, new in PATH_EDITS:
+            text = tree.read(rel)
+            if new in text:
+                raise PatchError(f"{rel}: an edit of the paths in a build without PLUMA_EDGE_WS_URLS")
+        for rel, mark in ((NETWORK, "PlumaPaths"), (ACCOUNT, "PlumaProbeConfiguration")):
+            if mark in tree.read(rel):
+                raise PatchError(f"{rel}: the paths in a build without PLUMA_EDGE_WS_URLS")
+        return
+    for rel, text in path_files():
+        if tree.sha256(rel) is None:
+            raise PatchError(f"{rel}: missing; no choice of paths")
+        if tree.read(rel) != text:
+            raise PatchError(f"{rel}: not the file of the patch")
+    for rel, old, new in PATH_EDITS:
+        if tree.read(rel).count(new) != 1:
+            raise PatchError(f"{rel}: an edit of the paths is not there once ({new.strip().splitlines()[-1]!r})")
+    for rel, s, count in PATH_GUARDS:
+        found = tree.read(rel).count(s)
+        if found != count:
+            raise PatchError(f"{rel}: {found} occurrences of {s!r}, expected {count}; another way to or around the paths")
+    # The probe is the contract's: the constructors, the sizes and the built-in values,
+    # the same in MtProtoKit and in TelegramCore.
+    logic = tree.read(PATH_LOGIC_M)
+    for line in PATH_CONTRACT_LINES:
+        if line not in logic:
+            raise PatchError(f"{PATH_LOGIC_M}: not the contract of the probe ({line.strip()!r})")
+    swift = tree.read(PATH_PROBE_SWIFT)
+    for key, value in path_built_in_values(logic).items():
+        if f'Field(key: "{key}", builtIn: {value},' not in swift:
+            raise PatchError(f"{PATH_PROBE_SWIFT}: the built-in {key} is not {value}, as MtProtoKit has it")
+    for rel in tree.network_sources():
+        if rel not in (EDGE_ROUTE_M, PATH_PROBE_M, PATH_PROBE_H) and "[MTPathProbe probeWithContext:" in tree.read(rel):
+            raise PatchError(f"{rel}: probes a path outside MTEdgeRoute")
+
+
+# The lines of MTPathLogic.m that are the contract of the probe (the brief's
+# "Контракт пробы") and the defaults of pluma_probe (its section 7).
+PATH_CONTRACT_LINES = (
+    "const uint32_t MTPathProbeConstructor = 0x5c316d30;\n",
+    "const uint32_t MTPathProbeDataConstructor = 0x6ab3780b;\n",
+    "const int32_t MTPathProbeChunk = 16384;\n",
+    "const int32_t MTPathProbeMinDown = 16384;\n",
+    "const int32_t MTPathProbeMaxDown = 524288;\n",
+    "const int32_t MTPathProbeMaxUp = 65536;\n",
+    "static const double MTPathScoreBytes = 256.0 * 1024.0;\n",
+    "static const double MTPathTieRatio = 1.3;\n",
+    "static const NSUInteger MTPathMaxNetworks = 16;\n",
+    "static const double MTPathFreshness = 7.0 * 24.0 * 60.0 * 60.0;\n",
+)
+
+PATH_BUILT_IN = re.compile(r'MTPathValue\(values, @"([a-z_]+)", ([0-9.]+)\)')
+
+
+def path_built_in_values(logic):
+    """The built-in values of pluma_probe, read back from MTPathLogic.m."""
+    values = {}
+    for key, value in PATH_BUILT_IN.findall(logic):
+        values[key] = value
+    if len(values) != 16:
+        raise PatchError(f"{PATH_LOGIC_M}: {len(values)} built-in values of pluma_probe, expected 16")
+    return values
 
 
 def parse_edge_urls(text):
@@ -9509,6 +12411,7 @@ def patch_edges(tree, c):
     for rel, old, new in EDGE_EDITS:
         tree.replace(rel, old, new)
     tree.replace(NETWORK, edge_seed_old(c), edge_seed_new(c))
+    patch_paths(tree)
 
 
 def edge_built_in_urls(source):
@@ -9548,8 +12451,9 @@ def verify_edges(tree, c):
             "stickySeconds: PlumaEdgeConfiguration.defaultStickySeconds)\n" not in swift
             or "    static let defaultStickySeconds: Int32 = 1800\n" not in swift):
         raise PatchError(f"{EDGE_SWIFT}: the build's order is not the direct path first, the edges for 1800 s")
-    choose = tree.read(EDGE_CONTEXT_M)
-    if "(edgesFirst ? 0 : 16) + (NSInteger)[edges indexOfObject:scheme.address] : (edgesFirst ? 16 : 0);" not in choose:
+    if ("        NSInteger rank = [[MTEdgeRoute shared] rankOfAddress:scheme.address edges:edges];\n" not in tree.read(EDGE_CONTEXT_M)
+            or "        rank = address.websocket ? (edgesFirst ? 0 : 16) + (NSInteger)[edges indexOfObject:address] : (edgesFirst ? 16 : 0);\n"
+            not in tree.read(EDGE_ROUTE_M)):
         raise PatchError(f"{EDGE_CONTEXT_M}: the edges do not go after the direct addresses, in their order")
     for rel, old, new in EDGE_EDITS:
         text = tree.read(rel)
