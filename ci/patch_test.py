@@ -101,11 +101,17 @@ class KeyTest(unittest.TestCase):
         self.assertEqual(patch.embedded_keys(literal), [(n, e)])
 
 
+# The edges of the tests (task 109): every check below runs on a build with
+# them; EdgesTest builds one without.
+EDGE_URLS = "wss://e2.gcorecdn.com/apiws,wss://ru.pluma.chat/apiws"
+
+
 def config(**over):
     upstream = patch.load_env(ROOT / "upstream.env")
     app = patch.load_env(ROOT / "config/app.env")
     app.update(over.pop("app", {}))
-    args = dict(server_ipv4="203.0.113.7", server_port="443", server_ipv6="", rsa_pem=OTHER_KEY, team_id="ABCDE12345")
+    args = dict(server_ipv4="203.0.113.7", server_port="443", server_ipv6="", rsa_pem=OTHER_KEY, team_id="ABCDE12345",
+                edge_urls=EDGE_URLS)
     args.update(over)
     return patch.Config(upstream, app, **args)
 
@@ -146,6 +152,21 @@ class ConfigTest(unittest.TestCase):
             {"app": {"PLUMA_APP_NAME": "Pluma Messenger Beta"}},
             {"dev_cdn_http": "localhost"},
             {"dev_cdn_http": "127.0.0.1:8080"},
+            {"edge_urls": "https://e2.gcorecdn.com/apiws"},
+            {"edge_urls": "ws://e2.gcorecdn.com/apiws"},
+            {"edge_urls": "wss://e2.gcorecdn.com"},
+            {"edge_urls": "wss://203.0.113.7/apiws"},
+            {"edge_urls": "wss://localhost/apiws"},
+            {"edge_urls": "wss://E2.gcorecdn.com/apiws"},
+            {"edge_urls": "wss://e2.gcorecdn.com/apiws?token=1"},
+            {"edge_urls": "wss://user@e2.gcorecdn.com/apiws"},
+            {"edge_urls": "wss://e2.gcorecdn.com:0/apiws"},
+            {"edge_urls": "wss://e2.gcorecdn.com:70000/apiws"},
+            {"edge_urls": "wss://web.telegram.org/apiws"},
+            {"edge_urls": "wss://t.me/apiws"},
+            {"edge_urls": "wss://a.b.co/apiws,wss://a.b.co/apiws"},
+            {"edge_urls": "wss://a.b.co/apiws,"},
+            {"edge_urls": ",".join(f"wss://e{i}.b.co/apiws" for i in range(5))},
         ):
             with self.subTest(over=over), self.assertRaises(patch.PatchError):
                 config(**over)
@@ -4008,6 +4029,252 @@ class CdnDownloadsTest(unittest.TestCase):
                      "        completionHandler(nil)\n",
                      "    case 403, 410:\n"):
             self.assertIn(line, source)
+
+
+class EdgeConfigTest(unittest.TestCase):
+    """The edges through a CDN (task 109): the build's list and its way from
+    the repository variable to the patch."""
+
+    def test_list(self):
+        self.assertEqual(config(edge_urls="").edge_urls, ())
+        self.assertEqual(config(edge_urls=" ").edge_urls, ())
+        self.assertEqual(config().edge_urls, ("wss://e2.gcorecdn.com/apiws", "wss://ru.pluma.chat/apiws"))
+        self.assertEqual(config(edge_urls="wss://edge.pluma.test:11446/apiws").edge_urls, ("wss://edge.pluma.test:11446/apiws",))
+        self.assertEqual(len(config(edge_urls=",".join(f"wss://e{i}.b.co/apiws" for i in range(4))).edge_urls), 4)
+
+    def test_swift_list(self):
+        source = patch.edge_swift_source(config().edge_urls)
+        self.assertEqual(patch.edge_built_in_urls(source), config().edge_urls)
+        self.assertIn('        "wss://e2.gcorecdn.com/apiws",\n        "wss://ru.pluma.chat/apiws",\n    ]\n', source)
+        self.assertNotIn("//BUILT-IN EDGES", source)
+        # The direct path first, 1800 s on the edges, until the server says otherwise.
+        self.assertIn("edgesFirst: false, stickySeconds: PlumaEdgeConfiguration.defaultStickySeconds)\n", source)
+        self.assertIn("    static let defaultStickySeconds: Int32 = 1800\n", source)
+        # The key of the server's app configuration and its limits (the brief's
+        # "Контракт клиентов", item 6).
+        for line in ('        if let data = appConfiguration.data, let value = data["pluma_edge"] as? [String: Any], ',
+                     '        guard let version = value["v"] as? Double, version == 1.0 else {\n',
+                     "    static let maxEdges = 4\n",
+                     '        case ("direct", "edge"):\n            self.edgesFirst = false\n',
+                     '        case ("edge", "direct"):\n            self.edgesFirst = true\n',
+                     "sticky >= 60.0, sticky <= 86400.0 else {\n",
+                     'components.scheme == "wss" else {\n'):
+            self.assertIn(line, source)
+
+    def test_connection_contract(self):
+        # The handshake and the messages of the contract (items 2 to 4).
+        source = patch.EDGE_SOCKET_M_SOURCE
+        for line in ('static NSString *const MTWebSocketProtocol = @"binary";\n',
+                     'static NSString *const MTWebSocketUserAgent = @"Pluma";\n',
+                     "static const NSUInteger MTWebSocketMaxOutgoingMessage = 1024 * 1024;\n",
+                     "static const NSTimeInterval MTWebSocketSilenceLimit = 45.0;\n",
+                     "    configuration.HTTPCookieStorage = nil;\n",
+                     "    configuration.HTTPShouldSetCookies = false;\n",
+                     "    _task = [_session webSocketTaskWithURL:url protocols:@[MTWebSocketProtocol]];\n",
+                     "    if (message.type != NSURLSessionWebSocketMessageTypeData) {\n"):
+            self.assertIn(line, source)
+        # One stream encrypted in order: one message in flight, the next after
+        # its completion.
+        self.assertEqual(source.count("sendMessage:"), 1)
+        self.assertIn("    if (_closed || !_opened || _sending || _outgoing.count == 0) {\n", source)
+        self.assertIn("            strongSelf->_sending = false;\n            [strongSelf sendNext];\n", source)
+        # New edges reach the running transports, which keep the schemes they
+        # were made with.
+        self.assertIn("shouldReset:true];\n", patch.EDGE_CONTEXT_METHODS)
+        self.assertNotIn("shouldReset:false", patch.EDGE_CONTEXT_METHODS)
+        # Nothing of what goes through the edge is logged, only its host.
+        for m in re.finditer(r"MTLogWithPrefix\(_getLogPrefix, (@\"[^\"]*\"), ([^;]*)\);", source):
+            self.assertNotRegex(m.group(2), r"\b(?:data|part|message|url|inHost)\b", m.group(0))
+        route = patch.EDGE_ROUTE_M_SOURCE
+        self.assertIn("static const NSTimeInterval MTEdgeFreezeWindow = 10.0 * 60.0;\n", route)
+        self.assertIn("static const int MTEdgeFreezesToMove = 2;\n", route)
+
+    def test_ci(self):
+        configure = (ROOT / "ci/configure.sh").read_text()
+        self.assertIn('--edge-ws-urls "$edge_urls"', configure)
+        self.assertIn("\tedge_urls=${EDGE_WS_URLS:-}\n", configure)
+        self.assertIn("\tedge_urls=${PLUMA_EDGE_WS_URLS:-}\n", configure)
+        workflow = (ROOT / ".github/workflows/ios.yml").read_text()
+        servers = workflow.count("run: ci/configure.sh server") + workflow.count("  ci/configure.sh server\n")
+        self.assertGreater(servers, 0)
+        self.assertEqual(workflow.count("          EDGE_WS_URLS: ${{ vars.PLUMA_EDGE_WS_URLS }}\n"), servers)
+
+
+@unittest.skipIf(not os.environ.get("CI") and upstream_files() is None,
+                 "no checkout of the pinned upstream (ci/fetch-upstream.sh sparse)")
+class EdgesTest(unittest.TestCase):
+    """The edges (task 109) on the commit upstream.env pins."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.files = upstream_files()
+        if cls.files is None:
+            raise AssertionError("no checkout of the pinned upstream in ./upstream (ci/fetch-upstream.sh sparse)")
+        cls.dir = tempfile.TemporaryDirectory()
+        cls.root = pathlib.Path(cls.dir.name)
+        for name, data in cls.files.items():
+            p = cls.root / name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(data)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.dir.cleanup()
+
+    def setUp(self):
+        self.written = set()
+
+    def tearDown(self):
+        for rel in self.written:
+            if rel in self.files:
+                (self.root / rel).write_bytes(self.files[rel])
+            else:
+                (self.root / rel).unlink(missing_ok=True)
+        self.written.clear()
+
+    def run_patch(self, **over):
+        c = config(**over)
+        tree = RecordingTree(self.root, self.written)
+        patch.patch(tree, c)
+        patch.verify(tree, c)
+        return tree, c
+
+    def damaged(self, rel, old, new, **over):
+        """The patched tree with old replaced by new in rel: verify must stop."""
+        self.tearDown()
+        tree, c = self.run_patch(**over)
+        text = tree.read(rel)
+        self.assertEqual(text.count(old), 1, (rel, old[:60]))
+        tree.write(rel, text.replace(old, new))
+        with self.assertRaises(patch.PatchError) as e:
+            patch.verify(tree, c)
+        self.assertIn(pathlib.PurePath(rel).name, str(e.exception))
+
+    def test_upstream_paths_cover_the_files(self):
+        for rel, _, _ in patch.EDGE_EDITS:
+            self.assertTrue(any(rel == p or rel.startswith(p + "/") for p in patch.UPSTREAM_PATHS), rel)
+
+    def test_edges(self):
+        tree, c = self.run_patch()
+        for rel, text in patch.edge_files(c):
+            self.assertEqual(tree.read(rel), text)
+            self.assertNotIn(rel, self.files)
+        # Only the edits: each file is upstream's with them applied.
+        for rel in sorted({rel for rel, _, _ in patch.EDGE_EDITS} - {NETWORK, ACCOUNT}):
+            expected = self.files[rel].decode("utf-8")
+            for r, old, new in patch.EDGE_EDITS:
+                if r == rel:
+                    expected = expected.replace(old, new)
+            self.assertEqual(tree.read(rel), expected, rel)
+        net = tree.read(NETWORK)
+        self.assertIn("            let plumaEdge = PlumaEdgeConfiguration.with(appConfiguration: appConfiguration)\n"
+                      "            plumaEdge.apply()\n", net)
+        self.assertIn("secret: nil) } + plumaEdge.addresses))\n", net)
+        self.assertIn("            network.updatePlumaEdge(configuration)\n", tree.read(ACCOUNT))
+        # The order between the direct addresses and the edges, read back.
+        choose = tree.read(patch.EDGE_CONTEXT_M)
+        self.assertIn("if (schemeWithEarliestFailure == nil || failure < earliestFailure || "
+                      "(failure == earliestFailure && rank < bestRank)) {\n", choose)
+        discover = tree.read(patch.EDGE_DISCOVER_M)
+        self.assertIn("static const NSTimeInterval MTEdgeProbeDelay = 3.0;\n", discover)
+        self.assertIn("            if (![[MTEdgeRoute shared] edgesFirstForgettingBefore:NULL]) {\n"
+                      "                edgeSignal = [edgeSignal delay:MTEdgeProbeDelay", discover)
+        # A second run finds no upstream text.
+        with self.assertRaises(patch.PatchError):
+            patch.patch_edges(tree, c)
+
+    def test_no_edges(self):
+        tree, c = self.run_patch(edge_urls="")
+        for rel, _ in patch.edge_files(config()):
+            self.assertFalse((self.root / rel).exists(), rel)
+        for rel, _, _ in patch.EDGE_EDITS:
+            if rel not in (NETWORK, ACCOUNT):
+                self.assertEqual(tree.read(rel), self.files[rel].decode("utf-8"), rel)
+        self.assertNotIn("plumaEdge", tree.read(NETWORK))
+        self.assertNotIn("PlumaEdge", tree.read(ACCOUNT))
+        # An edge file or edit in such a build stops it.
+        tree.write(patch.EDGE_SWIFT, patch.edge_swift_source(config().edge_urls))
+        with self.assertRaisesRegex(patch.PatchError, "PlumaEdge.swift: an edge file"):
+            patch.verify(tree, c)
+        tree.unlink(patch.EDGE_SWIFT)
+        for rel, old, new in patch.EDGE_EDITS[:2]:
+            tree.write(rel, tree.read(rel).replace(old, new))
+            with self.assertRaisesRegex(patch.PatchError, "in a build without PLUMA_EDGE_WS_URLS"):
+                patch.verify(tree, c)
+            tree.write(rel, self.files[rel].decode("utf-8"))
+
+    def test_file_already_there(self):
+        for rel, _ in patch.edge_files(config()):
+            with self.subTest(rel=rel):
+                self.tearDown()
+                self.written.add(rel)
+                (self.root / rel).write_text("")
+                with self.assertRaisesRegex(patch.PatchError, "already exists"):
+                    self.run_patch()
+
+    def test_upstream_changed(self):
+        # The text of each edit changed upstream: the patch stops with the
+        # file's name.
+        for i, (rel, old, _) in enumerate(patch.EDGE_EDITS):
+            with self.subTest(edit=i, rel=rel):
+                self.tearDown()
+                text = self.files[rel].decode("utf-8")
+                self.assertEqual(text.count(old), 1)
+                end = len(old.rstrip()) - 1
+                self.written.add(rel)
+                (self.root / rel).write_text(text.replace(old, old[:end] + "#" + old[end:]), encoding="utf-8")
+                with self.assertRaises(patch.PatchError) as e:
+                    self.run_patch()
+                self.assertIn(pathlib.PurePath(rel).name, str(e.exception))
+
+    def test_edges_are_verified(self):
+        # Each edit taken back.
+        for i, (rel, old, new) in enumerate(patch.EDGE_EDITS):
+            with self.subTest(edit=i, rel=rel):
+                self.damaged(rel, new, old)
+        with self.subTest("the seed"):
+            self.damaged(NETWORK, " + plumaEdge.addresses))\n", "))\n")
+        # The mark of an edge lost: the address would be dialled as an IP.
+        with self.subTest("lost mark"):
+            self.damaged(patch.EDGE_ADDRESS_M, "        _websocket = true;\n", "")
+        with self.subTest("lost mark in coding"):
+            self.damaged(patch.EDGE_ADDRESS_M, '[aCoder encodeBool:_websocket forKey:@"websocket"]',
+                         '[aCoder encodeBool:false forKey:@"websocket"]')
+        # The edges above the direct path by default, in the build or in the choice.
+        with self.subTest("edges first in the build"):
+            self.damaged(patch.EDGE_SWIFT, "PlumaEdgeConfiguration.builtInUrls, edgesFirst: false,",
+                         "PlumaEdgeConfiguration.builtInUrls, edgesFirst: true,")
+        with self.subTest("edges first in the choice"):
+            self.damaged(patch.EDGE_CONTEXT_M, "(edgesFirst ? 0 : 16) + (NSInteger)[edges indexOfObject:scheme.address] : (edgesFirst ? 16 : 0);",
+                         "(edgesFirst ? 16 : 0) + (NSInteger)[edges indexOfObject:scheme.address] : (edgesFirst ? 0 : 16);")
+        with self.subTest("no delay of the probe"):
+            self.damaged(patch.EDGE_DISCOVER_M, "static const NSTimeInterval MTEdgeProbeDelay = 3.0;\n",
+                         "static const NSTimeInterval MTEdgeProbeDelay = 0.0;\n")
+        # A URL of the build that is not wss://, or not the variable's.
+        with self.subTest("not wss"):
+            self.damaged(patch.EDGE_SWIFT, '"wss://e2.gcorecdn.com/apiws"', '"https://e2.gcorecdn.com/apiws"')
+        with self.subTest("another edge"):
+            self.damaged(patch.EDGE_SWIFT, '"wss://ru.pluma.chat/apiws"', '"wss://ru.example.org/apiws"')
+        # The new files as the patch writes them.
+        for rel, _ in patch.edge_files(config()):
+            with self.subTest(file=rel):
+                self.tearDown()
+                tree, c = self.run_patch()
+                tree.write(rel, tree.read(rel) + "\n")
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify(tree, c)
+                self.assertIn(pathlib.PurePath(rel).name, str(e.exception))
+        # Another way to an edge or around the route.
+        with self.subTest("socket elsewhere"):
+            self.damaged(patch.EDGE_DISCOVER_M, "        if (address.websocket) {\n",
+                         "        [[MTWebSocketConnection alloc] init];\n        if (address.websocket) {\n")
+        with self.subTest("route elsewhere"):
+            self.damaged(patch.EDGE_TRANSPORT_M, "        if (error && reportFailure) { // pluma: see above\n",
+                         "        if (error && reportFailure) { // pluma: see above\n"
+                         "            [[MTEdgeRoute shared] transportReceivedValidDataWithAddress:connection.scheme.address];\n")
+        with self.subTest("a failure of the edges dropped"):
+            self.damaged(patch.EDGE_TRANSPORT_M, "        if (error && reportFailure) { // pluma: see above\n",
+                         "        if (error && reportFailure && !connection.scheme.address.websocket) { // pluma: see above\n")
 
 
 if __name__ == "__main__":

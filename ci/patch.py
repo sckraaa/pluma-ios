@@ -52,6 +52,10 @@ The call screens are in the sage palette.
 Large files come over HTTPS from the server's CDN when the server redirects
 there; the key, the IV and the hashes come from the server over MTProto.
 
+Where the server's address is blocked, the app reaches it through an edge,
+a WebSocket in TLS through a CDN (PLUMA_EDGE_WS_URLS and the server's
+pluma_edge).
+
 Standard library only, so the CI and a developer machine run it as is.
 """
 
@@ -1352,7 +1356,8 @@ def load_env(path):
 
 
 class Config:
-    def __init__(self, upstream, app, server_ipv4, server_port, server_ipv6, rsa_pem, team_id, dev_cdn_http=""):
+    def __init__(self, upstream, app, server_ipv4, server_port, server_ipv6, rsa_pem, team_id, dev_cdn_http="",
+                 edge_urls=""):
         def need(env, key):
             if not env.get(key):
                 raise PatchError(f"{key} is not set")
@@ -1412,6 +1417,10 @@ class Config:
                 self.dev_cdn_http = str(ipaddress.ip_address(dev_cdn_http))
             except ValueError:
                 raise PatchError(f"development HTTP host {dev_cdn_http!r} is not an IP address")
+
+        # The edges of the server through a CDN (task 109): none, or 1 to 4
+        # wss:// addresses in the order the app tries them.
+        self.edge_urls = parse_edge_urls(edge_urls)
 
         self.n, self.e = parse_pkcs1_public_key(rsa_pem)
         # MtProtoKit turns the PKCS#1 key into a SubjectPublicKeyInfo by
@@ -1706,6 +1715,7 @@ def patch(tree, c):
     patch_group_calls(tree)
     patch_call_colors(tree)
     patch_cdn_downloads(tree, c)
+    patch_edges(tree, c)
 
     # The build configuration of Make.py, with exactly the keys it reads.
     conf = c.build_configuration()
@@ -5107,6 +5117,7 @@ def verify(tree, c):
     verify_group_calls(tree)
     verify_call_colors(tree)
     verify_cdn_downloads(tree, c)
+    verify_edges(tree, c)
 
     build = tree.read(APP_BUILD)
     if "<string>Telegram</string>" in build or "<string>telegram</string>" in build:
@@ -8291,6 +8302,1272 @@ def verify_cdn_downloads(tree, c):
                              "another CDN branch, engine check or HTTPS CDN path")
 
 
+# --- edges through a CDN -------------------------------------------------------
+# Task 109 (ADR 0072 of the server repository, the brief's "Контракт
+# клиентов"): where the server's address is blocked or "freezes", the app
+# reaches the server through an edge, wss://<edge>/apiws (Gcore's CDN or the
+# Russian node), which to the network is ordinary HTTPS. The binary messages
+# carry the bytes MtProtoKit sends over TCP to datacenter 1 (the obfuscated
+# header and the transport's frames), without a proxy secret.
+#
+# The edges are addresses of datacenter 1 like the direct ones, marked
+# websocket (MTDatacenterAddress); MTTcpConnection reaches such an address
+# over MTWebSocketConnection (URLSessionWebSocketTask) instead of a socket,
+# and frames and encrypts as it does for a socket. MTEdgeRoute keeps the
+# order: the direct addresses first, the edges after them in their order,
+# unless the server's pluma_edge puts the edges first; the move to the edges
+# when the direct path does not connect or freezes twice in a row; the stay
+# there for sticky_s. MTContext picks the address by it, and its search for a
+# working address starts the edges 3 s after the direct ones. A proxy of the
+# user's turns the edges off, as it turns off the direct path.
+#
+# The build's edges are PLUMA_EDGE_WS_URLS (ci/configure.sh); without it no
+# edit of this section is made.
+
+MAX_EDGES = 4
+# PLUMA_EDGE_WS_URLS: wss://, a host name (TLS checks the name), an optional
+# port, a path.
+EDGE_URL = re.compile(r"wss://(?P<host>[a-z0-9.-]+)(?::(?P<port>[0-9]{1,5}))?(?P<path>/[A-Za-z0-9._~/-]*)")
+EDGE_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+EDGE_TELEGRAM_HOST = re.compile(r"(?:^|\.)(?:telegram\.(?:org|me|dog)|t\.me|telegra\.ph|telesco\.pe|tdesktop\.com)$")
+
+MT_SOURCES = "submodules/MtProtoKit/Sources/"
+MT_HEADERS = "submodules/MtProtoKit/PublicHeaders/MtProtoKit/"
+EDGE_ADDRESS_H = MT_HEADERS + "MTDatacenterAddress.h"
+EDGE_ADDRESS_M = MT_SOURCES + "MTDatacenterAddress.m"
+EDGE_CONTEXT_H = MT_HEADERS + "MTContext.h"
+EDGE_CONTEXT_M = MT_SOURCES + "MTContext.m"
+EDGE_CONNECTION_H = MT_SOURCES + "MTTcpConnection.h"
+EDGE_CONNECTION_M = MT_SOURCES + "MTTcpConnection.m"
+EDGE_TRANSPORT_M = MT_SOURCES + "MTTcpTransport.m"
+EDGE_DISCOVER_M = MT_SOURCES + "MTDiscoverConnectionSignals.m"
+EDGE_SOCKET_H = MT_SOURCES + "MTWebSocketConnection.h"
+EDGE_SOCKET_M = MT_SOURCES + "MTWebSocketConnection.m"
+EDGE_ROUTE_H = MT_SOURCES + "MTEdgeRoute.h"
+EDGE_ROUTE_M = MT_SOURCES + "MTEdgeRoute.m"
+EDGE_SWIFT = "submodules/TelegramCore/Sources/Network/PlumaEdge.swift"
+
+# The new files, as they go into the checkout.
+EDGE_SOCKET_H_SOURCE = r'''#import <Foundation/Foundation.h>
+
+#import <MtProtoKit/MTContext.h>
+
+// pluma: the byte stream of an MTTcpConnection to an edge of the Pluma server
+// (task 109, ADR 0072 of the server repository): a WebSocket in TLS,
+// wss://<edge>/apiws, through a CDN. Its binary messages carry the bytes the
+// connection would send over TCP (the obfuscated header and the transport's
+// frames); the connection above frames and encrypts them as it does for a
+// socket.
+API_AVAILABLE(ios(13.0), macos(10.15))
+@interface MTWebSocketConnection : NSObject <MTTcpConnectionInterface>
+
+- (instancetype _Nonnull)initWithDelegate:(id<MTTcpConnectionInterfaceDelegate> _Nonnull)delegate delegateQueue:(dispatch_queue_t _Nonnull)delegateQueue;
+
+@end
+'''
+
+EDGE_SOCKET_M_SOURCE = r'''#import "MTWebSocketConnection.h"
+
+#import <SystemConfiguration/SystemConfiguration.h>
+#import <netinet/in.h>
+
+#import <MtProtoKit/MTLogging.h>
+#import <MtProtoKit/MTNetworkUsageCalculationInfo.h>
+#import <MtProtoKit/MTNetworkUsageManager.h>
+
+// The contract of the edges (task 109 of the server repository, "Контракт
+// клиентов"): the subprotocol of Web K, a User-Agent of Pluma's own, no
+// cookie; binary messages of at most 1 MiB out, while the server's may be
+// larger (its gateway takes up to 16 MiB).
+static NSString *const MTWebSocketProtocol = @"binary";
+static NSString *const MTWebSocketUserAgent = @"Pluma";
+static NSString *const MTWebSocketErrorDomain = @"MTWebSocketConnection";
+static const NSUInteger MTWebSocketMaxOutgoingMessage = 1024 * 1024;
+static const NSInteger MTWebSocketMaxIncomingMessage = 16 * 1024 * 1024;
+// No byte from the edge for 45 s, the server's pings included, and the
+// connection is dead. URLSession does not show the server's pings, so after
+// 15 s of silence the connection pings the edge itself and counts the pong.
+static const NSTimeInterval MTWebSocketSilenceLimit = 45.0;
+static const NSTimeInterval MTWebSocketPingAfter = 15.0;
+static const NSTimeInterval MTWebSocketLivenessTick = 5.0;
+
+typedef NS_ENUM(NSInteger, MTWebSocketError) {
+    MTWebSocketErrorBadAddress = 1,
+    MTWebSocketErrorConnectTimeout = 2,
+    MTWebSocketErrorTextMessage = 3,
+    MTWebSocketErrorSilent = 4,
+    MTWebSocketErrorClosed = 5
+};
+
+static NSError *MTWebSocketMakeError(MTWebSocketError code) {
+    return [NSError errorWithDomain:MTWebSocketErrorDomain code:code userInfo:nil];
+}
+
+static dispatch_source_t MTWebSocketMakeTimer(dispatch_queue_t queue, NSTimeInterval delay, NSTimeInterval interval, dispatch_block_t block) {
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), interval > 0.0 ? (uint64_t)(interval * NSEC_PER_SEC) : DISPATCH_TIME_FOREVER, (uint64_t)(0.25 * NSEC_PER_SEC));
+    dispatch_source_set_event_handler(timer, block);
+    dispatch_resume(timer);
+    return timer;
+}
+
+@interface MTWebSocketConnection ()
+
+- (void)taskOpened:(NSURLSessionTask *)task;
+- (void)task:(NSURLSessionTask *)task failedWithError:(NSError *)error;
+
+@end
+
+// The session keeps its delegate until it is invalidated; the delegate keeps
+// the connection weakly, so a connection nobody holds goes away (and its
+// dealloc closes the session).
+API_AVAILABLE(ios(13.0), macos(10.15))
+@interface MTWebSocketSessionDelegate : NSObject <NSURLSessionWebSocketDelegate>
+
+@property (nonatomic, weak) MTWebSocketConnection *connection;
+
+@end
+
+@implementation MTWebSocketSessionDelegate
+
+- (void)URLSession:(NSURLSession *)__unused session webSocketTask:(NSURLSessionWebSocketTask *)webSocketTask didOpenWithProtocol:(NSString *)__unused protocol {
+    [_connection taskOpened:webSocketTask];
+}
+
+- (void)URLSession:(NSURLSession *)__unused session webSocketTask:(NSURLSessionWebSocketTask *)webSocketTask didCloseWithCode:(NSURLSessionWebSocketCloseCode)closeCode reason:(NSData *)__unused reason {
+    [_connection task:webSocketTask failedWithError:[NSError errorWithDomain:MTWebSocketErrorDomain code:MTWebSocketErrorClosed userInfo:@{@"code": @(closeCode)}]];
+}
+
+- (void)URLSession:(NSURLSession *)__unused session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
+    [_connection task:task failedWithError:error != nil ? error : MTWebSocketMakeError(MTWebSocketErrorClosed)];
+}
+
+@end
+
+@implementation MTWebSocketConnection
+{
+    __weak id<MTTcpConnectionInterfaceDelegate> _delegate;
+    dispatch_queue_t _queue;
+    NSString *(^_getLogPrefix)();
+
+    MTNetworkUsageManager *_usageManager;
+    MTNetworkUsageManagerInterface _interface;
+
+    NSString *_host;
+    NSURLSession *_session;
+    NSURLSessionWebSocketTask *_task;
+    bool _opened;
+    bool _closed;
+    // The messages to send, in order; one is in flight at a time.
+    NSMutableArray<NSData *> *_outgoing;
+    bool _sending;
+
+    NSMutableData *_buffer;
+    bool _reading;
+    NSUInteger _readLength;
+    NSUInteger _readReported;
+    long _readTag;
+
+    dispatch_source_t _connectTimer;
+    dispatch_source_t _livenessTimer;
+    CFAbsoluteTime _lastReceived;
+    CFAbsoluteTime _lastPing;
+}
+
+- (instancetype)initWithDelegate:(id<MTTcpConnectionInterfaceDelegate>)delegate delegateQueue:(dispatch_queue_t)delegateQueue {
+    self = [super init];
+    if (self != nil) {
+        _delegate = delegate;
+        _queue = delegateQueue;
+        _interface = MTNetworkUsageManagerInterfaceOther;
+        _outgoing = [[NSMutableArray alloc] init];
+        _buffer = [[NSMutableData alloc] init];
+    }
+    return self;
+}
+
+- (void)dealloc {
+    if (_connectTimer != nil) {
+        dispatch_source_cancel(_connectTimer);
+    }
+    if (_livenessTimer != nil) {
+        dispatch_source_cancel(_livenessTimer);
+    }
+    [_task cancelWithCloseCode:NSURLSessionWebSocketCloseCodeNormalClosure reason:nil];
+    [_session invalidateAndCancel];
+}
+
+// The interface the connection goes out on, as GCDAsyncSocket tells it for
+// the statistics: cellular when the default route is.
++ (MTNetworkUsageManagerInterface)currentInterface {
+#if TARGET_OS_IPHONE
+    struct sockaddr_in zeroAddress;
+    memset(&zeroAddress, 0, sizeof(zeroAddress));
+    zeroAddress.sin_len = sizeof(zeroAddress);
+    zeroAddress.sin_family = AF_INET;
+    SCNetworkReachabilityRef reachability = SCNetworkReachabilityCreateWithAddress(kCFAllocatorDefault, (const struct sockaddr *)&zeroAddress);
+    if (reachability != NULL) {
+        SCNetworkReachabilityFlags flags = 0;
+        bool cellular = SCNetworkReachabilityGetFlags(reachability, &flags) && (flags & kSCNetworkReachabilityFlagsIsWWAN) != 0;
+        CFRelease(reachability);
+        if (cellular) {
+            return MTNetworkUsageManagerInterfaceWWAN;
+        }
+    }
+#endif
+    return MTNetworkUsageManagerInterfaceOther;
+}
+
+- (void)setGetLogPrefix:(NSString *(^)())getLogPrefix {
+    _getLogPrefix = [getLogPrefix copy];
+}
+
+- (void)setUsageCalculationInfo:(MTNetworkUsageCalculationInfo *)usageCalculationInfo {
+    _usageManager = usageCalculationInfo == nil ? nil : [[MTNetworkUsageManager alloc] initWithInfo:usageCalculationInfo];
+}
+
+// The host is the edge's URL (MTDatacenterAddress initWithWebSocketUrl:),
+// which carries the port too.
+- (bool)connectToHost:(NSString *)inHost onPort:(uint16_t)__unused port viaInterface:(NSString *)__unused inInterface withTimeout:(NSTimeInterval)timeout error:(NSError **)errPtr {
+    NSURL *url = [NSURL URLWithString:inHost];
+    if (_task != nil || _closed || url == nil || ![url.scheme isEqualToString:@"wss"] || url.host.length == 0) {
+        if (errPtr != NULL) {
+            *errPtr = MTWebSocketMakeError(MTWebSocketErrorBadAddress);
+        }
+        return false;
+    }
+    _host = url.host;
+
+    // An ephemeral session of its own: no cookie, cache or credential is kept
+    // or sent, and nothing waits for a network that is not there.
+    NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    configuration.HTTPCookieStorage = nil;
+    configuration.HTTPShouldSetCookies = false;
+    configuration.URLCache = nil;
+    configuration.URLCredentialStorage = nil;
+    configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    configuration.waitsForConnectivity = false;
+    configuration.HTTPAdditionalHeaders = @{@"User-Agent": MTWebSocketUserAgent};
+
+    NSOperationQueue *delegateQueue = [[NSOperationQueue alloc] init];
+    delegateQueue.maxConcurrentOperationCount = 1;
+    delegateQueue.underlyingQueue = _queue;
+    MTWebSocketSessionDelegate *sessionDelegate = [[MTWebSocketSessionDelegate alloc] init];
+    sessionDelegate.connection = self;
+    _session = [NSURLSession sessionWithConfiguration:configuration delegate:sessionDelegate delegateQueue:delegateQueue];
+    _task = [_session webSocketTaskWithURL:url protocols:@[MTWebSocketProtocol]];
+    _task.maximumMessageSize = MTWebSocketMaxIncomingMessage;
+
+    __weak MTWebSocketConnection *weakSelf = self;
+    _connectTimer = MTWebSocketMakeTimer(_queue, timeout, 0.0, ^{
+        __strong MTWebSocketConnection *strongSelf = weakSelf;
+        if (strongSelf != nil && !strongSelf->_opened) {
+            [strongSelf failWithError:MTWebSocketMakeError(MTWebSocketErrorConnectTimeout)];
+        }
+    });
+
+    if (MTLogEnabled()) {
+        MTLogWithPrefix(_getLogPrefix, @"[MTWebSocketConnection#%" PRIxPTR " connecting to the edge %@]", (intptr_t)self, _host);
+    }
+    [_task resume];
+    return true;
+}
+
+- (void)taskOpened:(NSURLSessionTask *)task {
+    __weak MTWebSocketConnection *weakSelf = self;
+    dispatch_async(_queue, ^{
+        __strong MTWebSocketConnection *strongSelf = weakSelf;
+        if (strongSelf == nil || task != strongSelf->_task || strongSelf->_closed || strongSelf->_opened) {
+            return;
+        }
+        [strongSelf opened];
+    });
+}
+
+- (void)opened {
+    _opened = true;
+    if (_connectTimer != nil) {
+        dispatch_source_cancel(_connectTimer);
+        _connectTimer = nil;
+    }
+    _interface = [MTWebSocketConnection currentInterface];
+    _lastReceived = CFAbsoluteTimeGetCurrent();
+    _lastPing = _lastReceived;
+    if (MTLogEnabled()) {
+        MTLogWithPrefix(_getLogPrefix, @"[MTWebSocketConnection#%" PRIxPTR " connected to the edge %@]", (intptr_t)self, _host);
+    }
+
+    __weak MTWebSocketConnection *weakSelf = self;
+    _livenessTimer = MTWebSocketMakeTimer(_queue, MTWebSocketLivenessTick, MTWebSocketLivenessTick, ^{
+        [weakSelf checkLiveness];
+    });
+    [self receiveNext];
+    // What was written before the handshake goes out first, in its order.
+    [self sendNext];
+
+    id<MTTcpConnectionInterfaceDelegate> delegate = _delegate;
+    [delegate connectionInterfaceDidConnect];
+}
+
+- (void)checkLiveness {
+    if (_closed || !_opened) {
+        return;
+    }
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - _lastReceived >= MTWebSocketSilenceLimit) {
+        [self failWithError:MTWebSocketMakeError(MTWebSocketErrorSilent)];
+        return;
+    }
+    if (now - _lastReceived >= MTWebSocketPingAfter && now - _lastPing >= MTWebSocketPingAfter) {
+        _lastPing = now;
+        NSURLSessionWebSocketTask *task = _task;
+        __weak MTWebSocketConnection *weakSelf = self;
+        dispatch_queue_t queue = _queue;
+        [task sendPingWithPongReceiveHandler:^(NSError *error) {
+            dispatch_async(queue, ^{
+                __strong MTWebSocketConnection *strongSelf = weakSelf;
+                if (strongSelf == nil || task != strongSelf->_task || strongSelf->_closed) {
+                    return;
+                }
+                if (error != nil) {
+                    [strongSelf failWithError:error];
+                } else {
+                    strongSelf->_lastReceived = CFAbsoluteTimeGetCurrent();
+                }
+            });
+        }];
+    }
+}
+
+- (void)receiveNext {
+    NSURLSessionWebSocketTask *task = _task;
+    __weak MTWebSocketConnection *weakSelf = self;
+    dispatch_queue_t queue = _queue;
+    [task receiveMessageWithCompletionHandler:^(NSURLSessionWebSocketMessage *message, NSError *error) {
+        dispatch_async(queue, ^{
+            __strong MTWebSocketConnection *strongSelf = weakSelf;
+            if (strongSelf == nil || task != strongSelf->_task || strongSelf->_closed) {
+                return;
+            }
+            [strongSelf received:message error:error];
+        });
+    }];
+}
+
+- (void)received:(NSURLSessionWebSocketMessage *)message error:(NSError *)error {
+    if (error != nil || message == nil) {
+        [self failWithError:error != nil ? error : MTWebSocketMakeError(MTWebSocketErrorClosed)];
+        return;
+    }
+    // The server sends binary messages only; a text one is not the edge.
+    if (message.type != NSURLSessionWebSocketMessageTypeData) {
+        [self failWithError:MTWebSocketMakeError(MTWebSocketErrorTextMessage)];
+        return;
+    }
+    _lastReceived = CFAbsoluteTimeGetCurrent();
+    NSData *data = message.data;
+    if (data.length != 0) {
+        [_usageManager addIncomingBytes:data.length interface:_interface];
+        [_buffer appendData:data];
+        [self deliverReads];
+    }
+    if (!_closed) {
+        [self receiveNext];
+    }
+}
+
+// Reads as GCDAsyncSocket makes them: exactly the length asked for, and the
+// progress of the read in between.
+- (void)deliverReads {
+    while (_reading && !_closed && _buffer.length >= _readLength) {
+        NSUInteger length = _readLength;
+        long tag = _readTag;
+        NSData *data = [_buffer subdataWithRange:NSMakeRange(0, length)];
+        [_buffer replaceBytesInRange:NSMakeRange(0, length) withBytes:NULL length:0];
+        _reading = false;
+        id<MTTcpConnectionInterfaceDelegate> delegate = _delegate;
+        [delegate connectionInterfaceDidReadData:data withTag:tag networkType:_interface == MTNetworkUsageManagerInterfaceOther ? 0 : 1];
+    }
+    if (_reading && !_closed) {
+        NSUInteger available = MIN(_buffer.length, _readLength);
+        if (available > _readReported) {
+            NSUInteger partial = available - _readReported;
+            _readReported = available;
+            id<MTTcpConnectionInterfaceDelegate> delegate = _delegate;
+            [delegate connectionInterfaceDidReadPartialDataOfLength:partial tag:_readTag];
+        }
+    }
+}
+
+- (void)readDataToLength:(NSUInteger)length withTimeout:(NSTimeInterval)__unused timeout tag:(long)tag {
+    if (_closed) {
+        return;
+    }
+    _reading = true;
+    _readLength = length;
+    _readReported = 0;
+    _readTag = tag;
+    // Bytes that are already here go out on the next pass of the queue, as a
+    // socket's would: the caller may be inside the callback of the last read.
+    if (_buffer.length != 0) {
+        __weak MTWebSocketConnection *weakSelf = self;
+        dispatch_async(_queue, ^{
+            [weakSelf deliverReads];
+        });
+    }
+}
+
+- (void)writeData:(NSData *)data {
+    if (_closed || data.length == 0) {
+        return;
+    }
+    for (NSUInteger offset = 0; offset < data.length; offset += MTWebSocketMaxOutgoingMessage) {
+        [_outgoing addObject:[data subdataWithRange:NSMakeRange(offset, MIN(MTWebSocketMaxOutgoingMessage, data.length - offset))]];
+    }
+    [self sendNext];
+}
+
+// The bytes are one stream, encrypted in order (obfuscated2), so the next
+// message goes out only once the task has taken the last one: URLSession does
+// not document the order of messages sent without waiting.
+- (void)sendNext {
+    if (_closed || !_opened || _sending || _outgoing.count == 0) {
+        return;
+    }
+    NSData *part = _outgoing[0];
+    [_outgoing removeObjectAtIndex:0];
+    _sending = true;
+    NSURLSessionWebSocketTask *task = _task;
+    __weak MTWebSocketConnection *weakSelf = self;
+    dispatch_queue_t queue = _queue;
+    [task sendMessage:[[NSURLSessionWebSocketMessage alloc] initWithData:part] completionHandler:^(NSError *error) {
+        dispatch_async(queue, ^{
+            __strong MTWebSocketConnection *strongSelf = weakSelf;
+            if (strongSelf == nil || task != strongSelf->_task || strongSelf->_closed) {
+                return;
+            }
+            if (error != nil) {
+                [strongSelf failWithError:error];
+                return;
+            }
+            strongSelf->_sending = false;
+            [strongSelf sendNext];
+        });
+    }];
+    [_usageManager addOutgoingBytes:part.length interface:_interface];
+}
+
+- (void)task:(NSURLSessionTask *)task failedWithError:(NSError *)error {
+    __weak MTWebSocketConnection *weakSelf = self;
+    dispatch_async(_queue, ^{
+        __strong MTWebSocketConnection *strongSelf = weakSelf;
+        if (strongSelf == nil || task != strongSelf->_task || strongSelf->_closed) {
+            return;
+        }
+        [strongSelf failWithError:error];
+    });
+}
+
+- (void)failWithError:(NSError *)error {
+    if (_closed) {
+        return;
+    }
+    if (MTLogEnabled()) {
+        MTLogWithPrefix(_getLogPrefix, @"[MTWebSocketConnection#%" PRIxPTR " the edge %@ is gone (%@ %d)]", (intptr_t)self, _host, error.domain, (int)error.code);
+    }
+    [self close];
+    id<MTTcpConnectionInterfaceDelegate> delegate = _delegate;
+    [delegate connectionInterfaceDidDisconnectWithError:error];
+}
+
+- (void)close {
+    _closed = true;
+    _reading = false;
+    if (_connectTimer != nil) {
+        dispatch_source_cancel(_connectTimer);
+        _connectTimer = nil;
+    }
+    if (_livenessTimer != nil) {
+        dispatch_source_cancel(_livenessTimer);
+        _livenessTimer = nil;
+    }
+    [_task cancelWithCloseCode:NSURLSessionWebSocketCloseCodeNormalClosure reason:nil];
+    _task = nil;
+    [_session invalidateAndCancel];
+    _session = nil;
+    [_outgoing removeAllObjects];
+    _sending = false;
+}
+
+// As GCDAsyncSocket after resetDelegate: MTTcpConnection closes itself, no
+// callback follows.
+- (void)disconnect {
+    if (!_closed) {
+        [self close];
+    }
+}
+
+- (void)resetDelegate {
+    _delegate = nil;
+}
+
+// MTTcpConnection's dealloc clears the delegate of its interface as of a
+// GCDAsyncSocket.
+- (void)setDelegate:(id<MTTcpConnectionInterfaceDelegate>)delegate {
+    _delegate = delegate;
+}
+
+@end
+'''
+
+EDGE_ROUTE_H_SOURCE = r'''#import <Foundation/Foundation.h>
+
+@class MTDatacenterAddress;
+
+// pluma: the order between the direct addresses of the Pluma server and its
+// edges (task 109, ADR 0072 of the server repository: "Контракт клиентов",
+// items 5 and 6). The edges go last unless the server's pluma_edge puts them
+// first; the client moves to them when the direct path does not connect, or
+// goes silent twice within ten minutes, and keeps to them for sticky_s once
+// an edge has answered. All of it lives in the memory of the process: after
+// a restart the direct path is first again. One route for the process, as
+// there is one server.
+@interface MTEdgeRoute : NSObject
+
++ (MTEdgeRoute * _Nonnull)shared;
+
+// pluma_edge, or the build's order: whether the edges go first, and how long
+// the client keeps to them after moving there.
+- (void)setEdgesFirst:(bool)edgesFirst stickySeconds:(NSTimeInterval)stickySeconds;
+
+// Whether the edges go first now; forgetBefore receives the time before
+// which the choice of an address counts no failure (the start of the
+// process, or the last change of the order).
+- (bool)edgesFirstForgettingBefore:(int32_t * _Nullable)forgetBefore;
+
+// A connection of a transport closed. Returns whether its failure counts for
+// the choice of the next address: the first silence of the direct path does
+// not, so that it is tried again before the edges.
+- (bool)transportClosedWithAddress:(MTDatacenterAddress * _Nonnull)address opened:(bool)opened silent:(bool)silent error:(bool)error;
+
+// A connection of a transport received its first valid data.
+- (void)transportReceivedValidDataWithAddress:(MTDatacenterAddress * _Nonnull)address;
+
+@end
+'''
+
+EDGE_ROUTE_M_SOURCE = r'''#import "MTEdgeRoute.h"
+
+#import <os/lock.h>
+
+#import <MtProtoKit/MTDatacenterAddress.h>
+#import <MtProtoKit/MTLogging.h>
+
+// The direct path is "frozen" when a connection that opened stays silent
+// after a request until MTTcpConnection gives up on the response (12 s and
+// more); two such within ten minutes, whatever answered in between, move the
+// client to the edges. A path that freezes after its first kilobytes still
+// answers small requests, so a success between the two does not break the row.
+static const NSTimeInterval MTEdgeFreezeWindow = 10.0 * 60.0;
+static const int MTEdgeFreezesToMove = 2;
+static const NSTimeInterval MTEdgeDefaultStickySeconds = 1800.0;
+
+@implementation MTEdgeRoute
+{
+    os_unfair_lock _lock;
+    bool _configuredFirst;
+    NSTimeInterval _stickySeconds;
+    CFAbsoluteTime _firstUntil;
+    CFAbsoluteTime _forgetBefore;
+    int _freezes;
+    CFAbsoluteTime _lastFreeze;
+}
+
++ (MTEdgeRoute *)shared {
+    static MTEdgeRoute *route = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        route = [[MTEdgeRoute alloc] init];
+    });
+    return route;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self != nil) {
+        _lock = OS_UNFAIR_LOCK_INIT;
+        _stickySeconds = MTEdgeDefaultStickySeconds;
+        _forgetBefore = CFAbsoluteTimeGetCurrent();
+    }
+    return self;
+}
+
+- (void)setEdgesFirst:(bool)edgesFirst stickySeconds:(NSTimeInterval)stickySeconds {
+    os_unfair_lock_lock(&_lock);
+    if (_configuredFirst != edgesFirst) {
+        _configuredFirst = edgesFirst;
+        _forgetBefore = CFAbsoluteTimeGetCurrent();
+    }
+    _stickySeconds = stickySeconds;
+    os_unfair_lock_unlock(&_lock);
+}
+
+// Under the lock. The stay on the edges ends here: from now on the direct
+// path is first again, whatever happened to it before.
+- (bool)edgesFirstNow:(CFAbsoluteTime)now {
+    if (_configuredFirst) {
+        return true;
+    }
+    if (_firstUntil != 0.0) {
+        if (now < _firstUntil) {
+            return true;
+        }
+        _forgetBefore = MAX(_forgetBefore, _firstUntil);
+        _firstUntil = 0.0;
+        if (MTLogEnabled()) {
+            MTLog(@"[MTEdgeRoute the direct path is first again]");
+        }
+    }
+    return false;
+}
+
+- (bool)edgesFirstForgettingBefore:(int32_t *)forgetBefore {
+    os_unfair_lock_lock(&_lock);
+    bool result = [self edgesFirstNow:CFAbsoluteTimeGetCurrent()];
+    if (forgetBefore != NULL) {
+        *forgetBefore = (int32_t)_forgetBefore;
+    }
+    os_unfair_lock_unlock(&_lock);
+    return result;
+}
+
+// Under the lock.
+- (void)moveToEdgesAt:(CFAbsoluteTime)now {
+    _firstUntil = now + _stickySeconds;
+    _forgetBefore = now;
+    _freezes = 0;
+    if (MTLogEnabled()) {
+        MTLog(@"[MTEdgeRoute the edges go first for %d s]", (int)_stickySeconds);
+    }
+}
+
+- (bool)transportClosedWithAddress:(MTDatacenterAddress *)address opened:(bool)opened silent:(bool)silent error:(bool)error {
+    if (!error || address.websocket || !opened || !silent) {
+        return true;
+    }
+    os_unfair_lock_lock(&_lock);
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    bool report = true;
+    if (![self edgesFirstNow:now]) {
+        if (_freezes != 0 && now - _lastFreeze > MTEdgeFreezeWindow) {
+            _freezes = 0;
+        }
+        _freezes += 1;
+        _lastFreeze = now;
+        if (_freezes >= MTEdgeFreezesToMove) {
+            if (MTLogEnabled()) {
+                MTLog(@"[MTEdgeRoute the direct path froze %d times in a row]", _freezes);
+            }
+            [self moveToEdgesAt:now];
+        } else {
+            report = false;
+            if (MTLogEnabled()) {
+                MTLog(@"[MTEdgeRoute the direct path froze; it is tried again first]");
+            }
+        }
+    }
+    os_unfair_lock_unlock(&_lock);
+    return report;
+}
+
+- (void)transportReceivedValidDataWithAddress:(MTDatacenterAddress *)address {
+    if (!address.websocket) {
+        return;
+    }
+    os_unfair_lock_lock(&_lock);
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (![self edgesFirstNow:now]) {
+        [self moveToEdgesAt:now];
+    }
+    os_unfair_lock_unlock(&_lock);
+}
+
+@end
+'''
+
+EDGE_SWIFT_SOURCE = r'''import Foundation
+import MtProtoKit
+
+// pluma: the edges of the Pluma server (task 109, ADR 0072 of the server
+// repository): wss://<edge>/apiws through a CDN, the last addresses of
+// datacenter 1 unless the server puts them first. The build's list
+// (PLUMA_EDGE_WS_URLS) holds until the server's app configuration gives its
+// own, the key pluma_edge:
+// {"v":1,"ws":["wss://…/apiws"],"order":["direct","edge"],"sticky_s":1800}.
+// A value that is not exactly that, or none, is the build's list again.
+struct PlumaEdgeConfiguration: Equatable {
+    //BUILT-IN EDGES
+    static let builtInUrls: [String] = []
+    static let maxEdges = 4
+    static let defaultStickySeconds: Int32 = 1800
+
+    static let builtIn = PlumaEdgeConfiguration(urls: PlumaEdgeConfiguration.builtInUrls, edgesFirst: false, stickySeconds: PlumaEdgeConfiguration.defaultStickySeconds)
+
+    let urls: [String]
+    let edgesFirst: Bool
+    let stickySeconds: Int32
+
+    init(urls: [String], edgesFirst: Bool, stickySeconds: Int32) {
+        self.urls = urls
+        self.edgesFirst = edgesFirst
+        self.stickySeconds = stickySeconds
+    }
+
+    init?(value: [String: Any]) {
+        guard let version = value["v"] as? Double, version == 1.0 else {
+            return nil
+        }
+        guard let ws = value["ws"] as? [Any], ws.count >= 1, ws.count <= PlumaEdgeConfiguration.maxEdges else {
+            return nil
+        }
+        var urls: [String] = []
+        for item in ws {
+            guard let url = item as? String, plumaEdgeUrlIsValid(url), !urls.contains(url) else {
+                return nil
+            }
+            urls.append(url)
+        }
+        guard let order = value["order"] as? [Any], order.count == 2, let first = order[0] as? String, let second = order[1] as? String else {
+            return nil
+        }
+        switch (first, second) {
+        case ("direct", "edge"):
+            self.edgesFirst = false
+        case ("edge", "direct"):
+            self.edgesFirst = true
+        default:
+            return nil
+        }
+        guard let sticky = value["sticky_s"] as? Double, sticky.rounded() == sticky, sticky >= 60.0, sticky <= 86400.0 else {
+            return nil
+        }
+        self.urls = urls
+        self.stickySeconds = Int32(sticky)
+    }
+
+    static func with(appConfiguration: AppConfiguration) -> PlumaEdgeConfiguration {
+        if let data = appConfiguration.data, let value = data["pluma_edge"] as? [String: Any], let configuration = PlumaEdgeConfiguration(value: value) {
+            return configuration
+        }
+        return .builtIn
+    }
+
+    var addresses: [MTDatacenterAddress] {
+        return self.urls.map { MTDatacenterAddress(webSocketUrl: $0) }
+    }
+
+    func apply() {
+        MTContext.setEdgesFirst(self.edgesFirst, stickySeconds: Double(self.stickySeconds))
+    }
+}
+
+// wss://<host>[:port]/<path>: a host name (TLS checks the edge by it), not
+// an address; no user, query or fragment.
+func plumaEdgeUrlIsValid(_ string: String) -> Bool {
+    guard string.count <= 512, let components = URLComponents(string: string), components.scheme == "wss" else {
+        return false
+    }
+    guard let host = components.host, !host.isEmpty, host == host.lowercased() else {
+        return false
+    }
+    if host.contains(":") || host.allSatisfy({ $0.isNumber || $0 == "." }) {
+        return false
+    }
+    if !host.allSatisfy({ ($0 >= "a" && $0 <= "z") || ($0 >= "0" && $0 <= "9") || $0 == "." || $0 == "-" }) {
+        return false
+    }
+    if components.user != nil || components.password != nil || components.query != nil || components.fragment != nil {
+        return false
+    }
+    return components.path.hasPrefix("/")
+}
+
+extension Network {
+    // The edges of a new app configuration: the connections take them at
+    // their next choice of an address. The server is datacenter 1.
+    func updatePlumaEdge(_ configuration: PlumaEdgeConfiguration) {
+        configuration.apply()
+        self.context.replaceEdges(datacenterId: 1, edges: configuration.addresses)
+    }
+}
+'''
+
+EDGE_BUILT_IN = "    //BUILT-IN EDGES\n    static let builtInUrls: [String] = []\n"
+
+
+def edge_swift_source(urls):
+    """PlumaEdge.swift with the build's edges."""
+    if EDGE_SWIFT_SOURCE.count(EDGE_BUILT_IN) != 1:
+        raise PatchError(f"{EDGE_SWIFT}: the list of the build's edges is not where the patch writes it")
+    listed = "".join(f"        {json.dumps(url)},\n" for url in urls)
+    return EDGE_SWIFT_SOURCE.replace(
+        EDGE_BUILT_IN,
+        "    // The build's edges, PLUMA_EDGE_WS_URLS, in the order the app tries them.\n"
+        f"    static let builtInUrls: [String] = [\n{listed}    ]\n")
+
+
+def edge_files(c):
+    return ((EDGE_SOCKET_H, EDGE_SOCKET_H_SOURCE), (EDGE_SOCKET_M, EDGE_SOCKET_M_SOURCE),
+            (EDGE_ROUTE_H, EDGE_ROUTE_H_SOURCE), (EDGE_ROUTE_M, EDGE_ROUTE_M_SOURCE),
+            (EDGE_SWIFT, edge_swift_source(c.edge_urls)))
+
+
+EDGE_CHOOSE_OLD = src(" " * 8, """
+    for (MTTransportScheme *scheme in schemes.reverseObjectEnumerator) {
+        if (scheme.address.isIpv6 && !scanIpv6) {
+            continue;
+        }
+        [self _withTransportSchemeStatsForDatacenterId:datacenterId transportScheme:scheme process:^MTTransportSchemeStats *(MTTransportSchemeStats *current) {
+            if (schemeWithEarliestFailure == nil) {
+                schemeWithEarliestFailure = scheme;
+                earliestFailure = current.lastFailureTimestamp;
+            } else if (earliestFailure > current.lastFailureTimestamp) {
+                earliestFailure = current.lastFailureTimestamp;
+                schemeWithEarliestFailure = scheme;
+            }
+            return current;
+        }];
+    }
+""")
+
+EDGE_CHOOSE_NEW = src(" " * 8, """
+    // pluma: the edges of the Pluma server (task 109, MTEdgeRoute). Of the addresses
+    // that failed as long ago (or never), the direct ones go before the edges and the
+    // edges in their order, unless the edges go first now; failures before the last
+    // change of that order count as none. No edge with a proxy of the user's.
+    int32_t forgetBefore = 0;
+    bool edgesFirst = [[MTEdgeRoute shared] edgesFirstForgettingBefore:&forgetBefore];
+    bool proxy = _apiEnvironment.socksProxySettings != nil;
+    NSMutableArray<MTDatacenterAddress *> *edges = [[NSMutableArray alloc] init];
+    for (MTTransportScheme *scheme in schemes) {
+        if (scheme.address.websocket && ![edges containsObject:scheme.address]) {
+            [edges addObject:scheme.address];
+        }
+    }
+    __block NSInteger bestRank = 0;
+    for (MTTransportScheme *scheme in schemes.reverseObjectEnumerator) {
+        if (scheme.address.isIpv6 && !scanIpv6) {
+            continue;
+        }
+        if (scheme.address.websocket && proxy) {
+            continue;
+        }
+        NSInteger rank = scheme.address.websocket ? (edgesFirst ? 0 : 16) + (NSInteger)[edges indexOfObject:scheme.address] : (edgesFirst ? 16 : 0);
+        [self _withTransportSchemeStatsForDatacenterId:datacenterId transportScheme:scheme process:^MTTransportSchemeStats *(MTTransportSchemeStats *current) {
+            int32_t failure = current.lastFailureTimestamp < forgetBefore ? 0 : current.lastFailureTimestamp;
+            if (schemeWithEarliestFailure == nil || failure < earliestFailure || (failure == earliestFailure && rank < bestRank)) {
+                schemeWithEarliestFailure = scheme;
+                earliestFailure = failure;
+                bestRank = rank;
+            }
+            return current;
+        }];
+    }
+""")
+
+EDGE_SEED_METHOD = src("", """
+    - (void)setSeedAddressSetForDatacenterWithId:(NSInteger)datacenterId seedAddressSet:(MTDatacenterAddressSet *)seedAddressSet
+    {
+        [[MTContext contextQueue] dispatchOnQueue:^
+        {
+            _datacenterSeedAddressSetById[@(datacenterId)] = seedAddressSet;
+        }];
+    }
+""")
+
+EDGE_CONTEXT_METHODS = src("", """
+
+    // pluma: the edges of the Pluma server (task 109).
+    + (void)setEdgesFirst:(bool)edgesFirst stickySeconds:(NSTimeInterval)stickySeconds
+    {
+        [[MTEdgeRoute shared] setEdgesFirst:edgesFirst stickySeconds:stickySeconds];
+    }
+
+    - (void)replaceEdgesOfDatacenterWithId:(NSInteger)datacenterId edges:(NSArray<MTDatacenterAddress *> *)edges
+    {
+        [[MTContext contextQueue] dispatchOnQueue:^
+        {
+            MTDatacenterAddressSet *current = _datacenterSeedAddressSetById[@(datacenterId)];
+            if (current == nil) {
+                return;
+            }
+            NSMutableArray<MTDatacenterAddress *> *addressList = [[NSMutableArray alloc] init];
+            for (MTDatacenterAddress *address in current.addressList) {
+                if (!address.websocket) {
+                    [addressList addObject:address];
+                }
+            }
+            [addressList addObjectsFromArray:edges];
+            if ([current.addressList isEqualToArray:addressList]) {
+                return;
+            }
+            _datacenterSeedAddressSetById[@(datacenterId)] = [[MTDatacenterAddressSet alloc] initWithAddressList:addressList];
+            // A transport keeps the schemes it was made with (MTProto resetTransport), so the
+            // running ones are reset to take the new edges; it happens only when they change.
+            NSArray *changeListeners = [[NSArray alloc] initWithArray:_changeListeners];
+            for (MTWeakContextChangeListener *value in changeListeners) {
+                id<MTContextChangeListener> listener = value.target;
+                if ([listener respondsToSelector:@selector(contextDatacenterTransportSchemesUpdated:datacenterId:shouldReset:)]) {
+                    [listener contextDatacenterTransportSchemesUpdated:self datacenterId:datacenterId shouldReset:true];
+                }
+            }
+        }];
+    }
+""")
+
+EDGE_DISCOVER_PROBE = src(" " * 8, """
+    // pluma: an edge of the Pluma server (task 109): a WebSocket in TLS through a CDN,
+    // with no other ports. Its handshake takes longer than a TCP one, and it starts
+    // after the direct addresses, so that the direct path wins when both answer,
+    // unless the edges go first now.
+    if (address.websocket) {
+        MTSignal *edgeSignal = [[[self tcpConnectionWithContext:context datacenterId:datacenterId address:address] then:[MTSignal single:tcpTransportScheme]] timeout:MTEdgeProbeTimeout onQueue:[MTQueue concurrentDefaultQueue] orSignal:[MTSignal fail:nil]];
+        if (![[MTEdgeRoute shared] edgesFirstForgettingBefore:NULL]) {
+            edgeSignal = [edgeSignal delay:MTEdgeProbeDelay onQueue:[MTQueue concurrentDefaultQueue]];
+        }
+        [bestTcp4Signals addObject:[edgeSignal catch:^MTSignal *(__unused id error) {
+            return [MTSignal complete];
+        }]];
+        continue;
+    }
+""")
+
+
+def edge_seed_old(c):
+    """The seed loop of Network.swift as patch() leaves it."""
+    return src(" " * 12, f"""
+        for (id, ips) in seedAddressList {{
+            context.setSeedAddressSetForDatacenterWithId(id, seedAddressSet: MTDatacenterAddressSet(addressList: ips.map {{ MTDatacenterAddress(ip: $0, port: {c.port}, preferForMedia: false, restrictToTcp: false, cdn: false, preferForProxy: false, secret: nil) }}))
+        }}
+    """)
+
+
+def edge_seed_new(c):
+    return src(" " * 12, f"""
+        // pluma: the edges of the server (task 109, PlumaEdge.swift) are its last
+        // addresses, in the order of the server's pluma_edge, or of the build when the
+        // server has given none.
+        let plumaEdge = PlumaEdgeConfiguration.with(appConfiguration: appConfiguration)
+        plumaEdge.apply()
+        for (id, ips) in seedAddressList {{
+            context.setSeedAddressSetForDatacenterWithId(id, seedAddressSet: MTDatacenterAddressSet(addressList: ips.map {{ MTDatacenterAddress(ip: $0, port: {c.port}, preferForMedia: false, restrictToTcp: false, cdn: false, preferForProxy: false, secret: nil) }} + plumaEdge.addresses))
+        }}
+    """)
+
+
+EDGE_ACCOUNT_ANCHOR = ("        if !supplementary {\n"
+                       "            self.managedOperationsDisposable.add(managedNetworkTelemetryReports(postbox: postbox, network: network).start())\n"
+                       "        }\n")
+EDGE_ACCOUNT = src(" " * 8, """
+    // pluma: the edges of the server follow pluma_edge of the app configuration (task 109).
+    self.managedOperationsDisposable.add((postbox.preferencesView(keys: [PreferencesKeys.appConfiguration])
+    |> map { view -> PlumaEdgeConfiguration in
+        return PlumaEdgeConfiguration.with(appConfiguration: view.values[PreferencesKeys.appConfiguration]?.get(AppConfiguration.self) ?? .defaultValue)
+    }
+    |> distinctUntilChanged).start(next: { configuration in
+        network.updatePlumaEdge(configuration)
+    }))
+""")
+
+# (file, old, new): each old occurs once in upstream's file (in Network.swift,
+# as patch() leaves it), and new holds old where the edit only adds.
+EDGE_EDITS = (
+    (EDGE_ADDRESS_H,
+     "@property (nonatomic, readonly) NSData * _Nullable secret;\n",
+     "@property (nonatomic, readonly) NSData * _Nullable secret;\n"
+     "// pluma: an edge of the Pluma server (task 109): ip holds its wss:// URL, and the\n"
+     "// connection is a WebSocket in TLS (MTWebSocketConnection), not a socket.\n"
+     "@property (nonatomic, readonly) bool websocket;\n"),
+    (EDGE_ADDRESS_H,
+     "- (BOOL)isEqualToAddress:(MTDatacenterAddress * _Nonnull)other;\n",
+     "- (instancetype _Nonnull)initWithWebSocketUrl:(NSString * _Nonnull)url; // pluma: an edge (task 109)\n"
+     "\n"
+     "- (BOOL)isEqualToAddress:(MTDatacenterAddress * _Nonnull)other;\n"),
+    (EDGE_ADDRESS_M,
+     "- (instancetype)initWithCoder:(NSCoder *)aDecoder\n",
+     src("", """
+         // pluma: an edge of the Pluma server (task 109). The URL takes the place of the
+         // address, so that address sets, schemes and statistics keep it as any other;
+         // the port is wss://'s, for what reads it.
+         - (instancetype)initWithWebSocketUrl:(NSString *)url
+         {
+             self = [super init];
+             if (self != nil)
+             {
+                 _ip = url;
+                 _port = 443;
+                 _websocket = true;
+             }
+             return self;
+         }
+
+         - (instancetype)initWithCoder:(NSCoder *)aDecoder
+     """)),
+    (EDGE_ADDRESS_M,
+     '        _secret = [aDecoder decodeObjectForKey:@"secret"];\n',
+     '        _secret = [aDecoder decodeObjectForKey:@"secret"];\n'
+     '        _websocket = [aDecoder decodeBoolForKey:@"websocket"]; // pluma: false in what older builds kept\n'),
+    (EDGE_ADDRESS_M,
+     '    [aCoder encodeObject:_secret forKey:@"secret"];\n',
+     '    [aCoder encodeObject:_secret forKey:@"secret"];\n'
+     '    [aCoder encodeBool:_websocket forKey:@"websocket"]; // pluma: the edges (task 109)\n'),
+    (EDGE_ADDRESS_M,
+     "    if (_preferForProxy != other.preferForProxy) {\n        return false;\n    }\n",
+     "    if (_preferForProxy != other.preferForProxy) {\n        return false;\n    }\n"
+     "    \n"
+     "    // pluma: an edge is not an address of the same text (task 109).\n"
+     "    if (_websocket != other.websocket) {\n        return false;\n    }\n"),
+    (EDGE_ADDRESS_M,
+     '    return [[NSString alloc] initWithFormat:@"%@:%d (media: %@, cdn: %@, static: %@, secret: %@)", '
+     '_ip == nil ? _host : _ip, (int)_port, _preferForMedia ? @"yes" : @"no", _cdn ? @"yes" : @"no", '
+     '_preferForProxy ? @"yes" : @"no", _secret];\n',
+     '    // pluma: and whether it is an edge (task 109).\n'
+     '    return [[NSString alloc] initWithFormat:@"%@:%d (media: %@, cdn: %@, static: %@, secret: %@, websocket: %@)", '
+     '_ip == nil ? _host : _ip, (int)_port, _preferForMedia ? @"yes" : @"no", _cdn ? @"yes" : @"no", '
+     '_preferForProxy ? @"yes" : @"no", _secret, _websocket ? @"yes" : @"no"];\n'),
+    (EDGE_CONTEXT_H,
+     "- (void)setSeedAddressSetForDatacenterWithId:(NSInteger)datacenterId seedAddressSet:(MTDatacenterAddressSet * _Nonnull)seedAddressSet;\n",
+     "- (void)setSeedAddressSetForDatacenterWithId:(NSInteger)datacenterId seedAddressSet:(MTDatacenterAddressSet * _Nonnull)seedAddressSet;\n"
+     "// pluma: the edges of the Pluma server (task 109, MTEdgeRoute): whether they go before\n"
+     "// the direct addresses, and how long the client keeps to them after moving there; and\n"
+     "// the edges among a datacenter's seed addresses, replaced (the direct ones stay) for\n"
+     "// the next choice of an address.\n"
+     "+ (void)setEdgesFirst:(bool)edgesFirst stickySeconds:(NSTimeInterval)stickySeconds NS_SWIFT_NAME(setEdgesFirst(_:stickySeconds:));\n"
+     "- (void)replaceEdgesOfDatacenterWithId:(NSInteger)datacenterId edges:(NSArray<MTDatacenterAddress *> * _Nonnull)edges "
+     "NS_SWIFT_NAME(replaceEdges(datacenterId:edges:));\n"),
+    (EDGE_CONTEXT_M,
+     '#import "MTTransportSchemeStats.h"\n',
+     '#import "MTTransportSchemeStats.h"\n#import "MTEdgeRoute.h" // pluma: the edges (task 109)\n'),
+    (EDGE_CONTEXT_M, EDGE_SEED_METHOD, EDGE_SEED_METHOD + "\n" + EDGE_CONTEXT_METHODS),
+    (EDGE_CONTEXT_M, EDGE_CHOOSE_OLD, EDGE_CHOOSE_NEW),
+    (EDGE_CONNECTION_H,
+     "@property (nonatomic, strong, readonly) NSString *interface;\n",
+     "@property (nonatomic, strong, readonly) NSString *interface;\n"
+     "// pluma: the connection closed because no byte answered a request in time\n"
+     "// (responseTimeout): the silence the edges count (task 109, MTEdgeRoute).\n"
+     "@property (nonatomic, readonly) bool responseTimedOut;\n"),
+    (EDGE_CONNECTION_M,
+     '#import "MTDNS.h"\n',
+     '#import "MTDNS.h"\n#import "MTWebSocketConnection.h" // pluma: the edges (task 109)\n'),
+    (EDGE_CONNECTION_M,
+     "            id<MTTcpConnectionInterface> injected = nil;\n"
+     "            if (_makeTcpConnectionInterface) {\n",
+     src(" " * 12, """
+         id<MTTcpConnectionInterface> injected = nil;
+         // pluma: an edge of the Pluma server (task 109) is a WebSocket in TLS of its own
+         // (MTWebSocketConnection below), never the interface of the context, and never
+         // through a proxy of the user's: the edges are not offered then (MTContext,
+         // MTDiscoverConnectionSignals), and should one come here, it fails.
+         bool edge = _scheme.address.websocket;
+         if (edge && (_socksIp != nil || _mtpIp != nil || _isWebProxy)) {
+             [self closeAndNotifyWithError:true];
+             return;
+         }
+         if (_makeTcpConnectionInterface && !edge) {
+     """)),
+    (EDGE_CONNECTION_M,
+     "                    _socket = [[MTGcdAsyncSocketTcpConnectionInterface alloc] initWithDelegate:self delegateQueue:[[MTTcpConnection tcpQueue] nativeQueue]];\n",
+     src(" " * 20, """
+         if (!edge) {
+             _socket = [[MTGcdAsyncSocketTcpConnectionInterface alloc] initWithDelegate:self delegateQueue:[[MTTcpConnection tcpQueue] nativeQueue]];
+         } else if (@available(iOS 13.0, macOS 10.15, *)) {
+             _socket = [[MTWebSocketConnection alloc] initWithDelegate:self delegateQueue:[[MTTcpConnection tcpQueue] nativeQueue]];
+         } else {
+             [self closeAndNotifyWithError:true];
+             return;
+         }
+     """)),
+    (EDGE_CONNECTION_M,
+     '        MTLog(@"[MTTcpConnection#%" PRIxPTR " response timeout]", (intptr_t)self);\n    }\n    [self closeAndNotifyWithError:true];\n',
+     '        MTLog(@"[MTTcpConnection#%" PRIxPTR " response timeout]", (intptr_t)self);\n    }\n'
+     '    _responseTimedOut = true; // pluma: the edges count it (task 109)\n'
+     '    [self closeAndNotifyWithError:true];\n'),
+    (EDGE_TRANSPORT_M,
+     '#import "MTTcpConnectionBehaviour.h"\n',
+     '#import "MTTcpConnectionBehaviour.h"\n#import "MTEdgeRoute.h" // pluma: the edges (task 109)\n'),
+    (EDGE_TRANSPORT_M,
+     "        transportContext.connectionConnected = false;\n"
+     "        transportContext.connectionIsValid = false;\n"
+     "        transportContext.connection.delegate = nil;\n"
+     "        transportContext.connection = nil;\n",
+     "        // pluma: how the connection ended decides when the edges take over (task 109):\n"
+     "        // the first silence of the direct path is no failure of its address.\n"
+     "        bool reportFailure = [[MTEdgeRoute shared] transportClosedWithAddress:connection.scheme.address "
+     "opened:transportContext.connectionConnected silent:connection.responseTimedOut error:error];\n"
+     "        \n"
+     "        transportContext.connectionConnected = false;\n"
+     "        transportContext.connectionIsValid = false;\n"
+     "        transportContext.connection.delegate = nil;\n"
+     "        transportContext.connection = nil;\n"),
+    (EDGE_TRANSPORT_M,
+     "        if (error) {\n            if ([delegate respondsToSelector:@selector(transportConnectionFailed:scheme:)]) {\n",
+     "        if (error && reportFailure) { // pluma: see above\n"
+     "            if ([delegate respondsToSelector:@selector(transportConnectionFailed:scheme:)]) {\n"),
+    (EDGE_TRANSPORT_M,
+     "            transportContext.connectionIsValid = true;\n            if (!self.incomingDataIsUnauthenticated) {\n",
+     "            // pluma: the first answer on an edge keeps the client there (task 109).\n"
+     "            if (!transportContext.connectionIsValid) {\n"
+     "                [[MTEdgeRoute shared] transportReceivedValidDataWithAddress:transportContext.connection.scheme.address];\n"
+     "            }\n"
+     "            transportContext.connectionIsValid = true;\n            if (!self.incomingDataIsUnauthenticated) {\n"),
+    (EDGE_DISCOVER_M,
+     '#import "MTInternalInterfaces.h"\n',
+     '#import "MTInternalInterfaces.h"\n'
+     '#import "MTEdgeRoute.h" // pluma: the edges (task 109)\n'
+     '\n'
+     '// pluma: the probe of an edge (task 109): 3 s after the direct addresses, and 10 s\n'
+     '// for TLS, the WebSocket handshake and the answer.\n'
+     'static const NSTimeInterval MTEdgeProbeDelay = 3.0;\n'
+     'static const NSTimeInterval MTEdgeProbeTimeout = 10.0;\n'),
+    (EDGE_DISCOVER_M,
+     "    // `isProxy` keeps the existing preferForProxy filter contract and `proxySettings`\n",
+     src(" " * 4, """
+         // pluma: the edges of the Pluma server (task 109) are never tried through a proxy
+         // of the user's.
+         if (proxySettings != nil) {
+             NSMutableArray *withoutEdges = [[NSMutableArray alloc] init];
+             for (MTDatacenterAddress *address in addressList) {
+                 if (!address.websocket) {
+                     [withoutEdges addObject:address];
+                 }
+             }
+             addressList = withoutEdges;
+         }
+
+         // `isProxy` keeps the existing preferForProxy filter contract and `proxySettings`
+     """)),
+    (EDGE_DISCOVER_M,
+     "    for (MTDatacenterAddress *address in bestAddressList) {\n        NSMutableSet *ips = tcpIpsByPort[@(address.port)];\n",
+     "    for (MTDatacenterAddress *address in bestAddressList) {\n"
+     "        if (address.websocket) { // pluma: an edge has no other ports (task 109)\n"
+     "            continue;\n"
+     "        }\n"
+     "        NSMutableSet *ips = tcpIpsByPort[@(address.port)];\n"),
+    (EDGE_DISCOVER_M, "        if ([self isIpv6:address.ip])\n", EDGE_DISCOVER_PROBE + "        if ([self isIpv6:address.ip])\n"),
+    (ACCOUNT, EDGE_ACCOUNT_ANCHOR, EDGE_ACCOUNT + EDGE_ACCOUNT_ANCHOR),
+)
+
+# What would reach an edge another way, or the direct path through one: the
+# WebSocket connection only in MTTcpConnection, the route only where the
+# edits ask it, the marks of the edges only where the edits put them.
+EDGE_GUARDS = (
+    (EDGE_CONNECTION_M, "MTWebSocketConnection alloc]", 1),
+    (EDGE_CONNECTION_M, "_scheme.address.websocket", 1),
+    (EDGE_CONTEXT_M, "MTEdgeRoute shared]", 2),
+    (EDGE_CONTEXT_M, ".websocket", 4),
+    (EDGE_TRANSPORT_M, "MTEdgeRoute shared]", 2),
+    (EDGE_DISCOVER_M, "MTEdgeRoute shared]", 1),
+    (EDGE_DISCOVER_M, ".websocket", 3),
+    (EDGE_ADDRESS_M, "_websocket", 5),
+    (NETWORK, "plumaEdge", 3),
+    (ACCOUNT, "updatePlumaEdge(", 1),
+)
+
+
+def parse_edge_urls(text):
+    """PLUMA_EDGE_WS_URLS: from 1 to 4 addresses wss://<host>[:port]/<path>,
+    by commas, in the order the app tries them; empty, the build has no
+    edges."""
+    if not text.strip():
+        return ()
+    urls = tuple(url.strip() for url in text.split(","))
+    if len(urls) > MAX_EDGES:
+        raise PatchError(f"PLUMA_EDGE_WS_URLS: {len(urls)} edges, at most {MAX_EDGES}")
+    for url in urls:
+        m = EDGE_URL.fullmatch(url)
+        if not m:
+            raise PatchError(f"PLUMA_EDGE_WS_URLS: {url!r} is not wss://<host>/<path>")
+        host, port = m.group("host"), m.group("port")
+        labels = host.split(".")
+        if len(labels) < 2 or not all(EDGE_LABEL.fullmatch(label) for label in labels) or not re.search("[a-z]", labels[-1]):
+            raise PatchError(f"PLUMA_EDGE_WS_URLS: {host!r} is not a host name (TLS checks the edge by its name)")
+        if EDGE_TELEGRAM_HOST.search(host):
+            raise PatchError(f"PLUMA_EDGE_WS_URLS: {host!r} is Telegram's")
+        if port is not None and not 0 < int(port) < 65536:
+            raise PatchError(f"PLUMA_EDGE_WS_URLS: {url!r}: the port is not a port")
+    if len(set(urls)) != len(urls):
+        raise PatchError("PLUMA_EDGE_WS_URLS: an edge is there twice")
+    return urls
+
+
+def patch_edges(tree, c):
+    """The edges through a CDN (task 109); nothing without PLUMA_EDGE_WS_URLS."""
+    if not c.edge_urls:
+        return
+    for rel, text in edge_files(c):
+        tree.add_file(rel, text.encode("utf-8"))
+    for rel, old, new in EDGE_EDITS:
+        tree.replace(rel, old, new)
+    tree.replace(NETWORK, edge_seed_old(c), edge_seed_new(c))
+
+
+def edge_built_in_urls(source):
+    """The build's edges, read back from PlumaEdge.swift."""
+    m = re.search(r"    static let builtInUrls: \[String\] = \[\n((?:        \"[^\"\n]*\",\n)*)    \]\n", source)
+    if not m:
+        raise PatchError(f"{EDGE_SWIFT}: no list of the build's edges")
+    return tuple(json.loads(line.strip().rstrip(",")) for line in m.group(1).splitlines())
+
+
+def verify_edges(tree, c):
+    if not c.edge_urls:
+        # A build without edges has none of them.
+        for rel, _ in edge_files(c):
+            if tree.sha256(rel) is not None:
+                raise PatchError(f"{rel}: an edge file in a build without PLUMA_EDGE_WS_URLS")
+        # Every place of the edges is upstream's.
+        for rel, old, new in EDGE_EDITS:
+            text = tree.read(rel)
+            if text.count(old) != 1 or new in text:
+                raise PatchError(f"{rel}: an edit of the edges in a build without PLUMA_EDGE_WS_URLS")
+        for rel, mark in ((NETWORK, "plumaEdge"), (ACCOUNT, "PlumaEdge")):
+            if mark in tree.read(rel):
+                raise PatchError(f"{rel}: the edges in a build without PLUMA_EDGE_WS_URLS")
+        return
+    for rel, text in edge_files(c):
+        if tree.sha256(rel) is None:
+            raise PatchError(f"{rel}: missing; no edges")
+        if tree.read(rel) != text:
+            raise PatchError(f"{rel}: not the file of the patch")
+    urls = edge_built_in_urls(tree.read(EDGE_SWIFT))
+    if urls != tuple(c.edge_urls) or not all(u.startswith("wss://") for u in urls):
+        raise PatchError(f"{EDGE_SWIFT}: the build's edges are {list(urls)}, PLUMA_EDGE_WS_URLS says {list(c.edge_urls)}")
+    # The direct path first unless the server says otherwise.
+    swift = tree.read(EDGE_SWIFT)
+    if ("    static let builtIn = PlumaEdgeConfiguration(urls: PlumaEdgeConfiguration.builtInUrls, edgesFirst: false, "
+            "stickySeconds: PlumaEdgeConfiguration.defaultStickySeconds)\n" not in swift
+            or "    static let defaultStickySeconds: Int32 = 1800\n" not in swift):
+        raise PatchError(f"{EDGE_SWIFT}: the build's order is not the direct path first, the edges for 1800 s")
+    choose = tree.read(EDGE_CONTEXT_M)
+    if "(edgesFirst ? 0 : 16) + (NSInteger)[edges indexOfObject:scheme.address] : (edgesFirst ? 16 : 0);" not in choose:
+        raise PatchError(f"{EDGE_CONTEXT_M}: the edges do not go after the direct addresses, in their order")
+    for rel, old, new in EDGE_EDITS:
+        text = tree.read(rel)
+        if text.count(new) != 1 or (old not in new and old in text):
+            raise PatchError(f"{rel}: an edit of the edges is not there once "
+                             f"({new.strip().splitlines()[-1]!r})")
+    net = tree.read(NETWORK)
+    if net.count(edge_seed_new(c)) != 1:
+        raise PatchError(f"{NETWORK}: the edges are not the last seed addresses of the server")
+    for rel, s, count in EDGE_GUARDS:
+        found = tree.read(rel).count(s)
+        if found != count:
+            raise PatchError(f"{rel}: {found} occurrences of {s!r}, expected {count}; another path to or around the edges")
+    for rel in tree.network_sources():
+        if rel != EDGE_CONNECTION_M and "MTWebSocketConnection alloc]" in tree.read(rel):
+            raise PatchError(f"{rel}: opens an edge connection outside MTTcpConnection")
+
+
 def main(argv=None):
     if (argv if argv is not None else sys.argv[1:]) == ["--paths"]:
         print("\n".join(UPSTREAM_PATHS))
@@ -8314,10 +9591,13 @@ def main(argv=None):
     ap.add_argument("--dev-cdn-http", default="",
                     help="a development build: the address of the development server, to which the HTTPS CDN "
                          "takes plain HTTP as well")
+    ap.add_argument("--edge-ws-urls", default="",
+                    help="the edges of the server through a CDN (task 109): 1 to 4 wss:// addresses by commas, "
+                         "in the order the app tries them; empty, none")
     a = ap.parse_args(argv)
     try:
         c = Config(load_env(a.upstream), load_env(a.app), a.server_ipv4, a.server_port, a.server_ipv6,
-                   pathlib.Path(a.rsa_public_key).read_text(), a.team_id, a.dev_cdn_http)
+                   pathlib.Path(a.rsa_public_key).read_text(), a.team_id, a.dev_cdn_http, a.edge_ws_urls)
         tree = Tree(a.source)
         patch(tree, c)
         verify(tree, c)
@@ -8326,7 +9606,8 @@ def main(argv=None):
         return 1
     address = c.ipv4 + (f", {c.ipv6}" if c.ipv6 else "")
     print(f"patch: {c.bundle_id} \"{c.app_name}\", api_id {c.api_id}, team {c.team_id}, layer {c.layer}, "
-          f"server {address} port {c.port}, server key {c.fingerprint:#018x} ({c.fingerprint})")
+          f"server {address} port {c.port}, server key {c.fingerprint:#018x} ({c.fingerprint}), "
+          f"edges {len(c.edge_urls)}")
     return 0
 
 

@@ -91,6 +91,7 @@ jobs:
           SERVER_PORT: ${{ vars.PLUMA_SERVER_PORT }}
           SERVER_IPV6: ${{ vars.PLUMA_SERVER_IPV6 }}
           RSA_PUBLIC_KEY: ${{ vars.PLUMA_RSA_PUBLIC_KEY }}
+          EDGE_WS_URLS: ${{ vars.PLUMA_EDGE_WS_URLS }}
           TEAM_ID: ${{ vars.PLUMA_TEAM_ID }}
         run: |
           ci/fetch-upstream.sh sparse
@@ -203,6 +204,7 @@ jobs:
           SERVER_PORT: ${{ vars.PLUMA_SERVER_PORT }}
           SERVER_IPV6: ${{ vars.PLUMA_SERVER_IPV6 }}
           RSA_PUBLIC_KEY: ${{ vars.PLUMA_RSA_PUBLIC_KEY }}
+          EDGE_WS_URLS: ${{ vars.PLUMA_EDGE_WS_URLS }}
           TEAM_ID: ${{ vars.PLUMA_TEAM_ID }}
         run: ci/configure.sh server
       - name: Signing identity and profiles
@@ -344,6 +346,7 @@ jobs:
           SERVER_PORT: ${{ vars.PLUMA_SERVER_PORT }}
           SERVER_IPV6: ${{ vars.PLUMA_SERVER_IPV6 }}
           RSA_PUBLIC_KEY: ${{ vars.PLUMA_RSA_PUBLIC_KEY }}
+          EDGE_WS_URLS: ${{ vars.PLUMA_EDGE_WS_URLS }}
           TEAM_ID: ${{ vars.PLUMA_TEAM_ID }}
         run: ci/configure.sh server
       - name: Signing identity and App Store profiles
