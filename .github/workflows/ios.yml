@@ -68,7 +68,10 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # The patch tests take about seven minutes on a usual runner and up to
+    # half as long again on a slow one; the damage tests verify the whole
+    # patched tree once per case.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
