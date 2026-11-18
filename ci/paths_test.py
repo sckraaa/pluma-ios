@@ -676,6 +676,7 @@ class PathsTest(unittest.TestCase):
 
     def setUp(self):
         self.written = set()
+        self.patched_with = None
 
     def tearDown(self):
         for rel in self.written:
@@ -684,6 +685,7 @@ class PathsTest(unittest.TestCase):
             else:
                 (self.root / rel).unlink(missing_ok=True)
         self.written.clear()
+        self.patched_with = None
 
     def run_patch(self, **over):
         c = config(**over)
@@ -692,16 +694,34 @@ class PathsTest(unittest.TestCase):
         patch.verify(tree, c)
         return tree, c
 
-    def damaged(self, rel, old, new):
-        """The patched tree with old replaced by new in rel: verify must stop."""
-        self.tearDown()
-        tree, c = self.run_patch()
-        text = tree.read(rel)
-        self.assertEqual(text.count(old), 1, (rel, old[:60]))
-        tree.write(rel, text.replace(old, new))
-        with self.assertRaises(patch.PatchError) as e:
-            patch.verify(tree, c)
+    def patched(self, **over):
+        """The tree patched with over and verified, once per test for the same
+        over: each case of damage takes back what it changed, so a case costs
+        one verify of the tree, not a patch and two."""
+        if self.patched_with is None or self.patched_with[0] != over:
+            self.tearDown()
+            self.patched_with = (over, *self.run_patch(**over))
+        return self.patched_with[1], self.patched_with[2]
+
+    def refused(self, rel, damage, **over):
+        """rel of the patched tree changed by damage(text): verify must stop,
+        naming the file."""
+        tree, c = self.patched(**over)
+        data = (self.root / rel).read_bytes()
+        tree.write(rel, damage(data.decode("utf-8")))
+        try:
+            with self.assertRaises(patch.PatchError) as e:
+                patch.verify(tree, c)
+        finally:
+            tree.write_bytes(rel, data)
         self.assertIn(pathlib.PurePath(rel).name, str(e.exception))
+
+    def damaged(self, rel, old, new, **over):
+        """The patched tree with old replaced by new in rel: verify must stop."""
+        def damage(text):
+            self.assertEqual(text.count(old), 1, (rel, old[:60]))
+            return text.replace(old, new)
+        self.refused(rel, damage, **over)
 
     def test_paths(self):
         tree, _ = self.run_patch()
@@ -764,12 +784,7 @@ class PathsTest(unittest.TestCase):
                 self.damaged(rel, new, old)
         for rel, _ in patch.path_files():
             with self.subTest(file=rel):
-                self.tearDown()
-                tree, c = self.run_patch()
-                tree.write(rel, tree.read(rel) + "\n")
-                with self.assertRaises(patch.PatchError) as e:
-                    patch.verify(tree, c)
-                self.assertIn(pathlib.PurePath(rel).name, str(e.exception))
+                self.refused(rel, lambda text: text + "\n")
         with self.subTest("a probe elsewhere"):
             self.damaged(patch.EDGE_TRANSPORT_M, "- (void)reset\n{\n",
                          "- (void)reset\n{\n    [MTPathProbe probeWithContext:_context datacenterId:1 address:nil down:0 up:0 stall:0 deadline:0];\n")
