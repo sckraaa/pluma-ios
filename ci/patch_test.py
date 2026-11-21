@@ -2488,8 +2488,11 @@ class UpstreamTest(unittest.TestCase):
         before = {rel: tree.read(rel) for rel in rels}
         self.tearDown()
         tree, _ = self.run_patch()
-        expected = {patch.STRINGS: before[patch.STRINGS] + patch.GROUP_CALL_STRINGS_HEAD
-                    + "".join(entry + "\n" for entry in patch.group_call_entries())}
+        # The strings of task 118 come after those of the group calls.
+        later = patch.UPSTREAM_TEXT_STRINGS_HEAD + "".join(entry + "\n" for entry in patch.upstream_text_entries())
+        self.assertTrue(before[patch.STRINGS].endswith(later))
+        expected = {patch.STRINGS: before[patch.STRINGS][:-len(later)] + patch.GROUP_CALL_STRINGS_HEAD
+                    + "".join(entry + "\n" for entry in patch.group_call_entries()) + later}
         for rel, old, new in patch.group_call_edits():
             text = expected.get(rel, before[rel])
             self.assertEqual(text.count(old), 1, (rel, old[:60]))
@@ -2725,6 +2728,10 @@ class UpstreamTest(unittest.TestCase):
             (patch.MEDIA_STREAM, "UIColor(rgb: 0xA86B4C)", "UIColor(red: 1, green: 0.176, blue: 0.333, alpha: 1)"),
             ("submodules/TelegramCallsUI/Sources/CallStatusBarNode.swift", "private let blue = UIColor(rgb: 0x4F6E52)",
              "private let blue = UIColor(red: 0.0, green: 0.5, blue: 1.0, alpha: 1.0)"),
+            ("submodules/TelegramCallsUI/Sources/CallStatusBarNode.swift", "private let blue = UIColor(rgb: 0x4F6E52)",
+             "private let blue = UIColor(argb: 0xff007fff)"),
+            ("submodules/TelegramCallsUI/Sources/CallStatusBarNode.swift", "private let blue = UIColor(rgb: 0x4F6E52)",
+             "private let blue = UIColor.systemBlue"),
             # Telegram's red of End on the background, in the status bar, a
             # second time in the button's file; the button in sage.
             (patch.CALL_BACKGROUND, "hexToFloat(0x8A5A44),", "hexToFloat(0xFF3B30),"),
@@ -2736,6 +2743,104 @@ class UpstreamTest(unittest.TestCase):
              "UIColor(rgb: 0xFF3B30)", "UIColor(rgb: 0xA86B4C)"),
         ):
             with self.subTest(rel=rel, old=old[:60]):
+                self.tearDown()
+                tree, c = self.run_patch()
+                text = tree.read(rel)
+                self.assertEqual(text.count(old), 1)
+                tree.write(rel, text.replace(old, new))
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify(tree, c)
+                self.assertIn(pathlib.PurePath(rel).name, str(e.exception))
+
+    def test_app_colors(self):
+        # Every edit lands once on the pinned upstream, takes Telegram's
+        # colour away from its file (save the greys Day Classic keeps
+        # elsewhere) and changes nothing else.
+        with unittest.mock.patch.object(patch, "patch_app_colors", lambda tree: None):
+            tree = RecordingTree(self.root, self.written)
+            patch.patch(tree, config())
+        rels = sorted({rel for rel, *_ in patch.APP_COLOR_EDITS})
+        before = {rel: tree.read(rel) for rel in rels}
+        self.tearDown()
+        tree, _ = self.run_patch()
+        for rel in rels:
+            expected = before[rel]
+            for r, old, new, count in patch.APP_COLOR_EDITS:
+                if r == rel:
+                    self.assertEqual(expected.count(old), count, (rel, old))
+                    expected = expected.replace(old, new)
+            self.assertEqual(tree.read(rel), expected, rel)
+        taken = patch.app_colors_taken()
+        self.assertEqual(set(taken), set(rels))
+        for rel, colors in taken.items():
+            # Day Classic keeps its grey elsewhere; the hashtag search loses
+            # Telegram's dark background, which has no literal there.
+            self.assertTrue(colors or rel in patch.APP_COLORS_KEPT
+                            or "defaultDarkWallpaperGradientColors" in before[rel], rel)
+            found = {c.lower() for c in patch.APP_COLOR.findall(tree.read(rel))}
+            self.assertFalse(found & colors, rel)
+        # The call screens' components take the call screens' colours.
+        calls = {new for _, new, _ in patch.CALL_COLORS}
+        for rel in (patch.CALL_PARTICIPANT_ITEM, patch.CALL_CHAT_SEND):
+            new = next(new for r, _, new, _ in patch.APP_COLOR_EDITS if r == rel)
+            self.assertIn(patch.APP_COLOR.search(new).group(0)[2:].upper(), calls, rel)
+        # Saved Messages everywhere as in AvatarNode.
+        for rel in (patch.WIDGET_AVATARS, patch.INTENT_AVATARS, patch.TELEGRAM_INTENTS):
+            text = tree.read(rel).lower()
+            self.assertIn("uicolor(rgb: 0x5b7a5e).cgcolor, uicolor(rgb: 0x9dbb9f).cgcolor", text, rel)
+            for blue in ("0x2a9ef1", "0x72d5fd"):
+                self.assertNotIn(blue, text, rel)
+
+    def test_app_colors_check(self):
+        # The check after the edits finds a Telegram colour put back where an
+        # edit took it away, or anywhere else in that file.
+        for rel, old, new in (
+            (patch.CALL_PARTICIPANT_ITEM, "UIColor(rgb: 0x7FA082)", "UIColor(rgb: 0x33C758)"),
+            (patch.CALL_CHAT_SEND, "UIColor(rgb: 0x4F6E52)", "UIColor(rgb: 0x029dff)"),
+            ("submodules/TooltipUI/Sources/TooltipScreen.swift", "UIColor(rgb: 0xb2ceb4)", "UIColor(rgb: 0x64D2FF)"),
+            ("submodules/ListMessageItem/Sources/ListMessageFileItemNode.swift",
+             "private let blueColors: (UInt32, UInt32) = (0x9dbb9f, 0x5b7a5e) // pluma: sage\n",
+             "private let blueColors: (UInt32, UInt32) = (0x9dbb9f, 0x5b7a5e) // pluma: sage\nlet x = 0x2a9ef1\n"),
+            (patch.NOTIFICATION_AVATARS, "UIColor(rgb: 0x9dbb9f).cgColor,\n            UIColor(rgb: 0x4f6e52).cgColor\n        ]\n        var locations",
+             "UIColor(rgb: 0x34C76F).cgColor,\n            UIColor(rgb: 0x4f6e52).cgColor\n        ]\n        var locations"),
+        ):
+            with self.subTest(rel=rel, new=new[:60]):
+                self.tearDown()
+                tree, c = self.run_patch()
+                text = tree.read(rel)
+                self.assertGreaterEqual(text.count(old), 1)
+                tree.write(rel, text.replace(old, new, 1))
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify(tree, c)
+                self.assertIn(pathlib.PurePath(rel).name, str(e.exception))
+
+    def test_upstream_texts(self):
+        # The literals become keys of the strings, the patch's own key is
+        # added once in English, and the conference title follows
+        # Call.IncomingGroupCallTitle as the push does.
+        tree, _ = self.run_patch()
+        strings = tree.read(patch.STRINGS)
+        self.assertIn(patch.UPSTREAM_TEXT_STRINGS_HEAD + '"Pluma.Chat.EphemeralMessageInfo" = '
+                      '"Only you see this message. It will disappear after you log in again.";\n', strings)
+        for key in re.findall(r"strings\.(\w+)", "".join(new for _, _, new, _ in patch.UPSTREAM_TEXT_EDITS)):
+            # A plural key is there in its forms (_1, _any).
+            self.assertRegex(strings, r'(?m)^"%s(?:[._]\w+)?" = "' % re.escape(key).replace("_", "[._]"), key)
+        for rel, old, new, count in patch.UPSTREAM_TEXT_EDITS:
+            self.assertGreaterEqual(tree.read(rel).count(new), count, rel)
+            self.assertIsNone(re.search(patch.lines_pattern(old), tree.read(rel)), rel)
+        call = tree.read("submodules/TelegramCallsUI/Sources/PresentationCall.swift")
+        self.assertIn("strings.Call_IncomingGroupCallTitle_Multiple(Int32(otherCount))", call)
+        self.assertIn("var conferenceTitle = strings.Call_GenericGroupCallTitle", call)
+        self.assertIn('"Call.IncomingGroupCallTitle.Multiple_any" = "{} and %d others";', strings)
+
+    def test_upstream_texts_check(self):
+        for rel, old, new in (
+            ("submodules/TelegramCallsUI/Sources/PresentationCall.swift", "strings.Call_GenericGroupCallTitle\n",
+             '"Group Call"\n'),
+            (patch.PROMPT_UI, "title: presentationData.strings.AuthConfirmation_LogIn,", 'title: "Sign In",'),
+            (patch.STRINGS, '"Pluma.Chat.EphemeralMessageInfo" = "Only you', '"Pluma.Chat.EphemeralMessageInfo" = "You'),
+        ):
+            with self.subTest(rel=rel, new=new[:60]):
                 self.tearDown()
                 tree, c = self.run_patch()
                 text = tree.read(rel)
@@ -3789,6 +3894,39 @@ class GroupCallsTest(unittest.TestCase):
         edited = "".join(new for _, _, new in patch.group_call_edits())
         for key, _ in patch.GROUP_CALL_STRINGS:
             self.assertEqual(edited.count("strings." + key.replace(".", "_")), 1, key)
+
+
+class AppColorsTest(unittest.TestCase):
+    def test_table(self):
+        # Each edit is of one place and leaves only the palette's colours.
+        palette = {c for s in patch.CALL_BACKGROUND_SETS for c in s} | {
+            "9DBB9F", "B2CEB4", "E3EAE2", "6B6F6B", "131513", "4F6E52", "2C3A2D"}
+        keys = [(rel, old) for rel, old, _, _ in patch.APP_COLOR_EDITS]
+        self.assertEqual(len(keys), len(set(keys)))
+        for rel, old, new, count in patch.APP_COLOR_EDITS:
+            self.assertGreater(count, 0)
+            self.assertNotEqual(old, new)
+            self.assertTrue(rel.startswith(("submodules/", "Telegram/")), rel)
+            self.assertFalse(rel.startswith(patch.CALL_UI_DIRS), rel)
+            for c in patch.APP_COLOR.findall(new):
+                self.assertIn(c[2:].upper(), palette, (rel, new))
+            # It takes a colour away, or Telegram's dark background.
+            self.assertTrue(set(patch.APP_COLOR.findall(old.lower())) - set(patch.APP_COLOR.findall(new.lower()))
+                            or "defaultDarkWallpaperGradientColors" in old, rel)
+            self.assertIn(rel, patch.UPSTREAM_PATHS)
+        for rel, _, _, _ in patch.UPSTREAM_TEXT_EDITS:
+            self.assertIn(rel, patch.UPSTREAM_PATHS)
+
+    def test_texts_are_keys(self):
+        # No edit leaves a literal in a user-visible place; the patch's key
+        # is used once.
+        edited = "".join(new for _, _, new, _ in patch.UPSTREAM_TEXT_EDITS)
+        for key, _ in patch.UPSTREAM_TEXT_STRINGS:
+            self.assertTrue(key.startswith("Pluma."), key)
+            self.assertEqual(edited.count("strings." + key.replace(".", "_")), 1, key)
+        for _, old, new, _ in patch.UPSTREAM_TEXT_EDITS:
+            self.assertIn('"', old)
+            self.assertNotRegex(new, r'(?:title|text|placeholder|append)[:(] ?"[A-Za-z]')
 
 
 class CallColorsTest(unittest.TestCase):

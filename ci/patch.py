@@ -1716,6 +1716,8 @@ def patch(tree, c):
     patch_service_account(tree)
     patch_group_calls(tree)
     patch_call_colors(tree)
+    patch_app_colors(tree)
+    patch_upstream_texts(tree)
     patch_cdn_downloads(tree, c)
     patch_edges(tree, c)
 
@@ -5118,6 +5120,8 @@ def verify(tree, c):
     verify_service_account(tree)
     verify_group_calls(tree)
     verify_call_colors(tree)
+    verify_app_colors(tree)
+    verify_upstream_texts(tree)
     verify_cdn_downloads(tree, c)
     verify_edges(tree, c)
     verify_paths(tree, c)
@@ -7446,6 +7450,7 @@ CALL_BACKGROUND_SETS = (("3A4A3C", "4F6E52", "2C3A2D", "5B7A5E"),
                         ("5B7A5E", "6F8F72", "4F6E52", "7FA082"),
                         ("8A5A44", "A86B4C", "7A4E3B", "B97A55"))
 CALL_COLOR = re.compile(r"\b0x([0-9A-Fa-f]{6})\b")
+CALL_OTHER_COLOR = re.compile(r"UIColor\(argb:|\.system(?:Blue|Green|Red|Orange|Pink|Purple|Teal|Indigo|Yellow|Mint|Cyan|Brown)\b")
 UPSTREAM_PATHS += tuple(d for d in CALL_UI_DIRS if d not in UPSTREAM_PATHS)
 
 
@@ -7513,6 +7518,10 @@ def verify_call_colors(tree):
                 raise PatchError(f"{rel}: {kept[color]} literals of 0x{color}, the colour of its call buttons, expected {count}")
         if "UIColor(red:" in text:
             raise PatchError(f"{rel}: a call colour as fractions, not of Pluma's palette")
+        # Nor as ARGB or one of the system's tints (none upstream, task 118).
+        m = CALL_OTHER_COLOR.search(text)
+        if m:
+            raise PatchError(f"{rel}: the call colour {m.group(0)} is not of Pluma's palette")
     # The three sets, in upstream's order: connecting, connected, weak signal.
     sets = ",\n".join("            ColorSet(colors: [\n" + ",\n".join(f"                hexToFloat(0x{c})" for c in colors)
                       + "\n            ])" for colors in CALL_BACKGROUND_SETS)
@@ -7521,6 +7530,330 @@ def verify_call_colors(tree):
     for rel, _, new, count in CALL_COLOR_LITERALS:
         if tree.read(rel).count(new) < count:
             raise PatchError(f"{rel}: {new} is not where the patch put it")
+
+
+# --- Telegram's colours outside the themes and the call screens ---------------
+#
+# Task 118 of the server repository. The themes (PALETTE_EDITS) and the call
+# screens (CALL_COLORS) are Pluma's; these are the literals of Telegram's
+# colours that other components draw whatever the theme, each turned into the
+# colour of the same role in the palette of task 017:
+#   - inside the call screens, from modules the call check does not read: the
+#     "speaking" status of a participant (PeerListItemComponent, its one
+#     .constructive caller, VideoChatParticipantsComponent.swift 1260-1262),
+#     the connected green of CALL_COLORS (33C758 -> 7FA082); the send button of
+#     a call's chat (MessageInputActionButtonComponent, .glass(isTinted:) only
+#     for .videoChat, MessageInputPanelComponent.swift 2138-2139), the
+#     "can speak" blue of CALL_COLORS (3252EF/007FFF -> 4F6E52), which keeps its
+#     white glyph readable;
+#   - links on dark surfaces: the hints of a context menu in a dark theme
+#     (ContextActionsContainerNode; a light theme takes contextMenu.
+#     badgeFillColor, already sage), dark tooltips and the caption of a photo
+#     or a video in the viewer: Night's links, #B2CEB4;
+#   - Saved Messages drawn outside AvatarNode: the widget, Siri's and the
+#     share sheet's suggestions (INSendMessageIntent), as AVATAR_SAVED_MESSAGES;
+#   - the icon of a file of no known extension (shared media, search,
+#     downloads, storage, poll options): sage light to dark, as the theme's
+#     file icons;
+#   - the theme settings: the swatch of Day Classic's default accent and the
+#     preview of Night, drawn in Telegram's blue though choosing them gives
+#     sage (I-042, I-046);
+#   - Day Classic's round share button and sticker placeholder without a
+#     wallpaper: the grey of the palette, as its other bluish greys;
+#   - the location: the pulse of one's own point and of live locations;
+#   - the ring of an unseen story outside the themes (a notification's avatar,
+#     a live stream, stealth mode) and the fallback of a theme file without
+#     one: Day's storyUnseenColors;
+#   - chats without bubbles (13.2): the outgoing colour of a theme without
+#     colours of its own is the palette's outgoing bubble, not Telegram's green;
+#   - rarer screens: the hashtag suggestions of a story's caption, a story's
+#     privacy (the "everyone" category), the link of the story recipients'
+#     screen, the progress of a video's timestamp, the caret of token fields,
+#     Instant View's light, grey and dark themes, the dark default of a chat's
+#     QR code and of a hashtag search (Night's graphite, as Night itself), the
+#     "active" state of invite links.
+# Semantic colours stay (red, orange, the green of "joined", Telegram's
+# category colours other than blue), as on the call screens.
+TELEGRAM_INTENTS = "submodules/TelegramIntents/Sources/TelegramIntents.swift"
+CALL_PARTICIPANT_ITEM = _UI_COMPONENTS + "Stories/PeerListItemComponent/Sources/PeerListItemComponent.swift"
+CALL_CHAT_SEND = _UI_COMPONENTS + "MessageInputActionButtonComponent/Sources/MessageInputActionButtonComponent.swift"
+_STORY_UNSEEN = (("UIColor(rgb: 0x34C76F)", "UIColor(rgb: 0x9dbb9f)"), ("UIColor(rgb: 0x3DA1FD)", "UIColor(rgb: 0x4f6e52)"))
+_FILE_ICON_BLUE = ("private let blueColors: (UInt32, UInt32) = (0x72d5fd, 0x2a9ef1)\n",
+                   "private let blueColors: (UInt32, UInt32) = (0x9dbb9f, 0x5b7a5e) // pluma: sage\n")
+_INSTANT_PAGE_LIGHT = (
+    ("linkColor: UIColor(rgb: 0x0088ff),", "linkColor: UIColor(rgb: 0x4f6e52),"),
+    ("linkHighlightColor: UIColor(rgb: 0x0088ff, alpha: 0.07),", "linkHighlightColor: UIColor(rgb: 0x4f6e52, alpha: 0.07),"),
+    ("panelAccentColor: UIColor(rgb: 0x0088ff),", "panelAccentColor: UIColor(rgb: 0x5b7a5e),"),
+)
+_SAVED_MESSAGES_COPY = ("private let savedMessagesColors: NSArray = [\n    UIColor(rgb: 0x2a9ef1).cgColor, UIColor(rgb: 0x72d5fd).cgColor\n",
+                        "private let savedMessagesColors: NSArray = [\n    UIColor(rgb: 0x5b7a5e).cgColor, UIColor(rgb: 0x9dbb9f).cgColor // pluma: sage\n")
+# (file, text, replacement, how many times).
+APP_COLOR_EDITS = (
+    # The call screens.
+    (CALL_PARTICIPANT_ITEM, "                labelColor = UIColor(rgb: 0x33C758)\n",
+     "                labelColor = UIColor(rgb: 0x7FA082) // pluma: the call screens' speaking colour\n", 1),
+    (CALL_CHAT_SEND, "                    tintColor = UIColor(rgb: 0x029dff)\n",
+     "                    tintColor = UIColor(rgb: 0x4F6E52) // pluma: the call screens' accent\n", 1),
+    # Links on dark surfaces.
+    (_UI_COMPONENTS + "ContextControllerImpl/Sources/ContextActionsContainerNode.swift",
+     "let linkColor = self.presentationData.theme.overallDarkAppearance ? UIColor(rgb: 0x64d2ff) :",
+     "let linkColor = self.presentationData.theme.overallDarkAppearance ? UIColor(rgb: 0xb2ceb4) :", 1),
+    ("submodules/TooltipUI/Sources/TooltipScreen.swift", "            let linkColor = UIColor(rgb: 0x64d2ff)\n",
+     "            let linkColor = UIColor(rgb: 0xb2ceb4) // pluma: Night's links\n", 1),
+    ("submodules/GalleryUI/Sources/GalleryController.swift", "        linkColor: UIColor(rgb: 0x5ac8fa),\n",
+     "        linkColor: UIColor(rgb: 0xb2ceb4),\n", 1),
+    ("submodules/GalleryUI/Sources/ChatItemGalleryFooterContentNode.swift", "linkHighlightColor = UIColor(rgb: 0x5ac8fa, alpha: 0.2)\n",
+     "linkHighlightColor = UIColor(rgb: 0xb2ceb4, alpha: 0.2)\n", 2),
+    # Saved Messages outside AvatarNode.
+    (WIDGET_AVATARS, *_SAVED_MESSAGES_COPY, 1),
+    (INTENT_AVATARS, *_SAVED_MESSAGES_COPY, 1),
+    (TELEGRAM_INTENTS, "colors: [UIColor(rgb: 0x2a9ef1).cgColor, UIColor(rgb: 0x72d5fd).cgColor] as CFArray",
+     "colors: [UIColor(rgb: 0x5b7a5e).cgColor, UIColor(rgb: 0x9dbb9f).cgColor] as CFArray", 1),
+    # The icon of a file of no known extension.
+    ("submodules/ListMessageItem/Sources/ListMessageFileItemNode.swift", *_FILE_ICON_BLUE, 1),
+    (_UI_COMPONENTS + "StorageUsageScreen/Sources/StorageFileListPanelComponent.swift", *_FILE_ICON_BLUE, 1),
+    (_UI_COMPONENTS + "ListComposePollOptionComponent/Sources/ListComposePollOptionComponent.swift", *_FILE_ICON_BLUE, 1),
+    # The theme settings.
+    (_SETTINGS_UI + "Themes/ThemeSettingsAccentColorItem.swift",
+     "                                fillColor = UIColor(rgb: 0x0088ff)\n                                strokeColor = fillColor\n"
+     "                                topColor = UIColor(rgb: 0xe1ffc7)\n",
+     "                                // pluma: Day Classic's default accent and outgoing bubble are sage.\n"
+     "                                fillColor = UIColor(rgb: 0x5b7a5e)\n                                strokeColor = fillColor\n"
+     "                                topColor = UIColor(rgb: 0xe3eae2)\n", 1),
+    (_SETTINGS_UI + "ThemePickerController.swift", "                    effectiveAccentColor = UIColor(rgb: 0x3e88f7)\n",
+     "                    effectiveAccentColor = UIColor(rgb: 0x9dbb9f) // pluma: Night's sage\n", 1),
+    ("submodules/WallpaperResources/Sources/WallpaperResources.swift",
+     "defaultTheme = customizePresentationTheme(defaultTheme, editing: true, accentColor: UIColor(rgb: 0x3e88f7),",
+     "defaultTheme = customizePresentationTheme(defaultTheme, editing: true, accentColor: UIColor(rgb: 0x9dbb9f),", 1),
+    # Day Classic without a wallpaper.
+    (DAY_THEME, "shareButtonFillColor: PresentationThemeVariableColor(withWallpaper: serviceBackgroundColor, "
+                "withoutWallpaper: UIColor(rgb: 0x748391, alpha: 0.45)),",
+     "shareButtonFillColor: PresentationThemeVariableColor(withWallpaper: serviceBackgroundColor, "
+     "withoutWallpaper: UIColor(rgb: 0x6b6f6b, alpha: 0.45)),", 1),
+    (DAY_THEME, "stickerPlaceholderColor: PresentationThemeVariableColor(withWallpaper: serviceBackgroundColor, "
+                "withoutWallpaper: UIColor(rgb: 0x748391, alpha: 0.25)),",
+     "stickerPlaceholderColor: PresentationThemeVariableColor(withWallpaper: serviceBackgroundColor, "
+     "withoutWallpaper: UIColor(rgb: 0x6b6f6b, alpha: 0.25)),", 1),
+    # The location.
+    ("submodules/LocationUI/Sources/LocationMapNode.swift", "UIColor(rgb: 0x0088ff, ", "UIColor(rgb: 0x5b7a5e, ", 3),
+    ("submodules/LocationUI/Sources/LocationAnnotation.swift", "UIColor(rgb: 0x0088ff, alpha: 0.27)", "UIColor(rgb: 0x5b7a5e, alpha: 0.27)", 1),
+    ("submodules/LiveLocationPositionNode/Sources/ChatMessageLiveLocationPositionNode.swift", "UIColor(rgb: 0x0088ff, ",
+     "UIColor(rgb: 0x5b7a5e, ", 4),
+    # The ring of an unseen story.
+    *((NOTIFICATION_AVATARS, old, new, 2) for old, new in _STORY_UNSEEN),
+    *((LIVE_STREAM_AVATARS, old, new, 1) for old, new in _STORY_UNSEEN),
+    (_UI_COMPONENTS + "Stories/StoryStealthModeSheetScreen/Sources/StoryStealthModeInfoContentComponent.swift",
+     "[UIColor(rgb: 0x3DA1FD), UIColor(rgb: 0x34C76F)]", "[UIColor(rgb: 0x4f6e52), UIColor(rgb: 0x9dbb9f)]", 1),
+    ("submodules/TelegramPresentationData/Sources/PresentationThemeCodable.swift",
+     "PresentationThemeGradientColors(topColor: UIColor(rgb: 0x34C76F), bottomColor: UIColor(rgb: 0x3DA1FD))",
+     "PresentationThemeGradientColors(topColor: UIColor(rgb: 0x9dbb9f), bottomColor: UIColor(rgb: 0x4f6e52))", 1),
+    # Chats without bubbles.
+    ("submodules/TelegramPresentationData/Sources/BubblelessPresentationTheme.swift",
+     "// Bubble mode off: outgoing bubbles are light green until the theme gets accent or bubble colors of its own.\n"
+     "public func bubblelessDefaultOutgoingBubbleColors(dark: Bool) -> [UInt32] {\n    return dark ? [0x2b5435] : [0xe1ffc7]\n",
+     "// Bubble mode off: outgoing bubbles are the palette's until the theme gets accent or bubble colors of its own.\n"
+     "public func bubblelessDefaultOutgoingBubbleColors(dark: Bool) -> [UInt32] {\n"
+     "    return dark ? [0x2c3a2d] : [0xe3eae2] // pluma: the palette's outgoing bubbles\n", 1),
+    # Rarer screens.
+    (_UI_COMPONENTS + "MessageInputPanelComponent/Sources/HashtagListItemComponent.swift",
+     "                let accentColor = UIColor(rgb: 0x0088ff)\n", "                let accentColor = UIColor(rgb: 0x5b7a5e) // pluma: sage\n", 1),
+    (_UI_COMPONENTS + "ShareWithPeersScreen/Sources/ShareWithPeersScreen.swift", "highlightColor: UIColor(rgb: 0x0088ff, alpha: 0.2),",
+     "highlightColor: UIColor(rgb: 0x5b7a5e, alpha: 0.2),", 1),
+    (_UI_COMPONENTS + "Stories/StoryContainerScreen/Sources/StoryPrivacyIconComponent.swift",
+     "colors = [UIColor(rgb: 0x4faaff).cgColor, UIColor(rgb: 0x017aff).cgColor]",
+     "colors = [UIColor(rgb: 0x9dbb9f).cgColor, UIColor(rgb: 0x5b7a5e).cgColor]", 1),
+    (_UI_COMPONENTS + "ShareWithPeersScreen/Sources/CategoryListItemComponent.swift",
+     "colors = [UIColor(rgb: 0x4faaff), UIColor(rgb: 0x017aff)]", "colors = [UIColor(rgb: 0x9dbb9f), UIColor(rgb: 0x5b7a5e)]", 1),
+    (_UI_COMPONENTS + "Chat/ChatMessageInteractiveMediaNode/Sources/ChatMessageInteractiveMediaNode.swift",
+     "videoTimestampForegroundLayer.backgroundColor = UIColor(rgb: 0x0A84FF).cgColor",
+     "videoTimestampForegroundLayer.backgroundColor = UIColor(rgb: 0x5b7a5e).cgColor", 1),
+    (_UI_COMPONENTS + "TokenListTextField/Sources/EditableTokenListNode.swift",
+     "generateVerticallyStretchableFilledCircleImage(radius: 1.0, color: UIColor(rgb: 0x3350ee))",
+     "generateVerticallyStretchableFilledCircleImage(radius: 1.0, color: UIColor(rgb: 0x5b7a5e))", 1),
+    *(("submodules/InstantPageUI/Sources/InstantPageTheme.swift", "    " + old + "\n", "    " + new + "\n", 1)
+      for old, new in _INSTANT_PAGE_LIGHT),
+    *(("submodules/InstantPageUI/Sources/StandaloneInstantPageImageView.swift", " " * 12 + old + "\n", " " * 12 + new + "\n", 1)
+      for old, new in _INSTANT_PAGE_LIGHT),
+    ("submodules/InstantPageUI/Sources/InstantPageTheme.swift", "    linkColor: UIColor(rgb: 0x5ac8fa),\n",
+     "    linkColor: UIColor(rgb: 0xb2ceb4),\n", 2),
+    ("submodules/InstantPageUI/Sources/InstantPageTheme.swift", "    linkHighlightColor: UIColor(rgb: 0x5ac8fa, alpha: 0.13),\n",
+     "    linkHighlightColor: UIColor(rgb: 0xb2ceb4, alpha: 0.13),\n", 1),
+    ("submodules/InstantPageUI/Sources/InstantPageTheme.swift", "    linkHighlightColor: UIColor(rgb: 0x5ac8fa, alpha: 0.2),\n",
+     "    linkHighlightColor: UIColor(rgb: 0xb2ceb4, alpha: 0.2),\n", 1),
+    ("submodules/InstantPageUI/Sources/InstantPageTheme.swift", "    panelAccentColor: UIColor(rgb: 0x54b9f8),\n",
+     "    panelAccentColor: UIColor(rgb: 0x9dbb9f),\n", 1),
+    ("submodules/InstantPageUI/Sources/InstantPageTheme.swift", "    panelAccentColor: UIColor(rgb: 0x50b6f3),\n",
+     "    panelAccentColor: UIColor(rgb: 0x9dbb9f),\n", 1),
+    ("submodules/InstantPageUI/Sources/InstantPageTheme.swift", "checkboxFill: UIColor = UIColor(rgb: 0x007aff),",
+     "checkboxFill: UIColor = UIColor(rgb: 0x5b7a5e),", 1),
+    (_UI_COMPONENTS + "Chat/ChatQrCodeScreen/Sources/ChatQrCodeScreen.swift",
+     "                let dayTheme = makeDefaultPresentationTheme(reference: .dayClassic, serviceBackgroundColor: nil)\n"
+     "                defaultWallpaper = dayTheme.chat.defaultWallpaper.withUpdatedSettings(WallpaperSettings(blur: false, "
+     "motion: false, colors: [0x00b3dd, 0x3b59f2, 0x358be2, 0xa434cf], intensity: -55, rotation: nil))\n",
+     "                // pluma: Night's own graphite background; Day Classic's is plain white here.\n"
+     "                defaultWallpaper = .color(0x131513)\n", 1),
+    ("submodules/HashtagSearchUI/Sources/HashtagSearchControllerNode.swift",
+     "forcedWallpaper: defaultBuiltinWallpaper(data: .default, colors: defaultDarkWallpaperGradientColors.map(\\.rgb), intensity: -34))",
+     "forcedWallpaper: .color(0x131513)) // pluma: Night's own graphite background", 1),
+    *((rel, "                return (UIColor(rgb: 0x00b5f7), UIColor(rgb: 0x00b2f6), UIColor(rgb: 0xa7f4ff))\n",
+       "                return (UIColor(rgb: 0x6f8f72), UIColor(rgb: 0x5b7a5e), UIColor(rgb: 0xe3eae2)) // pluma: sage\n", 1)
+      for rel in ("submodules/InviteLinksUI/Sources/ItemListInviteLinkItem.swift",
+                  "submodules/InviteLinksUI/Sources/ItemListFolderInviteLinkListItem.swift")),
+)
+# Colours of these files that stay where they are beside the ones the edits
+# take away: Day Classic's grey of links on a wallpaper (linkHighlight) and of
+# its service messages.
+APP_COLORS_KEPT = {DAY_THEME: {"0x748391"}}
+APP_COLOR = re.compile(r"\b0x[0-9A-Fa-f]{6}\b")
+UPSTREAM_PATHS += tuple(sorted({rel for rel, _, _, _ in APP_COLOR_EDITS} - set(UPSTREAM_PATHS)))
+
+
+def app_colors_taken():
+    """{file: the colours the edits take away from it}, lower case."""
+    taken = {}
+    for rel, old, new, _ in APP_COLOR_EDITS:
+        gone = {c.lower() for c in APP_COLOR.findall(old)} - {c.lower() for c in APP_COLOR.findall(new)}
+        taken.setdefault(rel, set()).update(gone - APP_COLORS_KEPT.get(rel, set()))
+    return taken
+
+
+def patch_app_colors(tree):
+    for rel, old, new, count in APP_COLOR_EDITS:
+        tree.replace(rel, old, new, count=count)
+
+
+def verify_app_colors(tree):
+    for rel, old, new, count in APP_COLOR_EDITS:
+        text = tree.read(rel)
+        if old in text or text.count(new) < count:
+            raise PatchError(f"{rel}: {new.strip().splitlines()[-1][:60]!r} is not where the patch put it")
+    # No colour an edit takes away is left anywhere else in its file.
+    for rel, colors in app_colors_taken().items():
+        found = {c.lower() for c in APP_COLOR.findall(tree.read(rel))} & colors
+        if found:
+            raise PatchError(f"{rel}: Telegram's colour {sorted(found)[0]} is still there")
+
+
+# --- upstream's English literals -------------------------------------------------
+#
+# Task 118: texts upstream writes in English where the strings have a key for
+# them, so they show in the app's language:
+#   - the title of an incoming conference call in CallKit (the system's call
+#     screen, the Recents of Phone): upstream joins "Group Call", " and 1
+#     other", " and N others" (PresentationCall.swift 295-304); the push of
+#     the same call builds it with Call.IncomingGroupCallTitle and
+#     Call.GenericGroupCallTitle (AppDelegate.swift 2371-2375), and so does
+#     this one now;
+#   - "Copy Link" in the menu of a settings search result, as the chat's own
+#     item (Conversation.ContextMenuCopyLink);
+#   - "New Album" in the menu of a story's albums, as the stories' menu
+#     (Stories.MenuNewAlbum);
+#   - "Play" in the menu of an audio file in the attachment menu
+#     (VoiceOver.Media.PlaybackPlay, "Play");
+#   - the toast of a copied affiliate link of a bot, as upstream's other copy
+#     of it (PeerInfoScreen.swift 4003, AffiliateProgram.ToastLinkCopied);
+#   - the browser's HTTP sign-in (the user name and password of the proxy
+#     setup, AuthConfirmation.LogIn) and the progress of its downloads
+#     (DownloadList.DownloadingHeader, Items.NOfM);
+#   - the note under a message only the user sees (an ephemeral one): a key of
+#     Pluma's, Pluma.Chat.EphemeralMessageInfo, upstream having none.
+UPSTREAM_TEXT_STRINGS = (
+    ("Pluma.Chat.EphemeralMessageInfo", "Only you see this message. It will disappear after you log in again."),
+)
+UPSTREAM_TEXT_STRINGS_HEAD = "\n// pluma: upstream's English literals (task 118).\n"
+CONFERENCE_TITLE_OLD = src(" " * 24, """
+    var conferenceTitle = "Group Call"
+    if let peer = message.peers[message.id.peerId].flatMap(EnginePeer.init) {
+        conferenceTitle = peer.compactDisplayTitle
+
+        let otherCount = conferenceCall.otherParticipants.filter({ $0 != peer.id }).count
+        if otherCount != 0 {
+            if otherCount == 1 {
+                conferenceTitle.append(" and 1 other")
+            } else {
+                conferenceTitle.append(" and \\(otherCount) others")
+            }
+        }
+    }
+""")
+CONFERENCE_TITLE = src(" " * 24, """
+    // pluma: in the app's language, as the push of the call titles it (AppDelegate).
+    let strings = self.context.sharedContext.currentPresentationData.with { $0.strings }
+    var conferenceTitle = strings.Call_GenericGroupCallTitle
+    if let peer = message.peers[message.id.peerId].flatMap(EnginePeer.init) {
+        let otherCount = conferenceCall.otherParticipants.filter({ $0 != peer.id }).count
+        if otherCount != 0 {
+            conferenceTitle = strings.Call_IncomingGroupCallTitle_Multiple(Int32(otherCount)).replacingOccurrences(of: "{}", with: peer.compactDisplayTitle)
+        } else {
+            conferenceTitle = peer.compactDisplayTitle
+        }
+    }
+""")
+PROMPT_UI = "submodules/PromptUI/Sources/PromptController.swift"
+# (file, text, replacement, how many times).
+UPSTREAM_TEXT_EDITS = (
+    ("submodules/TelegramCallsUI/Sources/PresentationCall.swift", CONFERENCE_TITLE_OLD, CONFERENCE_TITLE, 1),
+    (_PEER_INFO + "PeerInfoScreen.swift", "                                    text: \"Copy Link\",\n",
+     "                                    text: self.presentationData.strings.Conversation_ContextMenuCopyLink,\n", 1),
+    (_UI_COMPONENTS + "ShareWithPeersScreen/Sources/ShareWithPeersScreen.swift", 'ContextMenuActionItem(text: "New Album", ',
+     "ContextMenuActionItem(text: presentationData.strings.Stories_MenuNewAlbum, ", 1),
+    (_UI_COMPONENTS + "AttachmentFileController/Sources/AttachmentFileController.swift", 'ContextMenuActionItem(text: "Play", ',
+     "ContextMenuActionItem(text: presentationData.strings.VoiceOver_Media_PlaybackPlay, ", 1),
+    (_PEER_INFO + "PeerInfoScreen.swift",
+     'content: .linkCopied(title: "Link copied to clipboard", text: "Share this link and earn **\\(formatPermille(result.commissionPermille))%** '
+     'of what people who use it spend in **\\(result.peer.compactDisplayTitle)**!")',
+     "content: .linkCopied(title: presentationData.strings.AffiliateProgram_ToastLinkCopied_Title, "
+     "text: presentationData.strings.AffiliateProgram_ToastLinkCopied_Text(formatPermille(result.commissionPermille), "
+     "result.peer.compactDisplayTitle).string)", 1),
+    (PROMPT_UI, 'PromptInputFieldNode(theme: ptheme, placeholder: "User Name", ',
+     "PromptInputFieldNode(theme: ptheme, placeholder: strings.SocksProxySetup_UsernamePlaceholder, ", 1),
+    (PROMPT_UI, 'PromptInputFieldNode(theme: ptheme, placeholder: "Password", ',
+     "PromptInputFieldNode(theme: ptheme, placeholder: strings.SocksProxySetup_PasswordPlaceholder, ", 1),
+    (PROMPT_UI, 'TextAlertAction(type: .defaultAction, title: "Sign In", ',
+     "TextAlertAction(type: .defaultAction, title: presentationData.strings.AuthConfirmation_LogIn, ", 1),
+    (PROMPT_UI, 'TextAlertAction(type: .defaultAction, title: "Cancel", ',
+     "TextAlertAction(type: .defaultAction, title: presentationData.strings.Common_Cancel, ", 1),
+    (PROMPT_UI, 'actions: actions, title: "Downloading...", text: " ")',
+     'actions: actions, title: presentationData.strings.DownloadList_DownloadingHeader, text: " ")', 1),
+    (PROMPT_UI, 'contentNode.text = "\\(dataSizeString(Int(current), formatting: DataSizeStringFormatting(presentationData: presentationData))) '
+                'of \\(dataSizeString(Int(total), formatting: DataSizeStringFormatting(presentationData: presentationData)))"',
+     "contentNode.text = presentationData.strings.Items_NOfM(dataSizeString(Int(current), formatting: DataSizeStringFormatting("
+     "presentationData: presentationData)), dataSizeString(Int(total), formatting: DataSizeStringFormatting(presentationData: "
+     "presentationData))).string", 1),
+    (CONTEXT_MENUS, 'ContextMenuActionItem(text: "Only you see this message. It will disappear after you log in again.", ',
+     "ContextMenuActionItem(text: chatPresentationInterfaceState.strings.Pluma_Chat_EphemeralMessageInfo, ", 1),
+)
+UPSTREAM_PATHS += tuple(sorted({rel for rel, _, _, _ in UPSTREAM_TEXT_EDITS} - set(UPSTREAM_PATHS)))
+
+
+def upstream_text_entries():
+    """The entries of the English strings, as the file writes them."""
+    return [f'"{key}" = "{value}";' for key, value in UPSTREAM_TEXT_STRINGS]
+
+
+def patch_upstream_texts(tree):
+    for key, _ in UPSTREAM_TEXT_STRINGS:
+        tree.expect(STRINGS, f'"{key}" = ', 0)
+    text = tree.read(STRINGS)
+    tree.write(STRINGS, text + ("" if text.endswith("\n") else "\n") + UPSTREAM_TEXT_STRINGS_HEAD
+               + "".join(entry + "\n" for entry in upstream_text_entries()))
+    for rel, old, new, count in UPSTREAM_TEXT_EDITS:
+        tree.replace_lines(rel, old, new, count=count)
+
+
+def verify_upstream_texts(tree):
+    strings = tree.read(STRINGS)
+    for (key, _), entry in zip(UPSTREAM_TEXT_STRINGS, upstream_text_entries()):
+        if strings.count(f'"{key}" = ') != 1 or entry + "\n" not in strings:
+            raise PatchError(f"{STRINGS}: {key} is not the text of task 118")
+    for rel, old, new, count in UPSTREAM_TEXT_EDITS:
+        text = tree.read(rel)
+        if re.search(lines_pattern(old), text) or text.count(new) < count:
+            raise PatchError(f"{rel}: {new.strip().splitlines()[0][:60]!r} is not where the patch put it")
+    call = tree.read(UPSTREAM_TEXT_EDITS[0][0])
+    for literal in ('"Group Call"', '" and 1 other"', " others\")"):
+        if literal in call:
+            raise PatchError(f"{UPSTREAM_TEXT_EDITS[0][0]}: the conference title is English again ({literal})")
 
 
 # --- CDN downloads: MtProtoKit and the HTTPS CDN (tasks 102, 107) -------------
