@@ -48,6 +48,7 @@ Every group call is end-to-end encrypted, as Telegram's conferences are, and
 is joined as oneself; the client reports the state of its encryption to the
 SFU. No RTMP stream, no live story and no recording of a call is offered.
 The call screens are in the sage palette.
+So are Premium's screens, badges, buttons and stars.
 
 Large files come over HTTPS from the server's CDN when the server redirects
 there; the key, the IV and the hashes come from the server over MTProto.
@@ -1718,6 +1719,7 @@ def patch(tree, c):
     patch_call_colors(tree)
     patch_app_colors(tree)
     patch_upstream_texts(tree)
+    patch_premium_colors(tree)
     patch_cdn_downloads(tree, c)
     patch_edges(tree, c)
 
@@ -5122,6 +5124,7 @@ def verify(tree, c):
     verify_call_colors(tree)
     verify_app_colors(tree)
     verify_upstream_texts(tree)
+    verify_premium_colors(tree)
     verify_cdn_downloads(tree, c)
     verify_edges(tree, c)
     verify_paths(tree, c)
@@ -7854,6 +7857,193 @@ def verify_upstream_texts(tree):
     for literal in ('"Group Call"', '" and 1 other"', " others\")"):
         if literal in call:
             raise PatchError(f"{UPSTREAM_TEXT_EDITS[0][0]}: the conference title is English again ({literal})")
+
+
+# --- Premium's gradient -----------------------------------------------------------
+#
+# The owner's decision of 2026-11-21 on task 118 of the server repository:
+# Premium is everybody's (ADR 0041), and its screens, badges, buttons and stars
+# take Pluma's palette instead of Telegram's blue-violet-pink gradient. Each of
+# Telegram's Premium colours becomes the sage of the palette (task 017, the
+# shades of CALL_BACKGROUND_SETS) by its hue, so that every gradient and every
+# list of perks keeps its order from one end to the other:
+#   reds, oranges, yellows     #3A4A3C   (the first rows of the perk lists)
+#   pinks and crimsons         #4F6E52   (the end of the gradient)
+#   violets and purples        #5B7A5E   (its middle, the boosts, the sparkles)
+#   blues                      #6F8F72   (its start, the perks' blues)
+#   cyans and greens           #7FA082   (the last rows of the perk lists)
+# The gradient of the buttons and headers (0x0077ff, 0x6b93ff, 0x8878ff,
+# 0xe46ace: PremiumIntroScreen.swift 3932-3937 and fifteen copies) goes from
+# the soft accent to the dark links' sage; the star (0x6a94ff, 0x9472fd,
+# 0xe26bd3, PremiumIntroScreen.swift 3556-3560), the badge of Premium (0x6b93ff,
+# 0x8d77ff, 0xb56eec, PresentationResourcesSettings.swift 179-185) and the boosts'
+# 0x9076ff..0xbc6de8 the same way; the rows of perks (PremiumIntroScreen.swift
+# 1990-2017, 2343-2352, LimitsPageComponent.swift 401-414, StoriesPageComponent.swift
+# 320-329, BusinessPageComponent.swift 306-315) from the dark sage to the light.
+# Telegram Stars keep their gold (another product, CreateGiveawayHeaderItem.swift
+# 196-201), as do the other gifts' colours beside Premium's in GiftOptionItem
+# and the Stars' avatars. Two places draw Premium's colours without a literal of
+# them, PREMIUM_EDITS: the star's sparkles keep the purple of the scene file
+# until an animated update (PremiumStarComponent.swift 368-373), and the
+# Premium category of the privacy settings draws Telegram's gradient from a
+# picture (SelectivePrivacySettingsController.swift 1220-1222).
+PREMIUM_SHADES = (
+    ("3A4A3C", ("ef6922", "e95a2c", "e74e33", "e54937", "e3433c", "df7138", "d6593f", "e95d44", "f2822a", "e79519",
+                "e7ad19")),
+    ("4F6E52", ("e46ace", "e26bd3", "c456ae", "ae4c92", "bc4395", "cb3e6d", "bc496d", "db374b", "ca4550")),
+    ("5B7A5E", ("8878ff", "8d77ff", "8f76ff", "9076ff", "825af6", "9472fd", "9671ff", "976fff", "8958ff", "9153e5",
+                "9b4fed", "aa69ea", "ac64f3", "b56eec", "b86dea", "a34cd7", "bb6de8", "bc6de8", "ab4ac4", "908eff",
+                "7169ff", "7f76f4")),
+    ("6F8F72", ("0088ff", "007afe", "0077ff", "5b99d0", "429bd5", "4492ff", "5494ff", "5991f8", "6a94ff", "6b93ff",
+                "597cf5", "6f8fff", "5b79ff", "738cff", "798aff", "6172ff", "676bf7", "676bff")),
+    ("7FA082", ("3dbd4a", "3eb26d", "41a6a5", "5ea4a4")),
+)
+PREMIUM_PLUMA = {telegram: pluma for pluma, colors in PREMIUM_SHADES for telegram in colors}
+_PREMIUM_UI = "submodules/PremiumUI/Sources/"
+_PREMIUM_GRADIENT = (("0077ff", 1), ("6b93ff", 1), ("8878ff", 1), ("e46ace", 1))
+_PREMIUM_STAR = (("6a94ff", 1), ("9472fd", 1), ("e26bd3", 1))
+_PREMIUM_BADGE = (("6b93ff", 2), ("8d77ff", 1), ("b56eec", 2))
+_PREMIUM_BOOST = (("9076ff", 1), ("bc6de8", 1))
+_PREMIUM_BOOST_BADGE = (("9076FF", 1), ("B86DEA", 1))
+# (file, (Telegram's Premium colour as upstream writes it, its literals there)):
+# every literal of these colours in these files is Premium's.
+PREMIUM_COLORS = (
+    (_PREMIUM_UI + "PremiumIntroScreen.swift", (
+        ("0077ff", 1), ("6b93ff", 1), ("8878ff", 3), ("e46ace", 1), ("6a94ff", 1), ("9472fd", 1), ("e26bd3", 1),
+        ("597cf5", 1), ("ef6922", 2), ("e95a2c", 1), ("e74e33", 2), ("e54937", 2), ("e3433c", 1), ("db374b", 2),
+        ("cb3e6d", 1), ("bc4395", 3), ("ab4ac4", 2), ("a34cd7", 1), ("9b4fed", 2), ("8958ff", 3), ("676bff", 4),
+        ("6172ff", 1), ("5b79ff", 2), ("4492ff", 2), ("429bd5", 1), ("41a6a5", 2), ("3eb26d", 1), ("3dbd4a", 1),
+        ("0088ff", 1))),
+    (_PREMIUM_UI + "PremiumDemoScreen.swift", (("0077ff", 2), ("6b93ff", 2), ("8878ff", 2), ("e46ace", 2), ("7f76f4", 1))),
+    (_PREMIUM_UI + "PremiumLimitScreen.swift", _PREMIUM_GRADIENT + (("007afe", 2), ("5494ff", 2), ("9671ff", 1))),
+    (_PREMIUM_UI + "PremiumLimitsListScreen.swift", _PREMIUM_GRADIENT + (("7f76f4", 1), ("7169ff", 1))),
+    (_PREMIUM_UI + "PremiumPrivacyScreen.swift", _PREMIUM_GRADIENT),
+    (_PREMIUM_UI + "PremiumBoostLevelsScreen.swift", _PREMIUM_GRADIENT + _PREMIUM_BOOST),
+    (_PREMIUM_UI + "PremiumGiftCodeScreen.swift", _PREMIUM_STAR),
+    (_PREMIUM_UI + "CreateGiveawayHeaderItem.swift", _PREMIUM_STAR),
+    (_PREMIUM_UI + "GiftOptionItem.swift", _PREMIUM_BADGE),
+    (_PREMIUM_UI + "IncreaseLimitFooterItem.swift", _PREMIUM_GRADIENT),
+    (_PREMIUM_UI + "IncreaseLimitHeaderItem.swift", _PREMIUM_GRADIENT + (("007afe", 1), ("5494ff", 1))),
+    (_PREMIUM_UI + "BusinessPageComponent.swift", (
+        ("ef6922", 1), ("e54937", 1), ("db374b", 1), ("bc4395", 1), ("9b4fed", 1), ("8958ff", 1), ("676bff", 1),
+        ("0088ff", 1))),
+    (_PREMIUM_UI + "LimitsPageComponent.swift", (
+        ("df7138", 1), ("d6593f", 1), ("ca4550", 1), ("bc496d", 1), ("ae4c92", 1), ("9153e5", 1), ("825af6", 1),
+        ("676bf7", 2), ("5991f8", 1), ("5b99d0", 1), ("5ea4a4", 1))),
+    (_PREMIUM_UI + "StoriesPageComponent.swift", (
+        ("bb6de8", 1), ("738cff", 1), ("8f76ff", 1), ("0088ff", 1), ("798aff", 1), ("ac64f3", 1), ("c456ae", 1),
+        ("e95d44", 1), ("f2822a", 1), ("e79519", 1), ("e7ad19", 1))),
+    ("submodules/AttachmentUI/Sources/AttachmentPanel.swift", (("0077ff", 2), ("6b93ff", 1), ("8878ff", 2), ("e46ace", 1))),
+    ("submodules/StatisticsUI/Sources/BoostHeaderItem.swift", _PREMIUM_GRADIENT + (("6f8fff", 1), ("908eff", 1))),
+    ("submodules/StatisticsUI/Sources/BoostLevelHeaderItem.swift", _PREMIUM_GRADIENT),
+    ("submodules/StickerPeekUI/Sources/StickerPreviewPeekContent.swift", _PREMIUM_GRADIENT),
+    ("submodules/TelegramPresentationData/Sources/Resources/PresentationResourcesItemList.swift", _PREMIUM_BADGE),
+    ("submodules/TelegramPresentationData/Sources/Resources/PresentationResourcesSettings.swift", _PREMIUM_BADGE),
+    (_SETTINGS_UI + "Themes/ThemeSettingsAppIconItem.swift", _PREMIUM_BOOST_BADGE),
+    (_UI_COMPONENTS + "Settings/BoostLevelIconComponent/Sources/BoostLevelIconComponent.swift", _PREMIUM_BOOST_BADGE),
+    (_UI_COMPONENTS + "Chat/ChatTextInputPanelNode/Sources/BoostSlowModeButton.swift", _PREMIUM_BOOST),
+    (_UI_COMPONENTS + "EntityKeyboard/Sources/EmojiPagerContentComponent.swift", _PREMIUM_GRADIENT),
+    (_UI_COMPONENTS + "EntityKeyboard/Sources/EntityKeyboardTopPanelComponent.swift",
+     (("6B93FF", 2), ("976FFF", 1), ("E46ACE", 2))),
+    (_UI_COMPONENTS + "Gifts/GiftDemoScreen/Sources/GiftDemoScreen.swift", _PREMIUM_GRADIENT + (("7f76f4", 1),)),
+    (_UI_COMPONENTS + "PremiumAlertController/Sources/PremiumAlertController.swift", _PREMIUM_STAR),
+    (_UI_COMPONENTS + "SendInviteLinkScreen/Sources/SendInviteLinkScreen.swift", _PREMIUM_GRADIENT),
+    (_UI_COMPONENTS + "Stars/StarsAvatarComponent/Sources/StarsAvatarComponent.swift", _PREMIUM_BADGE),
+    (_UI_COMPONENTS + "Stars/StarsImageComponent/Sources/StarsImageComponent.swift", _PREMIUM_BADGE),
+    (_UI_COMPONENTS + "Stars/StarsTransactionScreen/Sources/StarsTransactionScreen.swift", (("9671ff", 1),)),
+)
+PREMIUM_STAR = _UI_COMPONENTS + "Premium/PremiumStarComponent/Sources/PremiumStarComponent.swift"
+PREMIUM_PRIVACY_ICON = _SETTINGS_UI + "Privacy and Security/SelectivePrivacySettingsController.swift"
+# (file, text, replacement, how many times).
+PREMIUM_EDITS = (
+    (PREMIUM_STAR, src(" " * 20, """
+        } else {
+            particleSystem.particleColorVariation = SCNVector4Make(0.12, 0.03, 0.035, 0.0)
+            if animated {
+                particleSystem.particleColor = UIColor(rgb: 0xaa69ea)
+            }
+        }
+    """), src(" " * 20, """
+        } else {
+            // pluma: the sparkles in the palette from the first frame, not the scene's purple, and
+            // without a spread of hue that would take them out of it.
+            particleSystem.particleColorVariation = SCNVector4Make(0.0, 0.03, 0.035, 0.0)
+            particleSystem.particleColor = UIColor(rgb: 0x5b7a5e)
+        }
+    """), 1),
+    (PREMIUM_PRIVACY_ICON, src(" " * 8, """
+        if let gradientImage = UIImage(bundleImageName: "Premium/PremiumIconBackground"), let cgImage = gradientImage.cgImage {
+            context.draw(cgImage, in: CGRect(origin: CGPoint(), size: size))
+        }
+    """), src(" " * 8, """
+        // pluma: Premium's gradient in the palette, not Telegram's picture of it.
+        let colors: [CGColor] = [UIColor(rgb: 0x6f8f72).cgColor, UIColor(rgb: 0x5b7a5e).cgColor, UIColor(rgb: 0x4f6e52).cgColor]
+        var locations: [CGFloat] = [0.0, 0.5, 1.0]
+        if let gradient = CGGradient(colorsSpace: deviceColorSpace, colors: colors as CFArray, locations: &locations) {
+            context.drawLinearGradient(gradient, start: CGPoint(x: 0.0, y: 0.0), end: CGPoint(x: size.width, y: size.height), options: CGGradientDrawingOptions())
+        }
+    """), 1),
+)
+# What each of them takes away, which must not come back elsewhere in its file.
+PREMIUM_GONE = {
+    PREMIUM_STAR: ("0xaa69ea", "the star's sparkles are Telegram's purple"),
+    PREMIUM_PRIVACY_ICON: ('"Premium/PremiumIconBackground"', "the Premium category draws Telegram's gradient"),
+}
+PREMIUM_COLOR = re.compile(r"\b0x([0-9A-Fa-f]{6})\b")
+UPSTREAM_PATHS += tuple(sorted(({rel for rel, _ in PREMIUM_COLORS} | {rel for rel, _, _, _ in PREMIUM_EDITS})
+                               - set(UPSTREAM_PATHS)))
+
+
+def premium_shade(color):
+    """Pluma's shade of a Premium colour of Telegram's, in the case upstream writes it."""
+    pluma = PREMIUM_PLUMA[color.lower()]
+    return pluma.upper() if color.isupper() else pluma.lower()
+
+
+def patch_premium_colors(tree):
+    for rel, colors in PREMIUM_COLORS:
+        text = tree.read(rel)
+        expected = dict(colors)
+        found = {}
+
+        def recolor(m):
+            color = m.group(1)
+            if color.lower() not in PREMIUM_PLUMA:
+                return m.group(0)
+            found[color] = found.get(color, 0) + 1
+            if color not in expected:
+                return m.group(0)
+            return "0x" + premium_shade(color)
+
+        new = PREMIUM_COLOR.sub(recolor, text)
+        if found != expected:
+            raise PatchError(f"{rel}: Premium's colours {sorted(found.items())}, expected {sorted(expected.items())}; "
+                             "upstream changed them")
+        tree.write(rel, new)
+    for rel, old, new, count in PREMIUM_EDITS:
+        tree.replace_lines(rel, old, new, count=count)
+
+
+def verify_premium_colors(tree):
+    for rel, colors in PREMIUM_COLORS:
+        text = tree.read(rel)
+        left = sorted({c.lower() for c in PREMIUM_COLOR.findall(text)} & set(PREMIUM_PLUMA))
+        if left:
+            raise PatchError(f"{rel}: Premium's colour 0x{left[0]} of Telegram's is still there")
+        shades = {}
+        for color, count in colors:
+            shades[premium_shade(color)] = shades.get(premium_shade(color), 0) + count
+        for shade, count in shades.items():
+            if len(re.findall(rf"\b0x{shade}\b", text)) < count:
+                raise PatchError(f"{rel}: fewer than {count} literals of 0x{shade}, Pluma's shade of Premium's colours")
+    for rel, old, new, count in PREMIUM_EDITS:
+        text = tree.read(rel)
+        if re.search(lines_pattern(old), text) or text.count(new) != count:
+            raise PatchError(f"{rel}: {new.strip().splitlines()[0][:60]!r} is not where the patch put it")
+        # Nor anywhere else in the file.
+        gone, what = PREMIUM_GONE[rel]
+        if re.search(re.escape(gone), text, re.IGNORECASE):
+            raise PatchError(f"{rel}: {what} again")
 
 
 # --- CDN downloads: MtProtoKit and the HTTPS CDN (tasks 102, 107) -------------

@@ -1842,6 +1842,16 @@ DAMAGE = (
      "        self.webProxyActive = ValuePromise<Bool>(initialWebProxyActive)\n"),
     (patch.BUILD_CONFIG, "    dataDict[@\"tz_offset\"] = @((int)tzOffset);\n", "    dataDict[@\"tz_offset\"] = @(tzOffset);\n"),
     (patch.BUILD_CONFIG, "    if (signatureDict != nil) {\n", "    dataDict[@\"pluma_cdn\"] = @0;\n    if (signatureDict != nil) {\n"),
+    # Premium's colours: one more or one fewer than the table has, and the
+    # places drawn without a literal of them.
+    ("submodules/PremiumUI/Sources/PremiumPrivacyScreen.swift", "                UIColor(rgb: 0xe46ace)\n",
+     "                UIColor(rgb: 0xe46ace),\n                UIColor(rgb: 0xe46ace)\n"),
+    ("submodules/PremiumUI/Sources/LimitsPageComponent.swift", "                UIColor(rgb: 0x5ea4a4)\n", "                UIColor.systemTeal\n"),
+    ("submodules/PremiumUI/Sources/GiftOptionItem.swift", "UIColor(rgb: 0xd569ec)", "UIColor(rgb: 0xb56eec)"),
+    (patch.PREMIUM_STAR, "                            particleSystem.particleColor = UIColor(rgb: 0xaa69ea)\n",
+     "                            particleSystem.particleColor = UIColor(rgb: 0xaa69eb)\n"),
+    (patch.PREMIUM_PRIVACY_ICON, 'UIImage(bundleImageName: "Premium/PremiumIconBackground")',
+     'UIImage(bundleImageName: "Premium/PremiumIconBackground2")'),
 )
 
 
@@ -2839,6 +2849,73 @@ class UpstreamTest(unittest.TestCase):
              '"Group Call"\n'),
             (patch.PROMPT_UI, "title: presentationData.strings.AuthConfirmation_LogIn,", 'title: "Sign In",'),
             (patch.STRINGS, '"Pluma.Chat.EphemeralMessageInfo" = "Only you', '"Pluma.Chat.EphemeralMessageInfo" = "You'),
+        ):
+            with self.subTest(rel=rel, new=new[:60]):
+                self.tearDown()
+                tree, c = self.run_patch()
+                text = tree.read(rel)
+                self.assertEqual(text.count(old), 1)
+                tree.write(rel, text.replace(old, new))
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.verify(tree, c)
+                self.assertIn(pathlib.PurePath(rel).name, str(e.exception))
+
+    def test_premium_colors(self):
+        # Each Premium colour of Telegram's in the table becomes its shade,
+        # nothing else in those files changes, and no such colour is left.
+        with unittest.mock.patch.object(patch, "patch_premium_colors", lambda tree: None):
+            tree = RecordingTree(self.root, self.written)
+            patch.patch(tree, config())
+        rels = sorted({rel for rel, _ in patch.PREMIUM_COLORS} | {rel for rel, _, _, _ in patch.PREMIUM_EDITS})
+        before = {rel: tree.read(rel) for rel in rels}
+        self.tearDown()
+        tree, _ = self.run_patch()
+        for rel, colors in patch.PREMIUM_COLORS:
+            expected = before[rel]
+            for color, count in colors:
+                self.assertEqual(len(re.findall(rf"\b0x{color}\b", expected)), count, (rel, color))
+                expected = re.sub(rf"\b0x{color}\b", "0x" + patch.premium_shade(color), expected)
+            for r, old, new, count in patch.PREMIUM_EDITS:
+                if r == rel:
+                    expected = expected.replace(old, new)
+            self.assertEqual(tree.read(rel), expected, rel)
+            found = {c.lower() for c in patch.PREMIUM_COLOR.findall(tree.read(rel))}
+            self.assertFalse(found & set(patch.PREMIUM_PLUMA), rel)
+        # The button's gradient, the badge and the star in the palette.
+        intro = tree.read("submodules/PremiumUI/Sources/PremiumIntroScreen.swift")
+        self.assertIn("let buttonGradientColors = [\n                    UIColor(rgb: 0x6f8f72),\n                    "
+                      "UIColor(rgb: 0x6f8f72),\n                    UIColor(rgb: 0x5b7a5e),\n                    "
+                      "UIColor(rgb: 0x4f6e52)\n                ]", intro)
+        self.assertIn("colors: [\n                            UIColor(rgb: 0x6f8f72),\n                            "
+                      "UIColor(rgb: 0x5b7a5e),\n                            UIColor(rgb: 0x4f6e52)\n", intro)
+        settings = tree.read("submodules/TelegramPresentationData/Sources/Resources/PresentationResourcesSettings.swift")
+        self.assertIn("            UIColor(rgb: 0x6f8f72).cgColor,\n" * 2 + "            UIColor(rgb: 0x5b7a5e).cgColor,\n" * 2
+                      + "            UIColor(rgb: 0x5b7a5e).cgColor\n        ]\n", settings)
+        # Telegram Stars keep their gold, the other gifts their colours.
+        self.assertIn("UIColor(rgb: 0xe57d02),\n                UIColor(rgb: 0xf09903),",
+                      tree.read("submodules/PremiumUI/Sources/CreateGiveawayHeaderItem.swift"))
+        self.assertIn("colors = [UIColor(rgb: 0xd569ec), UIColor(rgb: 0xe0a2f3)]",
+                      tree.read("submodules/PremiumUI/Sources/GiftOptionItem.swift"))
+        star = tree.read(patch.PREMIUM_STAR)
+        self.assertIn("particleSystem.particleColor = UIColor(rgb: 0x5b7a5e)\n", star)
+        self.assertNotIn("0xaa69ea", star)
+        self.assertIn("UIColor(rgb: 0xe57d02)", star)
+        privacy = tree.read(patch.PREMIUM_PRIVACY_ICON)
+        self.assertNotIn("PremiumIconBackground", privacy)
+        self.assertEqual(privacy.count("context.drawLinearGradient(gradient, "), 1)
+
+    def test_premium_colors_check(self):
+        # The check finds a Premium colour of Telegram's put back, the
+        # sparkles' purple and the picture of the gradient.
+        for rel, old, new in (
+            ("submodules/PremiumUI/Sources/PremiumIntroScreen.swift", "let buttonGradientColors = [\n                    UIColor(rgb: 0x6f8f72)",
+             "let buttonGradientColors = [\n                    UIColor(rgb: 0x0077ff)"),
+            ("submodules/StatisticsUI/Sources/BoostHeaderItem.swift", "let buttonColor = UIColor(rgb: 0x5b7a5e)",
+             "let buttonColor = UIColor(rgb: 0x908EFF)"),
+            (patch.PREMIUM_STAR, "particleSystem.particleColor = UIColor(rgb: 0x5b7a5e)\n",
+             "particleSystem.particleColor = UIColor(rgb: 0xaa69ea)\n"),
+            (patch.PREMIUM_PRIVACY_ICON, "        // pluma: Premium's gradient in the palette, not Telegram's picture of it.\n",
+             '        let _ = UIImage(bundleImageName: "Premium/PremiumIconBackground")\n'),
         ):
             with self.subTest(rel=rel, new=new[:60]):
                 self.tearDown()
@@ -3927,6 +4004,76 @@ class AppColorsTest(unittest.TestCase):
         for _, old, new, _ in patch.UPSTREAM_TEXT_EDITS:
             self.assertIn('"', old)
             self.assertNotRegex(new, r'(?:title|text|placeholder|append)[:(] ?"[A-Za-z]')
+
+
+class PremiumColorsTest(unittest.TestCase):
+    @staticmethod
+    def hue(color):
+        import colorsys
+        r, g, b = (int(color[i:i + 2], 16) / 255 for i in (0, 2, 4))
+        return colorsys.rgb_to_hsv(r, g, b)[0] * 360
+
+    def test_shades(self):
+        # The shades are the palette's, in order from the dark sage to the
+        # light, each Telegram colour in one of them, by its hue.
+        palette = {c for s in patch.CALL_BACKGROUND_SETS for c in s}
+        shades = [pluma for pluma, _ in patch.PREMIUM_SHADES]
+        self.assertEqual(shades, ["3A4A3C", "4F6E52", "5B7A5E", "6F8F72", "7FA082"])
+        self.assertLessEqual(set(shades), palette)
+        colors = [c for _, cs in patch.PREMIUM_SHADES for c in cs]
+        self.assertEqual(len(colors), len(set(colors)))
+        bands = {"3A4A3C": (0, 60), "4F6E52": (300, 360), "5B7A5E": (240, 300), "6F8F72": (200, 240), "7FA082": (60, 200)}
+        for pluma, cs in patch.PREMIUM_SHADES:
+            low, high = bands[pluma]
+            for c in cs:
+                self.assertEqual(c, c.lower())
+                self.assertTrue(low <= self.hue(c) < high, (pluma, c, round(self.hue(c))))
+
+    def test_table(self):
+        rels = [rel for rel, _ in patch.PREMIUM_COLORS]
+        self.assertEqual(len(rels), len(set(rels)))
+        for rel, colors in patch.PREMIUM_COLORS:
+            self.assertIn(rel, patch.UPSTREAM_PATHS)
+            self.assertFalse(rel.startswith(patch.CALL_UI_DIRS), rel)
+            names = [c for c, _ in colors]
+            self.assertEqual(len(names), len(set(names)), rel)
+            for color, count in colors:
+                self.assertIn(color.lower(), patch.PREMIUM_PLUMA, (rel, color))
+                self.assertGreater(count, 0)
+                self.assertIn(color, (color.lower(), color.upper()))
+        for rel, old, new, count in patch.PREMIUM_EDITS:
+            self.assertIn(rel, patch.UPSTREAM_PATHS)
+            self.assertNotEqual(old, new)
+            self.assertIn("// pluma:", new)
+            for c in patch.PREMIUM_COLOR.findall(new):
+                self.assertIn(c.upper(), {pluma for pluma, _ in patch.PREMIUM_SHADES}, (rel, c))
+        self.assertEqual(set(patch.PREMIUM_GONE), {rel for rel, _, _, _ in patch.PREMIUM_EDITS})
+        self.assertEqual(patch.premium_shade("6B93FF"), "6F8F72")
+        self.assertEqual(patch.premium_shade("6b93ff"), "6f8f72")
+
+    def test_upstream_changed(self):
+        # A Premium colour the table does not expect stops the patch, and so
+        # does one fewer.
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            (root / "Telegram").mkdir()
+            (root / patch.APP_BUILD).write_text("")
+            (root / patch.VERSIONS).write_text("{}")
+            tree = patch.Tree(root)
+            rel, colors = next((rel, colors) for rel, colors in patch.PREMIUM_COLORS if colors == (("9671ff", 1),))
+            tree.write(rel, "let a = UIColor(rgb: 0x9671ff)\nlet b = UIColor(rgb: 0x6b93ff)\n")
+            with unittest.mock.patch.object(patch, "PREMIUM_COLORS", ((rel, colors),)), \
+                    unittest.mock.patch.object(patch, "PREMIUM_EDITS", ()):
+                with self.assertRaises(patch.PatchError) as e:
+                    patch.patch_premium_colors(tree)
+                self.assertIn("6b93ff", str(e.exception))
+                tree.write(rel, "let a = UIColor(rgb: 0x2a9ef1)\n")
+                with self.assertRaises(patch.PatchError):
+                    patch.patch_premium_colors(tree)
+                tree.write(rel, "let a = UIColor(rgb: 0x9671ff)\nlet b = UIColor(rgb: 0x2a9ef1)\n")
+                patch.patch_premium_colors(tree)
+                self.assertEqual(tree.read(rel), "let a = UIColor(rgb: 0x5b7a5e)\nlet b = UIColor(rgb: 0x2a9ef1)\n")
+                patch.verify_premium_colors(tree)
 
 
 class CallColorsTest(unittest.TestCase):
